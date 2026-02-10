@@ -86,7 +86,15 @@ type TelemetryIn struct {
 
 	// GPU Passthrough stats
 	GPUVendor       string `json:"gpu_vendor,omitempty"`       // "intel", "amd", "nvidia"
+	GPUModel        string `json:"gpu_model,omitempty"`        // e.g., "Intel Arc Graphics"
 	GPUPassthrough  string `json:"gpu_passthrough,omitempty"`  // "igpu", "dgpu", "vgpu", "none"
+
+	// CPU stats
+	CPUVendor string `json:"cpu_vendor,omitempty"` // "intel", "amd", "arm"
+	CPUModel  string `json:"cpu_model,omitempty"`  // e.g., "Intel Core Ultra 7 155H"
+
+	// RAM stats
+	RAMSpeed string `json:"ram_speed,omitempty"` // e.g., "4800" (MT/s)
 
 	// Performance metrics
 	InstallDuration int `json:"install_duration,omitempty"` // Seconds
@@ -114,7 +122,11 @@ type TelemetryOut struct {
 
 	// Extended fields
 	GPUVendor       string `json:"gpu_vendor,omitempty"`
+	GPUModel        string `json:"gpu_model,omitempty"`
 	GPUPassthrough  string `json:"gpu_passthrough,omitempty"`
+	CPUVendor       string `json:"cpu_vendor,omitempty"`
+	CPUModel        string `json:"cpu_model,omitempty"`
+	RAMSpeed        string `json:"ram_speed,omitempty"`
 	InstallDuration int    `json:"install_duration,omitempty"`
 	ErrorCategory   string `json:"error_category,omitempty"`
 }
@@ -127,7 +139,11 @@ type TelemetryStatusUpdate struct {
 	InstallDuration int    `json:"install_duration,omitempty"`
 	ErrorCategory   string `json:"error_category,omitempty"`
 	GPUVendor       string `json:"gpu_vendor,omitempty"`
+	GPUModel        string `json:"gpu_model,omitempty"`
 	GPUPassthrough  string `json:"gpu_passthrough,omitempty"`
+	CPUVendor       string `json:"cpu_vendor,omitempty"`
+	CPUModel        string `json:"cpu_model,omitempty"`
+	RAMSpeed        string `json:"ram_speed,omitempty"`
 }
 
 type PBClient struct {
@@ -380,7 +396,11 @@ func (p *PBClient) UpsertTelemetry(ctx context.Context, payload TelemetryOut) er
 		InstallDuration: payload.InstallDuration,
 		ErrorCategory:   payload.ErrorCategory,
 		GPUVendor:       payload.GPUVendor,
+		GPUModel:        payload.GPUModel,
 		GPUPassthrough:  payload.GPUPassthrough,
+		CPUVendor:       payload.CPUVendor,
+		CPUModel:        payload.CPUModel,
+		RAMSpeed:        payload.RAMSpeed,
 	}
 	return p.UpdateTelemetryStatus(ctx, recordID, update)
 }
@@ -548,10 +568,13 @@ var (
 	}
 
 	// Allowed values for 'gpu_vendor' field
-	allowedGPUVendor = map[string]bool{"intel": true, "amd": true, "nvidia": true, "": true}
+	allowedGPUVendor = map[string]bool{"intel": true, "amd": true, "nvidia": true, "unknown": true, "": true}
 
 	// Allowed values for 'gpu_passthrough' field
-	allowedGPUPassthrough = map[string]bool{"igpu": true, "dgpu": true, "vgpu": true, "none": true, "": true}
+	allowedGPUPassthrough = map[string]bool{"igpu": true, "dgpu": true, "vgpu": true, "none": true, "unknown": true, "": true}
+
+	// Allowed values for 'cpu_vendor' field
+	allowedCPUVendor = map[string]bool{"intel": true, "amd": true, "arm": true, "apple": true, "qualcomm": true, "unknown": true, "": true}
 
 	// Allowed values for 'error_category' field
 	allowedErrorCategory = map[string]bool{
@@ -587,8 +610,23 @@ func validate(in *TelemetryIn) error {
 
 	// Sanitize extended fields
 	in.GPUVendor = strings.ToLower(sanitizeShort(in.GPUVendor, 16))
+	in.GPUModel = sanitizeShort(in.GPUModel, 64)
 	in.GPUPassthrough = strings.ToLower(sanitizeShort(in.GPUPassthrough, 16))
+	in.CPUVendor = strings.ToLower(sanitizeShort(in.CPUVendor, 16))
+	in.CPUModel = sanitizeShort(in.CPUModel, 64)
+	in.RAMSpeed = sanitizeShort(in.RAMSpeed, 16)
 	in.ErrorCategory = strings.ToLower(sanitizeShort(in.ErrorCategory, 32))
+
+	// Default empty values to "unknown" for consistency
+	if in.GPUVendor == "" {
+		in.GPUVendor = "unknown"
+	}
+	if in.GPUPassthrough == "" {
+		in.GPUPassthrough = "unknown"
+	}
+	if in.CPUVendor == "" {
+		in.CPUVendor = "unknown"
+	}
 
 	// IMPORTANT: "error" must be short and not contain identifiers/logs
 	in.Error = sanitizeShort(in.Error, 120)
@@ -617,6 +655,9 @@ func validate(in *TelemetryIn) error {
 	}
 	if !allowedGPUPassthrough[in.GPUPassthrough] {
 		return errors.New("invalid gpu_passthrough (must be 'igpu', 'dgpu', 'vgpu', 'none', or empty)")
+	}
+	if !allowedCPUVendor[in.CPUVendor] {
+		return errors.New("invalid cpu_vendor (must be 'intel', 'amd', 'arm', 'unknown', or empty)")
 	}
 	if !allowedErrorCategory[in.ErrorCategory] {
 		return errors.New("invalid error_category")
@@ -993,7 +1034,11 @@ func main() {
 			Error:           in.Error,
 			ExitCode:        in.ExitCode,
 			GPUVendor:       in.GPUVendor,
+			GPUModel:        in.GPUModel,
 			GPUPassthrough:  in.GPUPassthrough,
+			CPUVendor:       in.CPUVendor,
+			CPUModel:        in.CPUModel,
+			RAMSpeed:        in.RAMSpeed,
 			InstallDuration: in.InstallDuration,
 			ErrorCategory:   in.ErrorCategory,
 		}
