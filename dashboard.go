@@ -886,6 +886,19 @@ func DashboardHTML() string {
         .status-badge.failed { background: rgba(248, 81, 73, 0.2); color: var(--accent-red); }
         .status-badge.installing { background: rgba(210, 153, 34, 0.2); color: var(--accent-yellow); }
         
+        th.sortable {
+            cursor: pointer;
+            user-select: none;
+            transition: background-color 0.2s;
+        }
+        th.sortable:hover {
+            background: rgba(88, 166, 255, 0.1);
+        }
+        th.sort-asc, th.sort-desc {
+            background: rgba(88, 166, 255, 0.15);
+            color: var(--accent-blue);
+        }
+        
         .loading {
             display: flex;
             justify-content: center;
@@ -1233,21 +1246,22 @@ func DashboardHTML() string {
                 <option value="">All OS</option>
             </select>
         </div>
-        <table>
+        <table id="installTable">
             <thead>
                 <tr>
-                    <th>App</th>
-                    <th>Status</th>
-                    <th>OS</th>
-                    <th>Type</th>
-                    <th>Method</th>
+                    <th data-sort="nsapp" class="sortable">App</th>
+                    <th data-sort="status" class="sortable">Status</th>
+                    <th data-sort="os_type" class="sortable">OS</th>
+                    <th data-sort="type" class="sortable">Type</th>
+                    <th data-sort="method" class="sortable">Method</th>
                     <th>Resources</th>
-                    <th>Exit Code</th>
+                    <th data-sort="exit_code" class="sortable">Exit Code</th>
                     <th>Error</th>
+                    <th data-sort="created" class="sortable sort-desc">Created ▼</th>
                 </tr>
             </thead>
             <tbody id="recordsTable">
-                <tr><td colspan="8" class="loading">Loading...</td></tr>
+                <tr><td colspan="9" class="loading">Loading...</td></tr>
             </tbody>
         </table>
         <div class="pagination">
@@ -1275,6 +1289,7 @@ func DashboardHTML() string {
         let currentPage = 1;
         let totalPages = 1;
         let currentTheme = localStorage.getItem('theme') || 'dark';
+        let currentSort = { field: 'created', dir: 'desc' };
         
         // Apply saved theme on load
         if (currentTheme === 'light') {
@@ -1411,6 +1426,59 @@ func DashboardHTML() string {
         function escapeHtml(str) {
             if (!str) return '';
             return str.replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/>/g, '&gt;').replace(/"/g, '&quot;');
+        }
+        
+        function formatTimestamp(ts) {
+            if (!ts) return '-';
+            const d = new Date(ts);
+            const now = new Date();
+            const diff = now - d;
+            
+            // Less than 1 minute ago
+            if (diff < 60000) return 'just now';
+            // Less than 1 hour ago
+            if (diff < 3600000) return Math.floor(diff / 60000) + 'm ago';
+            // Less than 24 hours ago
+            if (diff < 86400000) return Math.floor(diff / 3600000) + 'h ago';
+            // Less than 7 days ago
+            if (diff < 604800000) return Math.floor(diff / 86400000) + 'd ago';
+            
+            // Older - show date
+            return d.toLocaleDateString() + ' ' + d.toLocaleTimeString([], {hour: '2-digit', minute:'2-digit'});
+        }
+        
+        function initSortableHeaders() {
+            document.querySelectorAll('th.sortable').forEach(th => {
+                th.style.cursor = 'pointer';
+                th.addEventListener('click', () => sortByColumn(th.dataset.sort));
+            });
+        }
+        
+        function sortByColumn(field) {
+            // Toggle direction if same field
+            if (currentSort.field === field) {
+                currentSort.dir = currentSort.dir === 'asc' ? 'desc' : 'asc';
+            } else {
+                currentSort.field = field;
+                currentSort.dir = 'desc';
+            }
+            
+            // Update header indicators
+            document.querySelectorAll('th.sortable').forEach(th => {
+                th.classList.remove('sort-asc', 'sort-desc');
+                const arrow = th.textContent.replace(/[▲▼]/g, '').trim();
+                th.textContent = arrow;
+            });
+            
+            const activeTh = document.querySelector('th[data-sort=\"' + field + '\"]');
+            if (activeTh) {
+                activeTh.classList.add(currentSort.dir === 'asc' ? 'sort-asc' : 'sort-desc');
+                activeTh.textContent = activeTh.textContent + ' ' + (currentSort.dir === 'asc' ? '▲' : '▼');
+            }
+            
+            // Re-fetch with new sort
+            currentPage = 1;
+            fetchPaginatedRecords();
         }
         
         function updateCharts(data) {
@@ -1551,6 +1619,9 @@ func DashboardHTML() string {
                 if (status) url += '&status=' + encodeURIComponent(status);
                 if (app) url += '&app=' + encodeURIComponent(app);
                 if (os) url += '&os=' + encodeURIComponent(os);
+                if (currentSort.field) {
+                    url += '&sort=' + (currentSort.dir === 'desc' ? '-' : '') + currentSort.field;
+                }
                 
                 const response = await fetch(url);
                 if (!response.ok) throw new Error('Failed to fetch records');
@@ -1593,6 +1664,7 @@ func DashboardHTML() string {
                 const resources = r.core_count || r.ram_size || r.disk_size 
                     ? (r.core_count || '?') + 'C / ' + (r.ram_size ? Math.round(r.ram_size/1024) + 'G' : '?') + ' / ' + (r.disk_size || '?') + 'GB'
                     : '-';
+                const created = r.created ? formatTimestamp(r.created) : '-';
                 return '<tr>' +
                     '<td><strong>' + escapeHtml(r.nsapp || '-') + '</strong></td>' +
                     '<td><span class="status-badge ' + statusClass + '">' + escapeHtml(r.status || '-') + '</span></td>' +
@@ -1603,6 +1675,7 @@ func DashboardHTML() string {
                     '<td>' + (r.exit_code || '-') + '</td>' +
                     '<td title="' + escapeHtml(r.error || '') + '">' + 
                         escapeHtml((r.error || '').slice(0, 40)) + (r.error && r.error.length > 40 ? '...' : '') + '</td>' +
+                    '<td title="' + escapeHtml(r.created || '') + '">' + created + '</td>' +
                 '</tr>';
             }).join('');
         }
@@ -1657,6 +1730,7 @@ func DashboardHTML() string {
         
         // Initial load
         refreshData();
+        initSortableHeaders();
         
         // Refresh on time range change
         document.getElementById('timeRange').addEventListener('change', refreshData);

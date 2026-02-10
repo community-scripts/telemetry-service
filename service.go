@@ -280,7 +280,7 @@ func (p *PBClient) UpdateTelemetryStatus(ctx context.Context, recordID string, u
 }
 
 // FetchRecordsPaginated retrieves records with pagination and optional filters
-func (p *PBClient) FetchRecordsPaginated(ctx context.Context, page, limit int, status, app, osType string) ([]TelemetryRecord, int, error) {
+func (p *PBClient) FetchRecordsPaginated(ctx context.Context, page, limit int, status, app, osType, sortField string) ([]TelemetryRecord, int, error) {
 	if err := p.ensureAuth(ctx); err != nil {
 		return nil, 0, err
 	}
@@ -302,8 +302,26 @@ func (p *PBClient) FetchRecordsPaginated(ctx context.Context, page, limit int, s
 		filterStr = "&filter=" + strings.Join(filters, "&&")
 	}
 
-	reqURL := fmt.Sprintf("%s/api/collections/%s/records?sort=-created&page=%d&perPage=%d%s",
-		p.baseURL, p.targetColl, page, limit, filterStr)
+	// Handle sort parameter (default: -created)
+	sort := "-created"
+	if sortField != "" {
+		// Validate sort field to prevent injection
+		allowedFields := map[string]bool{
+			"created": true, "-created": true,
+			"nsapp": true, "-nsapp": true,
+			"status": true, "-status": true,
+			"os_type": true, "-os_type": true,
+			"type": true, "-type": true,
+			"method": true, "-method": true,
+			"exit_code": true, "-exit_code": true,
+		}
+		if allowedFields[sortField] {
+			sort = sortField
+		}
+	}
+
+	reqURL := fmt.Sprintf("%s/api/collections/%s/records?sort=%s&page=%d&perPage=%d%s",
+		p.baseURL, p.targetColl, sort, page, limit, filterStr)
 
 	req, err := http.NewRequestWithContext(ctx, http.MethodGet, reqURL, nil)
 	if err != nil {
@@ -846,6 +864,7 @@ func main() {
 		status := r.URL.Query().Get("status")
 		app := r.URL.Query().Get("app")
 		osType := r.URL.Query().Get("os")
+		sort := r.URL.Query().Get("sort")
 
 		if p := r.URL.Query().Get("page"); p != "" {
 			fmt.Sscanf(p, "%d", &page)
@@ -866,7 +885,7 @@ func main() {
 		ctx, cancel := context.WithTimeout(r.Context(), 10*time.Second)
 		defer cancel()
 
-		records, total, err := pb.FetchRecordsPaginated(ctx, page, limit, status, app, osType)
+		records, total, err := pb.FetchRecordsPaginated(ctx, page, limit, status, app, osType, sort)
 		if err != nil {
 			log.Printf("records fetch failed: %v", err)
 			http.Error(w, "failed to fetch records", http.StatusInternalServerError)
