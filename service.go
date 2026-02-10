@@ -62,7 +62,7 @@ type Config struct {
 type TelemetryIn struct {
 	// Required
 	RandomID string `json:"random_id"`         // Session UUID
-	Type     string `json:"type"`              // "lxc" or "vm"
+	Type     string `json:"type"`              // "lxc", "vm", "tool", "addon"
 	NSAPP    string `json:"nsapp"`             // Application name (e.g., "jellyfin")
 	Status   string `json:"status"`            // "installing", "success", "failed", "unknown"
 
@@ -81,6 +81,24 @@ type TelemetryIn struct {
 	Method   string `json:"method,omitempty"`    // "default", "advanced"
 	Error    string `json:"error,omitempty"`     // Error description (max 120 chars)
 	ExitCode int    `json:"exit_code,omitempty"` // 0-255
+
+	// === NEW FIELDS ===
+
+	// Tool telemetry (type="tool")
+	ToolName string `json:"tool_name,omitempty"` // "microcode", "lxc-update", "post-pve-install", etc.
+
+	// Addon telemetry (type="addon")
+	ParentCT string `json:"parent_ct,omitempty"` // Parent container name (e.g., "jellyfin")
+
+	// GPU Passthrough stats
+	GPUVendor       string `json:"gpu_vendor,omitempty"`       // "intel", "amd", "nvidia"
+	GPUPassthrough  string `json:"gpu_passthrough,omitempty"`  // "igpu", "dgpu", "vgpu", "none"
+
+	// Performance metrics
+	InstallDuration int `json:"install_duration,omitempty"` // Seconds
+
+	// Error categorization
+	ErrorCategory string `json:"error_category,omitempty"` // "network", "storage", "dependency", "permission", "timeout", "unknown"
 }
 
 // TelemetryOut is sent to PocketBase (matches _dev_telemetry_data collection)
@@ -99,13 +117,25 @@ type TelemetryOut struct {
 	Method    string `json:"method,omitempty"`
 	Error     string `json:"error,omitempty"`
 	ExitCode  int    `json:"exit_code,omitempty"`
+
+	// Extended fields
+	ToolName        string `json:"tool_name,omitempty"`
+	ParentCT        string `json:"parent_ct,omitempty"`
+	GPUVendor       string `json:"gpu_vendor,omitempty"`
+	GPUPassthrough  string `json:"gpu_passthrough,omitempty"`
+	InstallDuration int    `json:"install_duration,omitempty"`
+	ErrorCategory   string `json:"error_category,omitempty"`
 }
 
 // TelemetryStatusUpdate contains only fields needed for status updates
 type TelemetryStatusUpdate struct {
-	Status   string `json:"status"`
-	Error    string `json:"error,omitempty"`
-	ExitCode int    `json:"exit_code"`
+	Status          string `json:"status"`
+	Error           string `json:"error,omitempty"`
+	ExitCode        int    `json:"exit_code"`
+	InstallDuration int    `json:"install_duration,omitempty"`
+	ErrorCategory   string `json:"error_category,omitempty"`
+	GPUVendor       string `json:"gpu_vendor,omitempty"`
+	GPUPassthrough  string `json:"gpu_passthrough,omitempty"`
 }
 
 type PBClient struct {
@@ -332,11 +362,15 @@ func (p *PBClient) UpsertTelemetry(ctx context.Context, payload TelemetryOut) er
 		return p.CreateTelemetry(ctx, payload)
 	}
 
-	// Update only status, error, and exit_code
+	// Update only status, error, exit_code, and new metrics fields
 	update := TelemetryStatusUpdate{
-		Status:   payload.Status,
-		Error:    payload.Error,
-		ExitCode: payload.ExitCode,
+		Status:          payload.Status,
+		Error:           payload.Error,
+		ExitCode:        payload.ExitCode,
+		InstallDuration: payload.InstallDuration,
+		ErrorCategory:   payload.ErrorCategory,
+		GPUVendor:       payload.GPUVendor,
+		GPUPassthrough:  payload.GPUPassthrough,
 	}
 	return p.UpdateTelemetryStatus(ctx, recordID, update)
 }
@@ -491,7 +525,7 @@ func getClientIP(r *http.Request, pt *ProxyTrust) net.IP {
 
 var (
 	// Allowed values for 'type' field
-	allowedType = map[string]bool{"lxc": true, "vm": true}
+	allowedType = map[string]bool{"lxc": true, "vm": true, "tool": true, "addon": true}
 
 	// Allowed values for 'status' field
 	allowedStatus = map[string]bool{"installing": true, "success": true, "failed": true, "unknown": true}
@@ -501,6 +535,18 @@ var (
 		"debian": true, "ubuntu": true, "alpine": true, "devuan": true,
 		"fedora": true, "rocky": true, "alma": true, "centos": true,
 		"opensuse": true, "gentoo": true, "openeuler": true,
+	}
+
+	// Allowed values for 'gpu_vendor' field
+	allowedGPUVendor = map[string]bool{"intel": true, "amd": true, "nvidia": true, "": true}
+
+	// Allowed values for 'gpu_passthrough' field
+	allowedGPUPassthrough = map[string]bool{"igpu": true, "dgpu": true, "vgpu": true, "none": true, "": true}
+
+	// Allowed values for 'error_category' field
+	allowedErrorCategory = map[string]bool{
+		"network": true, "storage": true, "dependency": true, "permission": true,
+		"timeout": true, "config": true, "resource": true, "unknown": true, "": true,
 	}
 )
 
@@ -529,6 +575,13 @@ func validate(in *TelemetryIn) error {
 	in.PveVer = sanitizeShort(in.PveVer, 32)
 	in.Method = sanitizeShort(in.Method, 32)
 
+	// Sanitize new fields
+	in.ToolName = sanitizeShort(in.ToolName, 64)
+	in.ParentCT = sanitizeShort(in.ParentCT, 64)
+	in.GPUVendor = strings.ToLower(sanitizeShort(in.GPUVendor, 16))
+	in.GPUPassthrough = strings.ToLower(sanitizeShort(in.GPUPassthrough, 16))
+	in.ErrorCategory = strings.ToLower(sanitizeShort(in.ErrorCategory, 32))
+
 	// IMPORTANT: "error" must be short and not contain identifiers/logs
 	in.Error = sanitizeShort(in.Error, 120)
 
@@ -537,20 +590,36 @@ func validate(in *TelemetryIn) error {
 		return errors.New("missing required fields: random_id, type, nsapp, status")
 	}
 
+	// Normalize common typos for backwards compatibility
+	if in.Status == "sucess" {
+		in.Status = "success"
+	}
+
 	// Validate enums
 	if !allowedType[in.Type] {
-		return errors.New("invalid type (must be 'lxc' or 'vm')")
+		return errors.New("invalid type (must be 'lxc', 'vm', 'tool', or 'addon')")
 	}
 	if !allowedStatus[in.Status] {
 		return errors.New("invalid status")
+	}
+
+	// Validate new enum fields
+	if !allowedGPUVendor[in.GPUVendor] {
+		return errors.New("invalid gpu_vendor (must be 'intel', 'amd', 'nvidia', or empty)")
+	}
+	if !allowedGPUPassthrough[in.GPUPassthrough] {
+		return errors.New("invalid gpu_passthrough (must be 'igpu', 'dgpu', 'vgpu', 'none', or empty)")
+	}
+	if !allowedErrorCategory[in.ErrorCategory] {
+		return errors.New("invalid error_category")
 	}
 
 	// For status updates (not installing), skip numeric field validation
 	// These are only required for initial creation
 	isUpdate := in.Status != "installing"
 
-	// os_type is optional but if provided must be valid
-	if in.OsType != "" && !allowedOsType[in.OsType] {
+	// os_type is optional but if provided must be valid (only for lxc/vm)
+	if (in.Type == "lxc" || in.Type == "vm") && in.OsType != "" && !allowedOsType[in.OsType] {
 		return errors.New("invalid os_type")
 	}
 
@@ -558,7 +627,7 @@ func validate(in *TelemetryIn) error {
 	// Values like "default", "advanced", "mydefaults-global", "mydefaults-app" are all valid
 
 	// Validate numeric ranges (only strict for new records)
-	if !isUpdate {
+	if !isUpdate && (in.Type == "lxc" || in.Type == "vm") {
 		if in.CTType < 0 || in.CTType > 2 {
 			return errors.New("invalid ct_type (must be 0, 1, or 2)")
 		}
@@ -574,6 +643,9 @@ func validate(in *TelemetryIn) error {
 	}
 	if in.ExitCode < 0 || in.ExitCode > 255 {
 		return errors.New("invalid exit_code")
+	}
+	if in.InstallDuration < 0 || in.InstallDuration > 86400 {
+		return errors.New("invalid install_duration (max 24h)")
 	}
 
 	return nil
@@ -897,20 +969,26 @@ func main() {
 
 		// Map input to PocketBase schema
 		out := TelemetryOut{
-			RandomID:  in.RandomID,
-			Type:      in.Type,
-			NSAPP:     in.NSAPP,
-			Status:    in.Status,
-			CTType:    in.CTType,
-			DiskSize:  in.DiskSize,
-			CoreCount: in.CoreCount,
-			RAMSize:   in.RAMSize,
-			OsType:    in.OsType,
-			OsVersion: in.OsVersion,
-			PveVer:    in.PveVer,
-			Method:    in.Method,
-			Error:     in.Error,
-			ExitCode:  in.ExitCode,
+			RandomID:        in.RandomID,
+			Type:            in.Type,
+			NSAPP:           in.NSAPP,
+			Status:          in.Status,
+			CTType:          in.CTType,
+			DiskSize:        in.DiskSize,
+			CoreCount:       in.CoreCount,
+			RAMSize:         in.RAMSize,
+			OsType:          in.OsType,
+			OsVersion:       in.OsVersion,
+			PveVer:          in.PveVer,
+			Method:          in.Method,
+			Error:           in.Error,
+			ExitCode:        in.ExitCode,
+			ToolName:        in.ToolName,
+			ParentCT:        in.ParentCT,
+			GPUVendor:       in.GPUVendor,
+			GPUPassthrough:  in.GPUPassthrough,
+			InstallDuration: in.InstallDuration,
+			ErrorCategory:   in.ErrorCategory,
 		}
 		_ = computeHash(out) // For future deduplication
 

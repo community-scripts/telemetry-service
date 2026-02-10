@@ -26,6 +26,15 @@ type DashboardData struct {
 	FailedApps      []AppFailure      `json:"failed_apps"`
 	RecentRecords   []TelemetryRecord `json:"recent_records"`
 	DailyStats      []DailyStat       `json:"daily_stats"`
+
+	// Extended metrics
+	GPUStats           []GPUCount       `json:"gpu_stats"`
+	ErrorCategories    []ErrorCatCount  `json:"error_categories"`
+	TopTools           []ToolCount      `json:"top_tools"`
+	TopAddons          []AddonCount     `json:"top_addons"`
+	AvgInstallDuration float64          `json:"avg_install_duration"` // seconds
+	TotalTools         int              `json:"total_tools"`
+	TotalAddons        int              `json:"total_addons"`
 }
 
 type AppCount struct {
@@ -72,6 +81,29 @@ type DailyStat struct {
 	Failed  int    `json:"failed"`
 }
 
+// Extended metric types
+type GPUCount struct {
+	Vendor     string `json:"vendor"`
+	Passthrough string `json:"passthrough"`
+	Count      int    `json:"count"`
+}
+
+type ErrorCatCount struct {
+	Category string `json:"category"`
+	Count    int    `json:"count"`
+}
+
+type ToolCount struct {
+	Tool  string `json:"tool"`
+	Count int    `json:"count"`
+}
+
+type AddonCount struct {
+	Addon    string `json:"addon"`
+	ParentCT string `json:"parent_ct"`
+	Count    int    `json:"count"`
+}
+
 // FetchDashboardData retrieves aggregated data from PocketBase
 func (p *PBClient) FetchDashboardData(ctx context.Context, days int) (*DashboardData, error) {
 	if err := p.ensureAuth(ctx); err != nil {
@@ -100,6 +132,13 @@ func (p *PBClient) FetchDashboardData(ctx context.Context, days int) (*Dashboard
 	errorPatterns := make(map[string]map[string]bool) // pattern -> set of apps
 	dailySuccess := make(map[string]int)
 	dailyFailed := make(map[string]int)
+
+	// Extended metrics maps
+	gpuCounts := make(map[string]int)              // "vendor|passthrough" -> count
+	errorCatCounts := make(map[string]int)          // category -> count
+	toolCounts := make(map[string]int)              // tool_name -> count
+	addonCounts := make(map[string]int)             // addon_name -> count
+	var totalDuration, durationCount int
 
 	for _, r := range records {
 		data.TotalInstalls++
@@ -152,6 +191,40 @@ func (p *PBClient) FetchDashboardData(ctx context.Context, days int) (*Dashboard
 			typeCounts[r.Type]++
 		}
 
+		// === Extended metrics tracking ===
+
+		// Track tool executions
+		if r.Type == "tool" && r.ToolName != "" {
+			toolCounts[r.ToolName]++
+			data.TotalTools++
+		}
+
+		// Track addon installations
+		if r.Type == "addon" {
+			addonCounts[r.NSAPP]++
+			data.TotalAddons++
+		}
+
+		// Track GPU usage
+		if r.GPUVendor != "" {
+			key := r.GPUVendor
+			if r.GPUPassthrough != "" {
+				key += "|" + r.GPUPassthrough
+			}
+			gpuCounts[key]++
+		}
+
+		// Track error categories
+		if r.Status == "failed" && r.ErrorCategory != "" {
+			errorCatCounts[r.ErrorCategory]++
+		}
+
+		// Track install duration (for averaging)
+		if r.InstallDuration > 0 {
+			totalDuration += r.InstallDuration
+			durationCount++
+		}
+
 		// Daily stats (use Created field if available)
 		if r.Created != "" {
 			date := r.Created[:10] // "2026-02-09"
@@ -184,6 +257,25 @@ func (p *PBClient) FetchDashboardData(ctx context.Context, days int) (*Dashboard
 
 	// Daily stats for chart
 	data.DailyStats = buildDailyStats(dailySuccess, dailyFailed, days)
+
+	// === Extended metrics ===
+
+	// GPU stats
+	data.GPUStats = buildGPUStats(gpuCounts)
+
+	// Error categories
+	data.ErrorCategories = buildErrorCategories(errorCatCounts)
+
+	// Top tools
+	data.TopTools = buildToolStats(toolCounts, 10)
+
+	// Top addons
+	data.TopAddons = buildAddonStats(addonCounts, 10)
+
+	// Average install duration
+	if durationCount > 0 {
+		data.AvgInstallDuration = float64(totalDuration) / float64(durationCount)
+	}
 
 	// Recent records (last 20)
 	if len(records) > 20 {
@@ -459,6 +551,97 @@ func buildDailyStats(success, failed map[string]int, days int) []DailyStat {
 			Success: success[date],
 			Failed:  failed[date],
 		})
+	}
+	return result
+}
+
+// === Extended metrics helper functions ===
+
+func buildGPUStats(gpuCounts map[string]int) []GPUCount {
+	result := make([]GPUCount, 0, len(gpuCounts))
+	for key, count := range gpuCounts {
+		parts := strings.Split(key, "|")
+		vendor := parts[0]
+		passthrough := ""
+		if len(parts) > 1 {
+			passthrough = parts[1]
+		}
+		result = append(result, GPUCount{
+			Vendor:      vendor,
+			Passthrough: passthrough,
+			Count:       count,
+		})
+	}
+	// Sort by count descending
+	for i := 0; i < len(result)-1; i++ {
+		for j := i + 1; j < len(result); j++ {
+			if result[j].Count > result[i].Count {
+				result[i], result[j] = result[j], result[i]
+			}
+		}
+	}
+	return result
+}
+
+func buildErrorCategories(catCounts map[string]int) []ErrorCatCount {
+	result := make([]ErrorCatCount, 0, len(catCounts))
+	for cat, count := range catCounts {
+		result = append(result, ErrorCatCount{
+			Category: cat,
+			Count:    count,
+		})
+	}
+	// Sort by count descending
+	for i := 0; i < len(result)-1; i++ {
+		for j := i + 1; j < len(result); j++ {
+			if result[j].Count > result[i].Count {
+				result[i], result[j] = result[j], result[i]
+			}
+		}
+	}
+	return result
+}
+
+func buildToolStats(toolCounts map[string]int, n int) []ToolCount {
+	result := make([]ToolCount, 0, len(toolCounts))
+	for tool, count := range toolCounts {
+		result = append(result, ToolCount{
+			Tool:  tool,
+			Count: count,
+		})
+	}
+	// Sort by count descending
+	for i := 0; i < len(result)-1; i++ {
+		for j := i + 1; j < len(result); j++ {
+			if result[j].Count > result[i].Count {
+				result[i], result[j] = result[j], result[i]
+			}
+		}
+	}
+	if len(result) > n {
+		return result[:n]
+	}
+	return result
+}
+
+func buildAddonStats(addonCounts map[string]int, n int) []AddonCount {
+	result := make([]AddonCount, 0, len(addonCounts))
+	for addon, count := range addonCounts {
+		result = append(result, AddonCount{
+			Addon: addon,
+			Count: count,
+		})
+	}
+	// Sort by count descending
+	for i := 0; i < len(result)-1; i++ {
+		for j := i + 1; j < len(result); j++ {
+			if result[j].Count > result[i].Count {
+				result[i], result[j] = result[j], result[i]
+			}
+		}
+	}
+	if len(result) > n {
+		return result[:n]
 	}
 	return result
 }
