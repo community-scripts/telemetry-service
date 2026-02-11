@@ -951,6 +951,28 @@ func DashboardHTML() string {
             background: var(--bg-secondary);
         }
         
+        .admin-btn {
+            background: var(--bg-tertiary);
+            border: 1px solid var(--border-color);
+            color: var(--text-primary);
+            padding: 4px 8px;
+            border-radius: 4px;
+            font-size: 12px;
+            cursor: pointer;
+            margin-left: 8px;
+        }
+        
+        .admin-btn:hover {
+            background: var(--accent-blue);
+            color: #fff;
+            border-color: var(--accent-blue);
+        }
+        
+        .admin-btn:disabled {
+            opacity: 0.5;
+            cursor: not-allowed;
+        }
+        
         .pve-version-card {
             background: var(--bg-secondary);
             border: 1px solid var(--border-color);
@@ -1444,7 +1466,10 @@ func DashboardHTML() string {
         <div>
             <a href="/healthz" target="_blank">Health Check</a> &bull;
             <a href="/metrics" target="_blank">Metrics</a> &bull;
-            <a href="/api/dashboard" target="_blank">API</a>
+            <a href="/api/dashboard" target="_blank">API</a> &bull;
+            <a href="/api/alerts" target="_blank">Alerts</a> &bull;
+            <button class="admin-btn" onclick="testAlert()" title="Send test alert email">📧 Test Alert</button>
+            <button class="admin-btn" onclick="testWeeklyReport()" title="Send weekly report now">📊 Test Report</button>
         </div>
     </div>
     
@@ -2068,6 +2093,52 @@ func DashboardHTML() string {
             a.download = 'telemetry_' + new Date().toISOString().slice(0,10) + '.csv';
             a.click();
             URL.revokeObjectURL(url);
+        }
+        
+        async function testAlert() {
+            const btn = event.target;
+            btn.disabled = true;
+            btn.textContent = '⏳ Sending...';
+            
+            try {
+                const resp = await fetch('/api/alerts/test', { method: 'POST' });
+                if (resp.ok) {
+                    btn.textContent = '✅ Sent!';
+                    setTimeout(() => { btn.textContent = '📧 Test Alert'; btn.disabled = false; }, 3000);
+                } else {
+                    const text = await resp.text();
+                    alert('Alert failed: ' + text);
+                    btn.textContent = '❌ Failed';
+                    setTimeout(() => { btn.textContent = '📧 Test Alert'; btn.disabled = false; }, 3000);
+                }
+            } catch (e) {
+                alert('Error: ' + e.message);
+                btn.textContent = '📧 Test Alert';
+                btn.disabled = false;
+            }
+        }
+        
+        async function testWeeklyReport() {
+            const btn = event.target;
+            btn.disabled = true;
+            btn.textContent = '⏳ Sending...';
+            
+            try {
+                const resp = await fetch('/api/alerts/weekly-report/test', { method: 'POST' });
+                if (resp.ok) {
+                    btn.textContent = '✅ Sent!';
+                    setTimeout(() => { btn.textContent = '📊 Test Report'; btn.disabled = false; }, 3000);
+                } else {
+                    const text = await resp.text();
+                    alert('Weekly report failed: ' + text);
+                    btn.textContent = '❌ Failed';
+                    setTimeout(() => { btn.textContent = '📊 Test Report'; btn.disabled = false; }, 3000);
+                }
+            } catch (e) {
+                alert('Error: ' + e.message);
+                btn.textContent = '📊 Test Report';
+                btn.disabled = false;
+            }
         }
         
         async function refreshData() {

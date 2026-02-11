@@ -56,6 +56,11 @@ type Config struct {
 	AlertFailureThreshold float64
 	AlertCheckInterval    time.Duration
 	AlertCooldown         time.Duration
+
+	// Weekly Report
+	WeeklyReportEnabled bool
+	WeeklyReportDay     int // 0=Sunday, 1=Monday, etc.
+	WeeklyReportHour    int // 0-23
 }
 
 // TelemetryIn matches payload from api.func (bash client)
@@ -748,6 +753,11 @@ func main() {
 		AlertFailureThreshold: envFloat("ALERT_FAILURE_THRESHOLD", 20.0),
 		AlertCheckInterval:    time.Duration(envInt("ALERT_CHECK_INTERVAL_MIN", 15)) * time.Minute,
 		AlertCooldown:         time.Duration(envInt("ALERT_COOLDOWN_MIN", 60)) * time.Minute,
+
+		// Weekly Report config
+		WeeklyReportEnabled: envBool("WEEKLY_REPORT_ENABLED", false),
+		WeeklyReportDay:     envInt("WEEKLY_REPORT_DAY", 1),  // Monday
+		WeeklyReportHour:    envInt("WEEKLY_REPORT_HOUR", 8), // 08:00
 	}
 
 	var pt *ProxyTrust
@@ -782,6 +792,10 @@ func main() {
 		FailureThreshold: cfg.AlertFailureThreshold,
 		CheckInterval:    cfg.AlertCheckInterval,
 		Cooldown:         cfg.AlertCooldown,
+		// Weekly Report
+		WeeklyReportEnabled: cfg.WeeklyReportEnabled,
+		WeeklyReportDay:     time.Weekday(cfg.WeeklyReportDay),
+		WeeklyReportHour:    cfg.WeeklyReportHour,
 	}, pb)
 	alerter.Start()
 
@@ -967,6 +981,21 @@ func main() {
 
 		w.WriteHeader(http.StatusOK)
 		w.Write([]byte("test alert sent"))
+	})
+
+	mux.HandleFunc("/api/alerts/weekly-report/test", func(w http.ResponseWriter, r *http.Request) {
+		if r.Method != http.MethodPost {
+			http.Error(w, "method not allowed", http.StatusMethodNotAllowed)
+			return
+		}
+
+		if err := alerter.TestWeeklyReport(); err != nil {
+			http.Error(w, err.Error(), http.StatusInternalServerError)
+			return
+		}
+
+		w.WriteHeader(http.StatusOK)
+		w.Write([]byte("weekly report sent"))
 	})
 
 	mux.HandleFunc("/telemetry", func(w http.ResponseWriter, r *http.Request) {
