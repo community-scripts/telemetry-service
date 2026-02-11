@@ -13,7 +13,7 @@ SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 
 # Default values
 POCKETBASE_URL="${1:-http://localhost:8090}"
-POCKETBASE_COLLECTION="${2:-_dev_telemetry_data}"
+POCKETBASE_COLLECTION="${2:-telemetry}"
 
 echo "============================================="
 echo "   ProxmoxVED Data Migration Tool"
@@ -27,10 +27,9 @@ echo ""
 
 # Check if PocketBase is reachable
 echo "🔍 Checking PocketBase connection..."
-if ! curl -sf "$POCKETBASE_URL/api/health" > /dev/null 2>&1; then
-    echo "❌ Cannot reach PocketBase at $POCKETBASE_URL"
-    echo "   Make sure PocketBase is running and the URL is correct."
-    exit 1
+if ! curl -sf "$POCKETBASE_URL/api/health" >/dev/null 2>&1; then
+  echo "❌ Cannot reach PocketBase at $POCKETBASE_URL"
+  echo "   Make sure PocketBase is running and the URL is correct."
 fi
 echo "✅ PocketBase is reachable"
 echo ""
@@ -39,8 +38,8 @@ echo ""
 echo "🔍 Checking source API..."
 SUMMARY=$(curl -sf "https://api.htl-braunau.at/dev/data/summary" 2>/dev/null || echo "")
 if [ -z "$SUMMARY" ]; then
-    echo "❌ Cannot reach source API"
-    exit 1
+  echo "❌ Cannot reach source API"
+  exit 1
 fi
 
 TOTAL=$(echo "$SUMMARY" | grep -o '"total_entries":[0-9]*' | cut -d: -f2)
@@ -51,8 +50,8 @@ echo ""
 read -p "⚠️  Do you want to start the migration? [y/N] " -n 1 -r
 echo ""
 if [[ ! $REPLY =~ ^[Yy]$ ]]; then
-    echo "Migration cancelled."
-    exit 0
+  echo "Migration cancelled."
+  exit 0
 fi
 
 echo ""

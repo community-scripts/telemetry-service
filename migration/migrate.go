@@ -62,9 +62,7 @@ type PBRecord struct {
 	RandomID   string `json:"random_id"`
 	Type       string `json:"type"`
 	Error      string `json:"error"`
-	// Temporary field for timestamp migration (PocketBase doesn't allow setting created/updated via API)
-	// After migration, run SQL: UPDATE installations SET created = old_created, updated = old_created
-	OldCreated string `json:"old_created,omitempty"`
+	// created_at will be set automatically by PocketBase
 }
 
 type Summary struct {
@@ -95,18 +93,16 @@ func main() {
 		pbCollection = os.Getenv("PB_TARGET_COLLECTION")
 	}
 	if pbCollection == "" {
-		pbCollection = "_dev_telemetry_data"
+		pbCollection = "telemetry"
 	}
 
 	// Auth collection
 	authCollection := os.Getenv("PB_AUTH_COLLECTION")
 	if authCollection == "" {
-		authCollection = "_dev_telemetry_service"
+		authCollection = "telemetry_service_user"
 	}
 
-	// Credentials - prefer admin auth for timestamp preservation
-	pbAdminEmail := os.Getenv("PB_ADMIN_EMAIL")
-	pbAdminPassword := os.Getenv("PB_ADMIN_PASSWORD")
+	// Credentials
 	pbIdentity := os.Getenv("PB_IDENTITY")
 	pbPassword := os.Getenv("PB_PASSWORD")
 
@@ -116,20 +112,12 @@ func main() {
 	fmt.Printf("Source API:       %s\n", baseURL)
 	fmt.Printf("PocketBase URL:   %s\n", pbURL)
 	fmt.Printf("Collection:       %s\n", pbCollection)
+	fmt.Printf("Auth Collection:  %s\n", authCollection)
 	fmt.Println("-------------------------------------------")
 
-	// Authenticate with PocketBase - prefer Admin auth for timestamp support
-	if pbAdminEmail != "" && pbAdminPassword != "" {
-		fmt.Println("🔐 Authenticating as PocketBase Admin...")
-		err := authenticateAdmin(pbURL, pbAdminEmail, pbAdminPassword)
-		if err != nil {
-			fmt.Printf("❌ Admin authentication failed: %v\n", err)
-			os.Exit(1)
-		}
-		fmt.Println("✅ Admin authentication successful (timestamps will be preserved)")
-	} else if pbIdentity != "" && pbPassword != "" {
-		fmt.Println("🔐 Authenticating with PocketBase (collection auth)...")
-		fmt.Println("⚠️  Note: Timestamps may not be preserved without admin auth")
+	// Authenticate with PocketBase
+	if pbIdentity != "" && pbPassword != "" {
+		fmt.Println("🔐 Authenticating with PocketBase...")
 		err := authenticate(pbURL, authCollection, pbIdentity, pbPassword)
 		if err != nil {
 			fmt.Printf("❌ Authentication failed: %v\n", err)
@@ -213,71 +201,6 @@ func getSummary() (*Summary, error) {
 	return &summary, nil
 }
 
-// authenticateAdmin authenticates as PocketBase admin (required for setting timestamps)
-func authenticateAdmin(pbURL, email, password string) error {
-	body := map[string]string{
-		"identity": email,
-		"password": password,
-	}
-	jsonData, _ := json.Marshal(body)
-
-	// Try new PocketBase v0.23+ endpoint first (_superusers collection)
-	endpoints := []string{
-		fmt.Sprintf("%s/api/collections/_superusers/auth-with-password", pbURL),
-		fmt.Sprintf("%s/api/admins/auth-with-password", pbURL), // Legacy endpoint
-	}
-
-	client := &http.Client{Timeout: 10 * time.Second}
-	var lastErr error
-
-	for _, url := range endpoints {
-		req, err := http.NewRequest("POST", url, bytes.NewBuffer(jsonData))
-		if err != nil {
-			lastErr = err
-			continue
-		}
-		req.Header.Set("Content-Type", "application/json")
-
-		resp, err := client.Do(req)
-		if err != nil {
-			lastErr = err
-			continue
-		}
-
-		if resp.StatusCode == 404 {
-			resp.Body.Close()
-			continue // Try next endpoint
-		}
-
-		if resp.StatusCode < 200 || resp.StatusCode >= 300 {
-			body, _ := io.ReadAll(resp.Body)
-			resp.Body.Close()
-			lastErr = fmt.Errorf("HTTP %d: %s", resp.StatusCode, string(body))
-			continue
-		}
-
-		var result struct {
-			Token string `json:"token"`
-		}
-		if err := json.NewDecoder(resp.Body).Decode(&result); err != nil {
-			resp.Body.Close()
-			lastErr = err
-			continue
-		}
-		resp.Body.Close()
-
-		if result.Token == "" {
-			lastErr = fmt.Errorf("no token in response")
-			continue
-		}
-
-		authToken = result.Token
-		return nil
-	}
-
-	return fmt.Errorf("all auth endpoints failed: %v", lastErr)
-}
-
 func authenticate(pbURL, authCollection, identity, password string) error {
 	body := map[string]string{
 		"identity": identity,
@@ -352,25 +275,16 @@ func importRecord(pbURL, collection string, old OldDataModel) error {
 		status = "unknown"
 	}
 
-	// ct_type: 1=unprivileged, 2=privileged in old data
-	// PocketBase might expect 0/1, so normalize to 0 (unprivileged) or 1 (privileged)
+	// Ensure ct_type is not 0 (required field)
 	ctType := old.CtType
-	if ctType <= 1 {
-		ctType = 0 // unprivileged (default)
-	} else {
-		ctType = 1 // privileged/VM
+	if ctType == 0 {
+		ctType = 1 // default to unprivileged
 	}
 
 	// Ensure type is set
 	recordType := old.Type
 	if recordType == "" {
 		recordType = "lxc"
-	}
-
-	// Ensure nsapp is set (required field)
-	nsapp := old.NsApp
-	if nsapp == "" {
-		nsapp = "unknown"
 	}
 
 	record := PBRecord{
@@ -381,14 +295,13 @@ func importRecord(pbURL, collection string, old OldDataModel) error {
 		OsType:     old.OsType,
 		OsVersion:  old.OsVersion,
 		DisableIP6: old.DisableIP6,
-		NsApp:      nsapp,
+		NsApp:      old.NsApp,
 		Method:     old.Method,
 		PveVersion: old.PveVersion,
 		Status:     status,
 		RandomID:   old.RandomID,
 		Type:       recordType,
 		Error:      old.Error,
-		OldCreated: convertTimestamp(old.CreatedAt),
 	}
 
 	jsonData, err := json.Marshal(record)
@@ -450,43 +363,4 @@ func min(a, b int) int {
 		return a
 	}
 	return b
-}
-
-// convertTimestamp converts various timestamp formats to PocketBase format
-// PocketBase expects: "2006-01-02 15:04:05.000Z" or similar
-func convertTimestamp(ts string) string {
-	if ts == "" {
-		return ""
-	}
-
-	// Try parsing various formats
-	formats := []string{
-		time.RFC3339,                    // "2006-01-02T15:04:05Z07:00"
-		time.RFC3339Nano,                // "2006-01-02T15:04:05.999999999Z07:00"
-		"2006-01-02T15:04:05.000Z",      // ISO with milliseconds
-		"2006-01-02T15:04:05Z",          // ISO without milliseconds
-		"2006-01-02T15:04:05",           // ISO without timezone
-		"2006-01-02 15:04:05",           // SQL format
-		"2006-01-02 15:04:05.000",       // SQL with ms
-		"2006-01-02 15:04:05.000 UTC",   // SQL with UTC
-		"2006-01-02T15:04:05.000+00:00", // ISO with offset
-	}
-
-	var parsed time.Time
-	var err error
-	for _, format := range formats {
-		parsed, err = time.Parse(format, ts)
-		if err == nil {
-			break
-		}
-	}
-
-	if err != nil {
-		// If all parsing fails, return empty (PocketBase will set current time)
-		fmt.Printf("   ⚠️  Could not parse timestamp: %s\n", ts)
-		return ""
-	}
-
-	// Return in PocketBase format (UTC)
-	return parsed.UTC().Format("2006-01-02 15:04:05.000Z")
 }

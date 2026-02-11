@@ -24,10 +24,10 @@ type Config struct {
 
 	// PocketBase
 	PBBaseURL        string
-	PBAuthCollection string // "_dev_telemetry_service"
+	PBAuthCollection string // PB auth collection name (from env)
 	PBIdentity       string // email
 	PBPassword       string
-	PBTargetColl     string // "_dev_telemetry_data"
+	PBTargetColl     string // PB data collection name (from env)
 
 	// Limits
 	MaxBodyBytes     int64
@@ -56,16 +56,6 @@ type Config struct {
 	AlertFailureThreshold float64
 	AlertCheckInterval    time.Duration
 	AlertCooldown         time.Duration
-
-	// Weekly Report
-	WeeklyReportEnabled bool
-	WeeklyReportDay     int // 0=Sunday, 1=Monday, etc.
-	WeeklyReportHour    int // 0-23
-
-	// Cleanup Job
-	CleanupEnabled         bool
-	CleanupIntervalHours   int
-	CleanupStuckAfterHours int
 }
 
 // TelemetryIn matches payload from api.func (bash client)
@@ -111,9 +101,12 @@ type TelemetryIn struct {
 
 	// Error categorization
 	ErrorCategory string `json:"error_category,omitempty"` // "network", "storage", "dependency", "permission", "timeout", "unknown"
+
+	// Repository source for collection routing
+	RepoSource string `json:"repo_source,omitempty"` // "ProxmoxVE", "ProxmoxVED", or "external"
 }
 
-// TelemetryOut is sent to PocketBase (matches _dev_telemetry_data collection)
+// TelemetryOut is sent to PocketBase (matches telemetry collection)
 type TelemetryOut struct {
 	RandomID  string `json:"random_id"`
 	Type      string `json:"type"`
@@ -139,6 +132,9 @@ type TelemetryOut struct {
 	RAMSpeed        string `json:"ram_speed,omitempty"`
 	InstallDuration int    `json:"install_duration,omitempty"`
 	ErrorCategory   string `json:"error_category,omitempty"`
+
+	// Repository source: "ProxmoxVE", "ProxmoxVED", or "external"
+	RepoSource string `json:"repo_source,omitempty"`
 }
 
 // TelemetryStatusUpdate contains only fields needed for status updates
@@ -156,12 +152,19 @@ type TelemetryStatusUpdate struct {
 	RAMSpeed        string `json:"ram_speed,omitempty"`
 }
 
+// Allowed values for 'repo_source' field
+var allowedRepoSource = map[string]bool{
+	"ProxmoxVE":  true,
+	"ProxmoxVED": true,
+	"external":   true,
+}
+
 type PBClient struct {
 	baseURL        string
 	authCollection string
 	identity       string
 	password       string
-	targetColl     string
+	targetColl     string // single collection for all telemetry data
 
 	mu    sync.Mutex
 	token string
@@ -305,8 +308,8 @@ func (p *PBClient) UpdateTelemetryStatus(ctx context.Context, recordID string, u
 	return nil
 }
 
-// FetchRecordsPaginated retrieves records with pagination and optional filters
-func (p *PBClient) FetchRecordsPaginated(ctx context.Context, page, limit int, status, app, osType, sortField string) ([]TelemetryRecord, int, error) {
+// FetchRecordsPaginated retrieves records with pagination and optional filters.
+func (p *PBClient) FetchRecordsPaginated(ctx context.Context, page, limit int, status, app, osType, sortField, repoSource string) ([]TelemetryRecord, int, error) {
 	if err := p.ensureAuth(ctx); err != nil {
 		return nil, 0, err
 	}
@@ -321,6 +324,9 @@ func (p *PBClient) FetchRecordsPaginated(ctx context.Context, page, limit int, s
 	}
 	if osType != "" {
 		filters = append(filters, fmt.Sprintf("os_type='%s'", osType))
+	}
+	if repoSource != "" {
+		filters = append(filters, fmt.Sprintf("repo_source='%s'", repoSource))
 	}
 
 	filterStr := ""
@@ -376,9 +382,11 @@ func (p *PBClient) FetchRecordsPaginated(ctx context.Context, page, limit int, s
 	return result.Items, result.TotalItems, nil
 }
 
-// UpsertTelemetry handles both creation and updates intelligently
-// - status="installing": Always creates a new record
-// - status!="installing": Updates existing record (found by random_id) with status/error/exit_code only
+// UpsertTelemetry handles both creation and updates intelligently.
+// All records go to the same collection; repo_source is stored as a field.
+//
+// For status="installing": always creates a new record.
+// For status!="installing": updates existing record (found by random_id).
 func (p *PBClient) UpsertTelemetry(ctx context.Context, payload TelemetryOut) error {
 	// For "installing" status, always create new record
 	if payload.Status == "installing" {
@@ -627,6 +635,9 @@ func validate(in *TelemetryIn) error {
 	in.RAMSpeed = sanitizeShort(in.RAMSpeed, 16)
 	in.ErrorCategory = strings.ToLower(sanitizeShort(in.ErrorCategory, 32))
 
+	// Sanitize repo_source (routing field)
+	in.RepoSource = sanitizeShort(in.RepoSource, 64)
+
 	// Default empty values to "unknown" for consistency
 	if in.GPUVendor == "" {
 		in.GPUVendor = "unknown"
@@ -661,13 +672,13 @@ func validate(in *TelemetryIn) error {
 
 	// Validate new enum fields
 	if !allowedGPUVendor[in.GPUVendor] {
-		return errors.New("invalid gpu_vendor (must be 'intel', 'amd', 'nvidia', or empty)")
+		return errors.New("invalid gpu_vendor (must be 'intel', 'amd', 'nvidia', 'unknown')")
 	}
 	if !allowedGPUPassthrough[in.GPUPassthrough] {
-		return errors.New("invalid gpu_passthrough (must be 'igpu', 'dgpu', 'vgpu', 'none', or empty)")
+		return errors.New("invalid gpu_passthrough (must be 'igpu', 'dgpu', 'vgpu', 'none', 'unknown')")
 	}
 	if !allowedCPUVendor[in.CPUVendor] {
-		return errors.New("invalid cpu_vendor (must be 'intel', 'amd', 'arm', 'unknown', or empty)")
+		return errors.New("invalid cpu_vendor (must be 'intel', 'amd', 'arm', 'apple', 'qualcomm', 'unknown')")
 	}
 	if !allowedErrorCategory[in.ErrorCategory] {
 		return errors.New("invalid error_category")
@@ -707,6 +718,11 @@ func validate(in *TelemetryIn) error {
 		return errors.New("invalid install_duration (max 24h)")
 	}
 
+	// Validate repo_source: must be a known value or empty
+	if in.RepoSource != "" && !allowedRepoSource[in.RepoSource] {
+		return fmt.Errorf("rejected repo_source '%s' (must be 'ProxmoxVE', 'ProxmoxVED', or 'external')", in.RepoSource)
+	}
+
 	return nil
 }
 
@@ -727,10 +743,10 @@ func main() {
 		TrustedProxiesCIDR: splitCSV(env("TRUSTED_PROXIES_CIDR", "")),
 
 		PBBaseURL:        mustEnv("PB_URL"),
-		PBAuthCollection: env("PB_AUTH_COLLECTION", "_dev_telemetry_service"),
+		PBAuthCollection: mustEnv("PB_AUTH_COLLECTION"),
 		PBIdentity:       mustEnv("PB_IDENTITY"),
 		PBPassword:       mustEnv("PB_PASSWORD"),
-		PBTargetColl:     env("PB_TARGET_COLLECTION", "_dev_telemetry_data"),
+		PBTargetColl:     mustEnv("PB_TARGET_COLLECTION"),
 
 		MaxBodyBytes:     envInt64("MAX_BODY_BYTES", 1024),
 		RateLimitRPM:     envInt("RATE_LIMIT_RPM", 60),
@@ -758,16 +774,6 @@ func main() {
 		AlertFailureThreshold: envFloat("ALERT_FAILURE_THRESHOLD", 20.0),
 		AlertCheckInterval:    time.Duration(envInt("ALERT_CHECK_INTERVAL_MIN", 15)) * time.Minute,
 		AlertCooldown:         time.Duration(envInt("ALERT_COOLDOWN_MIN", 60)) * time.Minute,
-
-		// Weekly Report config
-		WeeklyReportEnabled: envBool("WEEKLY_REPORT_ENABLED", false),
-		WeeklyReportDay:     envInt("WEEKLY_REPORT_DAY", 1),  // Monday
-		WeeklyReportHour:    envInt("WEEKLY_REPORT_HOUR", 8), // 08:00
-
-		// Cleanup config
-		CleanupEnabled:         envBool("CLEANUP_ENABLED", true),
-		CleanupIntervalHours:   envInt("CLEANUP_INTERVAL_HOURS", 6),   // Run every 6 hours
-		CleanupStuckAfterHours: envInt("CLEANUP_STUCK_AFTER_HOURS", 48), // 2 days
 	}
 
 	var pt *ProxyTrust
@@ -802,20 +808,8 @@ func main() {
 		FailureThreshold: cfg.AlertFailureThreshold,
 		CheckInterval:    cfg.AlertCheckInterval,
 		Cooldown:         cfg.AlertCooldown,
-		// Weekly Report
-		WeeklyReportEnabled: cfg.WeeklyReportEnabled,
-		WeeklyReportDay:     time.Weekday(cfg.WeeklyReportDay),
-		WeeklyReportHour:    cfg.WeeklyReportHour,
 	}, pb)
 	alerter.Start()
-
-	// Initialize cleaner for stuck installations
-	cleaner := NewCleaner(CleanupConfig{
-		Enabled:         cfg.CleanupEnabled,
-		CheckInterval:   time.Duration(cfg.CleanupIntervalHours) * time.Hour,
-		StuckAfterHours: cfg.CleanupStuckAfterHours,
-	}, pb)
-	cleaner.Start()
 
 	mux := http.NewServeMux()
 
@@ -863,7 +857,7 @@ func main() {
 		ctx, cancel := context.WithTimeout(r.Context(), 5*time.Second)
 		defer cancel()
 		
-		data, err := pb.FetchDashboardData(ctx, 1) // Last 24h only for metrics
+		data, err := pb.FetchDashboardData(ctx, 1, "ProxmoxVE") // Last 24h, production only for metrics
 		if err != nil {
 			http.Error(w, "failed to fetch metrics", http.StatusInternalServerError)
 			return
@@ -892,17 +886,29 @@ func main() {
 		days := 30
 		if d := r.URL.Query().Get("days"); d != "" {
 			fmt.Sscanf(d, "%d", &days)
-			// days=0 means "all entries", negative values default to 1
-			if days < 0 {
+			if days < 1 {
 				days = 1
 			}
+			if days > 365 {
+				days = 365
+			}
+		}
+
+		// repo_source filter (default: ProxmoxVE)
+		repoSource := r.URL.Query().Get("repo")
+		if repoSource == "" {
+			repoSource = "ProxmoxVE"
+		}
+		// "all" means no filter
+		if repoSource == "all" {
+			repoSource = ""
 		}
 
 		ctx, cancel := context.WithTimeout(r.Context(), 10*time.Second)
 		defer cancel()
 
 		// Try cache first
-		cacheKey := fmt.Sprintf("dashboard:%d", days)
+		cacheKey := fmt.Sprintf("dashboard:%d:%s", days, repoSource)
 		var data *DashboardData
 		if cfg.CacheEnabled && cache.Get(ctx, cacheKey, &data) {
 			w.Header().Set("Content-Type", "application/json")
@@ -911,7 +917,7 @@ func main() {
 			return
 		}
 
-		data, err := pb.FetchDashboardData(ctx, days)
+		data, err := pb.FetchDashboardData(ctx, days, repoSource)
 		if err != nil {
 			log.Printf("dashboard fetch failed: %v", err)
 			http.Error(w, "failed to fetch data", http.StatusInternalServerError)
@@ -936,6 +942,10 @@ func main() {
 		app := r.URL.Query().Get("app")
 		osType := r.URL.Query().Get("os")
 		sort := r.URL.Query().Get("sort")
+		repoSource := r.URL.Query().Get("repo")
+		if repoSource == "" {
+			repoSource = "ProxmoxVE" // Default filter: production data
+		}
 
 		if p := r.URL.Query().Get("page"); p != "" {
 			fmt.Sscanf(p, "%d", &page)
@@ -956,7 +966,7 @@ func main() {
 		ctx, cancel := context.WithTimeout(r.Context(), 10*time.Second)
 		defer cancel()
 
-		records, total, err := pb.FetchRecordsPaginated(ctx, page, limit, status, app, osType, sort)
+		records, total, err := pb.FetchRecordsPaginated(ctx, page, limit, status, app, osType, sort, repoSource)
 		if err != nil {
 			log.Printf("records fetch failed: %v", err)
 			http.Error(w, "failed to fetch records", http.StatusInternalServerError)
@@ -997,21 +1007,6 @@ func main() {
 
 		w.WriteHeader(http.StatusOK)
 		w.Write([]byte("test alert sent"))
-	})
-
-	mux.HandleFunc("/api/alerts/weekly-report/test", func(w http.ResponseWriter, r *http.Request) {
-		if r.Method != http.MethodPost {
-			http.Error(w, "method not allowed", http.StatusMethodNotAllowed)
-			return
-		}
-
-		if err := alerter.TestWeeklyReport(); err != nil {
-			http.Error(w, err.Error(), http.StatusInternalServerError)
-			return
-		}
-
-		w.WriteHeader(http.StatusOK)
-		w.Write([]byte("weekly report sent"))
 	})
 
 	mux.HandleFunc("/telemetry", func(w http.ResponseWriter, r *http.Request) {
@@ -1058,6 +1053,9 @@ func main() {
 			return
 		}
 		if err := validate(&in); err != nil {
+			if cfg.EnableReqLogging {
+				log.Printf("telemetry rejected: %v", err)
+			}
 			http.Error(w, "invalid payload", http.StatusBadRequest)
 			return
 		}
@@ -1086,6 +1084,7 @@ func main() {
 			RAMSpeed:        in.RAMSpeed,
 			InstallDuration: in.InstallDuration,
 			ErrorCategory:   in.ErrorCategory,
+			RepoSource:      in.RepoSource,
 		}
 		_ = computeHash(out) // For future deduplication
 
@@ -1093,6 +1092,7 @@ func main() {
 		defer cancel()
 
 		// Upsert: Creates new record if random_id doesn't exist, updates if it does
+		// repo_source is stored as a field on the record for filtering
 		if err := pb.UpsertTelemetry(ctx, out); err != nil {
 			// GDPR: don't log raw payload, don't log IPs; log only generic error
 			log.Printf("pocketbase write failed: %v", err)
@@ -1101,7 +1101,7 @@ func main() {
 		}
 
 		if cfg.EnableReqLogging {
-			log.Printf("telemetry accepted nsapp=%s status=%s", out.NSAPP, out.Status)
+			log.Printf("telemetry accepted nsapp=%s status=%s repo=%s", out.NSAPP, out.Status, in.RepoSource)
 		}
 
 		w.WriteHeader(http.StatusAccepted)
