@@ -30,6 +30,7 @@ echo "🔍 Checking PocketBase connection..."
 if ! curl -sf "$POCKETBASE_URL/api/health" >/dev/null 2>&1; then
   echo "❌ Cannot reach PocketBase at $POCKETBASE_URL"
   echo "   Make sure PocketBase is running and the URL is correct."
+  exit 1
 fi
 echo "✅ PocketBase is reachable"
 echo ""
