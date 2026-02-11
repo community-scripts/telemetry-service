@@ -673,37 +673,49 @@ func DashboardHTML() string {
 <head>
     <meta charset="UTF-8">
     <meta name="viewport" content="width=device-width, initial-scale=1.0">
-    <title>Telemetry Dashboard - ProxmoxVE Helper Scripts</title>
-    <meta name="description" content="Installation telemetry dashboard for ProxmoxVE Helper Scripts">
+    <title>Analytics - Proxmox VE Helper-Scripts</title>
+    <meta name="description" content="Installation analytics and telemetry for Proxmox VE Helper Scripts">
     <link rel="icon" href="data:image/svg+xml,<svg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 100 100'><text y='.9em' font-size='90'>📊</text></svg>">
     <script src="https://cdn.jsdelivr.net/npm/chart.js"></script>
+    <link rel="preconnect" href="https://fonts.googleapis.com">
+    <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+    <link href="https://fonts.googleapis.com/css2?family=Inter:wght@400;500;600;700&display=swap" rel="stylesheet">
     <style>
         :root {
-            --bg-primary: #0d1117;
-            --bg-secondary: #161b22;
-            --bg-tertiary: #21262d;
-            --border-color: #30363d;
-            --text-primary: #c9d1d9;
+            --bg-primary: #0a0e14;
+            --bg-secondary: #131920;
+            --bg-tertiary: #1a2029;
+            --bg-card: #151b23;
+            --border-color: #2d3748;
+            --text-primary: #e2e8f0;
             --text-secondary: #8b949e;
-            --accent-blue: #58a6ff;
-            --accent-green: #3fb950;
-            --accent-red: #f85149;
-            --accent-yellow: #d29922;
-            --accent-purple: #a371f7;
+            --text-muted: #64748b;
+            --accent-blue: #3b82f6;
+            --accent-cyan: #22d3ee;
+            --accent-green: #22c55e;
+            --accent-red: #ef4444;
+            --accent-yellow: #eab308;
+            --accent-orange: #f97316;
+            --accent-purple: #a855f7;
+            --accent-pink: #ec4899;
+            --accent-lime: #84cc16;
+            --gradient-blue: linear-gradient(135deg, #3b82f6 0%, #1d4ed8 100%);
+            --gradient-green: linear-gradient(135deg, #22c55e 0%, #16a34a 100%);
+            --gradient-red: linear-gradient(135deg, #ef4444 0%, #dc2626 100%);
+            --shadow-sm: 0 1px 2px 0 rgb(0 0 0 / 0.05);
+            --shadow-md: 0 4px 6px -1px rgb(0 0 0 / 0.1), 0 2px 4px -2px rgb(0 0 0 / 0.1);
+            --shadow-lg: 0 10px 15px -3px rgb(0 0 0 / 0.1), 0 4px 6px -4px rgb(0 0 0 / 0.1);
         }
         
         [data-theme="light"] {
-            --bg-primary: #ffffff;
-            --bg-secondary: #f6f8fa;
-            --bg-tertiary: #eaeef2;
-            --border-color: #d0d7de;
-            --text-primary: #1f2328;
-            --text-secondary: #656d76;
-            --accent-blue: #0969da;
-            --accent-green: #1a7f37;
-            --accent-red: #cf222e;
-            --accent-yellow: #9a6700;
-            --accent-purple: #8250df;
+            --bg-primary: #f8fafc;
+            --bg-secondary: #ffffff;
+            --bg-tertiary: #f1f5f9;
+            --bg-card: #ffffff;
+            --border-color: #e2e8f0;
+            --text-primary: #1e293b;
+            --text-secondary: #64748b;
+            --text-muted: #94a3b8;
         }
         
         * {
@@ -713,64 +725,330 @@ func DashboardHTML() string {
         }
         
         body {
-            font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', Helvetica, Arial, sans-serif;
+            font-family: 'Inter', -apple-system, BlinkMacSystemFont, 'Segoe UI', sans-serif;
             background: var(--bg-primary);
             color: var(--text-primary);
             min-height: 100vh;
-            padding: 20px;
+            line-height: 1.5;
         }
         
-        .header {
-            display: flex;
-            justify-content: space-between;
-            align-items: center;
-            margin-bottom: 24px;
-            padding-bottom: 16px;
+        /* Top Navigation Bar */
+        .navbar {
+            background: var(--bg-secondary);
             border-bottom: 1px solid var(--border-color);
+            padding: 0 24px;
+            height: 64px;
+            display: flex;
+            align-items: center;
+            justify-content: space-between;
+            position: sticky;
+            top: 0;
+            z-index: 100;
+            backdrop-filter: blur(10px);
         }
         
-        .header h1 {
-            font-size: 24px;
+        .navbar-brand {
+            display: flex;
+            align-items: center;
+            gap: 12px;
+            text-decoration: none;
+            color: var(--text-primary);
             font-weight: 600;
+            font-size: 16px;
+        }
+        
+        .navbar-brand svg {
+            color: var(--accent-cyan);
+        }
+        
+        .navbar-center {
+            flex: 1;
             display: flex;
-            align-items: center;
-            gap: 12px;
+            justify-content: center;
+            padding: 0 40px;
         }
         
-        .header h1 img {
-            height: 40px;
+        .search-box {
+            position: relative;
+            width: 100%;
+            max-width: 320px;
         }
         
-        .controls {
-            display: flex;
-            gap: 12px;
-            align-items: center;
-        }
-        
-        select, button {
+        .search-box input {
+            width: 100%;
             background: var(--bg-tertiary);
             border: 1px solid var(--border-color);
             color: var(--text-primary);
-            padding: 8px 16px;
-            border-radius: 6px;
+            padding: 10px 16px 10px 40px;
+            border-radius: 8px;
             font-size: 14px;
-            cursor: pointer;
+            outline: none;
+            transition: border-color 0.2s, box-shadow 0.2s;
         }
         
-        select:hover, button:hover {
+        .search-box input::placeholder {
+            color: var(--text-muted);
+        }
+        
+        .search-box input:focus {
+            border-color: var(--accent-blue);
+            box-shadow: 0 0 0 3px rgba(59, 130, 246, 0.1);
+        }
+        
+        .search-box svg {
+            position: absolute;
+            left: 12px;
+            top: 50%;
+            transform: translateY(-50%);
+            color: var(--text-muted);
+        }
+        
+        .search-box .shortcut {
+            position: absolute;
+            right: 12px;
+            top: 50%;
+            transform: translateY(-50%);
+            background: var(--bg-primary);
+            border: 1px solid var(--border-color);
+            padding: 2px 8px;
+            border-radius: 4px;
+            font-size: 11px;
+            color: var(--text-muted);
+        }
+        
+        .navbar-actions {
+            display: flex;
+            align-items: center;
+            gap: 12px;
+        }
+        
+        .github-stars {
+            display: flex;
+            align-items: center;
+            gap: 6px;
+            background: var(--accent-yellow);
+            color: #000;
+            padding: 6px 14px;
+            border-radius: 20px;
+            font-size: 13px;
+            font-weight: 600;
+            text-decoration: none;
+            transition: transform 0.2s;
+        }
+        
+        .github-stars:hover {
+            transform: scale(1.05);
+        }
+        
+        .nav-icon {
+            width: 40px;
+            height: 40px;
+            display: flex;
+            align-items: center;
+            justify-content: center;
+            border-radius: 8px;
+            color: var(--text-secondary);
+            transition: background 0.2s, color 0.2s;
+            cursor: pointer;
+            border: none;
+            background: transparent;
+        }
+        
+        .nav-icon:hover {
+            background: var(--bg-tertiary);
+            color: var(--text-primary);
+        }
+        
+        /* Main Content */
+        .main-content {
+            padding: 32px;
+            max-width: 1600px;
+            margin: 0 auto;
+        }
+        
+        /* Page Header */
+        .page-header {
+            margin-bottom: 32px;
+        }
+        
+        .page-header h1 {
+            font-size: 28px;
+            font-weight: 700;
+            margin-bottom: 8px;
+        }
+        
+        .page-header p {
+            color: var(--text-secondary);
+            font-size: 15px;
+        }
+        
+        /* Stat Cards Grid */
+        .stats-grid {
+            display: grid;
+            grid-template-columns: repeat(4, 1fr);
+            gap: 20px;
+            margin-bottom: 32px;
+        }
+        
+        @media (max-width: 1200px) {
+            .stats-grid {
+                grid-template-columns: repeat(2, 1fr);
+            }
+        }
+        
+        @media (max-width: 640px) {
+            .stats-grid {
+                grid-template-columns: 1fr;
+            }
+        }
+        
+        .stat-card {
+            background: var(--bg-card);
+            border: 1px solid var(--border-color);
+            border-radius: 12px;
+            padding: 24px;
+            position: relative;
+            overflow: hidden;
+        }
+        
+        .stat-card-header {
+            display: flex;
+            justify-content: space-between;
+            align-items: flex-start;
+            margin-bottom: 16px;
+        }
+        
+        .stat-card-label {
+            font-size: 14px;
+            color: var(--text-secondary);
+            font-weight: 500;
+        }
+        
+        .stat-card-icon {
+            width: 36px;
+            height: 36px;
+            display: flex;
+            align-items: center;
+            justify-content: center;
+            border-radius: 8px;
+            color: var(--text-secondary);
+        }
+        
+        .stat-card-value {
+            font-size: 36px;
+            font-weight: 700;
+            line-height: 1;
+            margin-bottom: 6px;
+        }
+        
+        .stat-card-subtitle {
+            font-size: 13px;
+            color: var(--text-muted);
+        }
+        
+        .stat-card.success .stat-card-icon { color: var(--accent-green); }
+        .stat-card.success .stat-card-value { color: var(--accent-green); }
+        .stat-card.failed .stat-card-icon { color: var(--accent-red); }
+        .stat-card.failed .stat-card-value { color: var(--accent-red); }
+        .stat-card.popular .stat-card-icon { color: var(--accent-yellow); }
+        .stat-card.popular .stat-card-value { font-size: 24px; }
+        
+        /* Section Cards */
+        .section-card {
+            background: var(--bg-card);
+            border: 1px solid var(--border-color);
+            border-radius: 12px;
+            margin-bottom: 24px;
+            overflow: hidden;
+        }
+        
+        .section-header {
+            display: flex;
+            justify-content: space-between;
+            align-items: center;
+            padding: 20px 24px;
+            border-bottom: 1px solid var(--border-color);
+        }
+        
+        .section-header h2 {
+            font-size: 18px;
+            font-weight: 600;
+        }
+        
+        .section-header p {
+            font-size: 13px;
+            color: var(--text-secondary);
+            margin-top: 2px;
+        }
+        
+        .section-actions {
+            display: flex;
+            gap: 8px;
+        }
+        
+        .btn {
+            display: inline-flex;
+            align-items: center;
+            gap: 6px;
+            padding: 8px 16px;
+            border-radius: 8px;
+            font-size: 13px;
+            font-weight: 500;
+            cursor: pointer;
+            transition: all 0.2s;
+            border: 1px solid var(--border-color);
+            background: var(--bg-tertiary);
+            color: var(--text-primary);
+        }
+        
+        .btn:hover {
+            background: var(--bg-primary);
             border-color: var(--accent-blue);
         }
         
-        button {
+        .btn-primary {
             background: var(--accent-blue);
             border-color: var(--accent-blue);
             color: #fff;
         }
         
+        .btn-primary:hover {
+            background: #2563eb;
+        }
+        
+        /* Top Applications Chart */
+        .chart-container {
+            padding: 24px;
+            height: 420px;
+        }
+        
+        /* Filters Section */
+        .filters-bar {
+            display: flex;
+            align-items: center;
+            gap: 16px;
+            padding: 16px 24px;
+            background: var(--bg-tertiary);
+            border-bottom: 1px solid var(--border-color);
+            flex-wrap: wrap;
+        }
+        
+        .filter-group {
+            display: flex;
+            align-items: center;
+            gap: 8px;
+        }
+        
+        .filter-group label {
+            font-size: 13px;
+            color: var(--text-secondary);
+            white-space: nowrap;
+        }
+        
         .quickfilter {
             display: flex;
             gap: 4px;
-            background: var(--bg-tertiary);
+            background: var(--bg-secondary);
             padding: 4px;
             border-radius: 8px;
             border: 1px solid var(--border-color);
@@ -780,15 +1058,16 @@ func DashboardHTML() string {
             background: transparent;
             border: none;
             color: var(--text-secondary);
-            padding: 6px 12px;
+            padding: 6px 14px;
             border-radius: 6px;
             font-size: 13px;
             font-weight: 500;
+            cursor: pointer;
             transition: all 0.2s;
         }
         
         .filter-btn:hover {
-            background: var(--bg-secondary);
+            background: var(--bg-tertiary);
             color: var(--text-primary);
         }
         
@@ -797,55 +1076,496 @@ func DashboardHTML() string {
             color: #fff;
         }
         
-        .stats-grid {
-            display: grid;
-            grid-template-columns: repeat(auto-fit, minmax(200px, 1fr));
-            gap: 16px;
-            margin-bottom: 24px;
-        }
-        
-        .stat-card {
+        /* Custom Select */
+        .custom-select {
             background: var(--bg-secondary);
             border: 1px solid var(--border-color);
+            color: var(--text-primary);
+            padding: 8px 32px 8px 12px;
             border-radius: 8px;
-            padding: 20px;
+            font-size: 13px;
+            cursor: pointer;
+            outline: none;
+            appearance: none;
+            background-image: url("data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' width='12' height='12' viewBox='0 0 24 24' fill='none' stroke='%238b949e' stroke-width='2'%3E%3Cpath d='M6 9l6 6 6-6'/%3E%3C/svg%3E");
+            background-repeat: no-repeat;
+            background-position: right 10px center;
         }
         
-        .stat-card .label {
+        .custom-select:focus {
+            border-color: var(--accent-blue);
+        }
+        
+        .search-input {
+            background: var(--bg-secondary);
+            border: 1px solid var(--border-color);
+            color: var(--text-primary);
+            padding: 8px 12px;
+            border-radius: 8px;
+            font-size: 13px;
+            outline: none;
+            min-width: 200px;
+        }
+        
+        .search-input:focus {
+            border-color: var(--accent-blue);
+        }
+        
+        .search-input::placeholder {
+            color: var(--text-muted);
+        }
+        
+        /* Table Styles */
+        .table-wrapper {
+            overflow-x: auto;
+        }
+        
+        table {
+            width: 100%;
+            border-collapse: collapse;
+        }
+        
+        th, td {
+            padding: 14px 20px;
+            text-align: left;
+        }
+        
+        th {
             font-size: 12px;
+            font-weight: 600;
             color: var(--text-secondary);
             text-transform: uppercase;
             letter-spacing: 0.5px;
-            margin-bottom: 8px;
+            background: var(--bg-tertiary);
+            border-bottom: 1px solid var(--border-color);
+            white-space: nowrap;
         }
         
-        .stat-card .value {
-            font-size: 32px;
+        th.sortable {
+            cursor: pointer;
+            user-select: none;
+            transition: color 0.2s;
+        }
+        
+        th.sortable:hover {
+            color: var(--accent-blue);
+        }
+        
+        th.sort-asc, th.sort-desc {
+            color: var(--accent-blue);
+        }
+        
+        td {
+            font-size: 14px;
+            border-bottom: 1px solid var(--border-color);
+        }
+        
+        tr:hover td {
+            background: rgba(59, 130, 246, 0.05);
+        }
+        
+        tr.clickable-row {
+            cursor: pointer;
+        }
+        
+        /* Status Badge */
+        .status-badge {
+            display: inline-flex;
+            align-items: center;
+            padding: 4px 10px;
+            border-radius: 6px;
+            font-size: 12px;
             font-weight: 600;
+            text-transform: capitalize;
+            border: 1px solid transparent;
         }
         
-        .stat-card .value.success { color: var(--accent-green); }
-        .stat-card .value.failed { color: var(--accent-red); }
-        .stat-card .value.pending { color: var(--accent-yellow); }
-        .stat-card .value.rate { color: var(--accent-blue); }
+        .status-badge.success {
+            background: rgba(34, 197, 94, 0.15);
+            color: var(--accent-green);
+            border-color: rgba(34, 197, 94, 0.3);
+        }
         
+        .status-badge.failed {
+            background: rgba(239, 68, 68, 0.15);
+            color: var(--accent-red);
+            border-color: rgba(239, 68, 68, 0.3);
+        }
+        
+        .status-badge.installing {
+            background: rgba(234, 179, 8, 0.15);
+            color: var(--accent-yellow);
+            border-color: rgba(234, 179, 8, 0.3);
+        }
+        
+        .status-badge.unknown {
+            background: rgba(100, 116, 139, 0.15);
+            color: var(--text-muted);
+            border-color: rgba(100, 116, 139, 0.3);
+        }
+        
+        /* Type Badge */
+        .type-badge {
+            display: inline-flex;
+            align-items: center;
+            padding: 4px 10px;
+            border-radius: 6px;
+            font-size: 11px;
+            font-weight: 700;
+            text-transform: uppercase;
+            letter-spacing: 0.5px;
+        }
+        
+        .type-badge.lxc {
+            background: rgba(34, 211, 238, 0.15);
+            color: var(--accent-cyan);
+            border: 1px solid rgba(34, 211, 238, 0.3);
+        }
+        
+        .type-badge.vm {
+            background: rgba(168, 85, 247, 0.15);
+            color: var(--accent-purple);
+            border: 1px solid rgba(168, 85, 247, 0.3);
+        }
+        
+        .type-badge.tool {
+            background: rgba(249, 115, 22, 0.15);
+            color: var(--accent-orange);
+            border: 1px solid rgba(249, 115, 22, 0.3);
+        }
+        
+        .type-badge.addon {
+            background: rgba(236, 72, 153, 0.15);
+            color: var(--accent-pink);
+            border: 1px solid rgba(236, 72, 153, 0.3);
+        }
+        
+        /* Pagination */
+        .table-footer {
+            display: flex;
+            justify-content: space-between;
+            align-items: center;
+            padding: 16px 24px;
+            background: var(--bg-tertiary);
+            border-top: 1px solid var(--border-color);
+        }
+        
+        .pagination {
+            display: flex;
+            align-items: center;
+            gap: 8px;
+        }
+        
+        .pagination button {
+            padding: 8px 14px;
+            border-radius: 6px;
+            font-size: 13px;
+            border: 1px solid var(--border-color);
+            background: var(--bg-secondary);
+            color: var(--text-primary);
+            cursor: pointer;
+            transition: all 0.2s;
+        }
+        
+        .pagination button:hover:not(:disabled) {
+            border-color: var(--accent-blue);
+            background: var(--bg-primary);
+        }
+        
+        .pagination button:disabled {
+            opacity: 0.5;
+            cursor: not-allowed;
+        }
+        
+        .pagination-info {
+            font-size: 13px;
+            color: var(--text-secondary);
+        }
+        
+        .per-page-select {
+            display: flex;
+            align-items: center;
+            gap: 8px;
+        }
+        
+        .per-page-select label {
+            font-size: 13px;
+            color: var(--text-secondary);
+        }
+        
+        /* Loading & Error States */
+        .loading {
+            display: flex;
+            flex-direction: column;
+            justify-content: center;
+            align-items: center;
+            padding: 60px 20px;
+            color: var(--text-secondary);
+        }
+        
+        .loading-spinner {
+            width: 40px;
+            height: 40px;
+            border: 3px solid var(--border-color);
+            border-top-color: var(--accent-blue);
+            border-radius: 50%;
+            animation: spin 1s linear infinite;
+            margin-bottom: 16px;
+        }
+        
+        @keyframes spin {
+            to { transform: rotate(360deg); }
+        }
+        
+        .error-banner {
+            background: rgba(239, 68, 68, 0.1);
+            border: 1px solid rgba(239, 68, 68, 0.3);
+            color: var(--accent-red);
+            padding: 16px 24px;
+            border-radius: 8px;
+            margin-bottom: 24px;
+            display: flex;
+            align-items: center;
+            gap: 12px;
+        }
+        
+        /* Modal Styles */
+        .modal-overlay {
+            position: fixed;
+            top: 0;
+            left: 0;
+            right: 0;
+            bottom: 0;
+            background: rgba(0, 0, 0, 0.75);
+            display: flex;
+            justify-content: center;
+            align-items: center;
+            z-index: 1000;
+            opacity: 0;
+            visibility: hidden;
+            transition: opacity 0.2s, visibility 0.2s;
+            backdrop-filter: blur(4px);
+        }
+        
+        .modal-overlay.active {
+            opacity: 1;
+            visibility: visible;
+        }
+        
+        .modal-content {
+            background: var(--bg-card);
+            border: 1px solid var(--border-color);
+            border-radius: 16px;
+            width: 90%;
+            max-width: 700px;
+            max-height: 90vh;
+            overflow-y: auto;
+            transform: scale(0.95) translateY(10px);
+            transition: transform 0.2s;
+            box-shadow: var(--shadow-lg);
+        }
+        
+        .modal-overlay.active .modal-content {
+            transform: scale(1) translateY(0);
+        }
+        
+        .modal-header {
+            display: flex;
+            justify-content: space-between;
+            align-items: center;
+            padding: 20px 24px;
+            border-bottom: 1px solid var(--border-color);
+            position: sticky;
+            top: 0;
+            background: var(--bg-card);
+            z-index: 10;
+        }
+        
+        .modal-header h2 {
+            font-size: 18px;
+            font-weight: 600;
+            display: flex;
+            align-items: center;
+            gap: 10px;
+        }
+        
+        .modal-close {
+            width: 36px;
+            height: 36px;
+            display: flex;
+            align-items: center;
+            justify-content: center;
+            border-radius: 8px;
+            background: transparent;
+            border: none;
+            color: var(--text-secondary);
+            font-size: 20px;
+            cursor: pointer;
+            transition: background 0.2s;
+        }
+        
+        .modal-close:hover {
+            background: var(--bg-tertiary);
+            color: var(--text-primary);
+        }
+        
+        .modal-body {
+            padding: 24px;
+        }
+        
+        /* Detail Modal Sections */
+        .detail-section {
+            margin-bottom: 24px;
+        }
+        
+        .detail-section:last-child {
+            margin-bottom: 0;
+        }
+        
+        .detail-section-header {
+            display: flex;
+            align-items: center;
+            gap: 8px;
+            font-size: 12px;
+            font-weight: 600;
+            color: var(--text-secondary);
+            text-transform: uppercase;
+            letter-spacing: 0.5px;
+            margin-bottom: 12px;
+            padding-bottom: 8px;
+            border-bottom: 1px solid var(--border-color);
+        }
+        
+        .detail-grid {
+            display: grid;
+            grid-template-columns: repeat(auto-fit, minmax(180px, 1fr));
+            gap: 12px;
+        }
+        
+        .detail-item {
+            background: var(--bg-tertiary);
+            border-radius: 8px;
+            padding: 12px 16px;
+        }
+        
+        .detail-item .label {
+            font-size: 11px;
+            color: var(--text-muted);
+            text-transform: uppercase;
+            letter-spacing: 0.3px;
+            margin-bottom: 4px;
+        }
+        
+        .detail-item .value {
+            font-size: 14px;
+            font-weight: 500;
+            word-break: break-word;
+        }
+        
+        .detail-item .value.mono {
+            font-family: 'SF Mono', 'Consolas', monospace;
+            font-size: 12px;
+        }
+        
+        .detail-item .value.status-success { color: var(--accent-green); }
+        .detail-item .value.status-failed { color: var(--accent-red); }
+        .detail-item .value.status-installing { color: var(--accent-yellow); }
+        
+        .error-box {
+            background: rgba(239, 68, 68, 0.1);
+            border: 1px solid rgba(239, 68, 68, 0.3);
+            border-radius: 8px;
+            padding: 16px;
+            font-family: 'SF Mono', 'Consolas', monospace;
+            font-size: 12px;
+            color: var(--accent-red);
+            white-space: pre-wrap;
+            word-break: break-word;
+            max-height: 200px;
+            overflow-y: auto;
+        }
+        
+        /* Health Modal */
+        .health-modal {
+            max-width: 420px;
+        }
+        
+        .health-status {
+            display: flex;
+            align-items: center;
+            gap: 16px;
+            padding: 20px;
+            border-radius: 12px;
+            margin-bottom: 16px;
+        }
+        
+        .health-status.ok {
+            background: rgba(34, 197, 94, 0.1);
+            border: 1px solid rgba(34, 197, 94, 0.3);
+        }
+        
+        .health-status.error {
+            background: rgba(239, 68, 68, 0.1);
+            border: 1px solid rgba(239, 68, 68, 0.3);
+        }
+        
+        .health-status .icon {
+            font-size: 36px;
+        }
+        
+        .health-status .details .title {
+            font-weight: 600;
+            font-size: 16px;
+        }
+        
+        .health-status .details .subtitle {
+            font-size: 13px;
+            color: var(--text-secondary);
+            margin-top: 4px;
+        }
+        
+        .health-info {
+            background: var(--bg-tertiary);
+            border-radius: 8px;
+            padding: 16px;
+        }
+        
+        .health-info div {
+            display: flex;
+            justify-content: space-between;
+            padding: 8px 0;
+            font-size: 13px;
+            border-bottom: 1px solid var(--border-color);
+        }
+        
+        .health-info div:last-child {
+            border-bottom: none;
+        }
+        
+        /* Secondary Charts Section */
         .charts-grid {
             display: grid;
-            grid-template-columns: 2fr 1fr;
-            gap: 16px;
+            grid-template-columns: repeat(3, 1fr);
+            gap: 20px;
             margin-bottom: 24px;
         }
         
         @media (max-width: 1200px) {
+            .charts-grid {
+                grid-template-columns: repeat(2, 1fr);
+            }
+        }
+        
+        @media (max-width: 768px) {
             .charts-grid {
                 grid-template-columns: 1fr;
             }
         }
         
         .chart-card {
-            background: var(--bg-secondary);
+            background: var(--bg-card);
             border: 1px solid var(--border-color);
-            border-radius: 8px;
+            border-radius: 12px;
             padding: 20px;
         }
         
@@ -856,348 +1576,8 @@ func DashboardHTML() string {
             color: var(--text-secondary);
         }
         
-        .chart-container {
-            position: relative;
-            height: 300px;
-        }
-        
-        .small-charts {
-            display: grid;
-            grid-template-columns: repeat(auto-fit, minmax(300px, 1fr));
-            gap: 16px;
-            margin-bottom: 24px;
-        }
-        
-        .table-card {
-            background: var(--bg-secondary);
-            border: 1px solid var(--border-color);
-            border-radius: 8px;
-            overflow: hidden;
-        }
-        
-        .table-card h3 {
-            font-size: 14px;
-            font-weight: 600;
-            padding: 16px 20px;
-            border-bottom: 1px solid var(--border-color);
-            color: var(--text-secondary);
-        }
-        
-        .filters {
-            padding: 12px 20px;
-            background: var(--bg-tertiary);
-            border-bottom: 1px solid var(--border-color);
-            display: flex;
-            gap: 12px;
-            flex-wrap: wrap;
-        }
-        
-        .filters input, .filters select {
-            background: var(--bg-secondary);
-            flex: 1;
-            min-width: 150px;
-        }
-        
-        table {
-            width: 100%;
-            border-collapse: collapse;
-        }
-        
-        th, td {
-            padding: 12px 20px;
-            text-align: left;
-            border-bottom: 1px solid var(--border-color);
-        }
-        
-        th {
-            font-size: 12px;
-            font-weight: 600;
-            color: var(--text-secondary);
-            text-transform: uppercase;
-            background: var(--bg-tertiary);
-        }
-        
-        td {
-            font-size: 14px;
-        }
-        
-        tr:hover {
-            background: var(--bg-tertiary);
-        }
-        
-        .status-badge {
-            display: inline-block;
-            padding: 4px 8px;
-            border-radius: 4px;
-            font-size: 12px;
-            font-weight: 500;
-        }
-        
-        .status-badge.success { background: rgba(63, 185, 80, 0.2); color: var(--accent-green); }
-        .status-badge.failed { background: rgba(248, 81, 73, 0.2); color: var(--accent-red); }
-        .status-badge.installing { background: rgba(210, 153, 34, 0.2); color: var(--accent-yellow); }
-        
-        th.sortable {
-            cursor: pointer;
-            user-select: none;
-            transition: background-color 0.2s;
-        }
-        th.sortable:hover {
-            background: rgba(88, 166, 255, 0.1);
-        }
-        th.sort-asc, th.sort-desc {
-            background: rgba(88, 166, 255, 0.15);
-            color: var(--accent-blue);
-        }
-        
-        .loading {
-            display: flex;
-            justify-content: center;
-            align-items: center;
+        .chart-card .chart-wrapper {
             height: 200px;
-            color: var(--text-secondary);
-        }
-        
-        .error {
-            background: rgba(248, 81, 73, 0.1);
-            border: 1px solid var(--accent-red);
-            color: var(--accent-red);
-            padding: 16px;
-            border-radius: 8px;
-            margin-bottom: 24px;
-        }
-        
-        .last-updated {
-            font-size: 12px;
-            color: var(--text-secondary);
-        }
-        
-        .footer {
-            margin-top: 24px;
-            padding-top: 16px;
-            border-top: 1px solid var(--border-color);
-            display: flex;
-            justify-content: space-between;
-            align-items: center;
-            color: var(--text-secondary);
-            font-size: 12px;
-        }
-        
-        .footer a {
-            color: var(--accent-blue);
-            text-decoration: none;
-        }
-        
-        .footer a:hover {
-            text-decoration: underline;
-        }
-        
-        .export-btn {
-            background: var(--bg-tertiary);
-            border-color: var(--border-color);
-            color: var(--text-primary);
-        }
-        
-        .export-btn:hover {
-            background: var(--bg-secondary);
-        }
-        
-        .admin-btn {
-            background: var(--bg-tertiary);
-            border: 1px solid var(--border-color);
-            color: var(--text-primary);
-            padding: 4px 8px;
-            border-radius: 4px;
-            font-size: 12px;
-            cursor: pointer;
-            margin-left: 8px;
-        }
-        
-        .admin-btn:hover {
-            background: var(--accent-blue);
-            color: #fff;
-            border-color: var(--accent-blue);
-        }
-        
-        .admin-btn:disabled {
-            opacity: 0.5;
-            cursor: not-allowed;
-        }
-        
-        .footer-btn {
-            background: transparent;
-            border: none;
-            color: var(--accent-blue);
-            cursor: pointer;
-            font-size: 12px;
-            padding: 0;
-            margin-right: 8px;
-        }
-        
-        .footer-btn:hover {
-            text-decoration: underline;
-        }
-        
-        .health-modal {
-            max-width: 400px;
-        }
-        
-        .health-status {
-            display: flex;
-            align-items: center;
-            gap: 12px;
-            padding: 16px;
-            border-radius: 8px;
-            margin-bottom: 12px;
-        }
-        
-        .health-status.ok {
-            background: rgba(63, 185, 80, 0.1);
-            border: 1px solid var(--accent-green);
-        }
-        
-        .health-status.error {
-            background: rgba(248, 81, 73, 0.1);
-            border: 1px solid var(--accent-red);
-        }
-        
-        .health-status .icon {
-            font-size: 32px;
-        }
-        
-        .health-status .details {
-            flex: 1;
-        }
-        
-        .health-status .title {
-            font-weight: 600;
-            font-size: 16px;
-        }
-        
-        .health-status .subtitle {
-            font-size: 12px;
-            color: var(--text-secondary);
-            margin-top: 4px;
-        }
-        
-        .health-info {
-            font-size: 12px;
-            color: var(--text-secondary);
-            padding: 12px;
-            background: var(--bg-tertiary);
-            border-radius: 6px;
-        }
-        
-        .health-info div {
-            display: flex;
-            justify-content: space-between;
-            padding: 4px 0;
-        }
-        
-        .pve-version-card {
-            background: var(--bg-secondary);
-            border: 1px solid var(--border-color);
-            border-radius: 8px;
-            padding: 16px;
-            margin-bottom: 24px;
-        }
-        
-        .pve-version-card h3 {
-            font-size: 14px;
-            font-weight: 600;
-            margin-bottom: 12px;
-            color: var(--text-secondary);
-        }
-        
-        .pve-versions {
-            display: flex;
-            flex-wrap: wrap;
-            gap: 8px;
-        }
-        
-        .pve-badge {
-            background: var(--bg-tertiary);
-            padding: 6px 12px;
-            border-radius: 16px;
-            font-size: 12px;
-            display: flex;
-            align-items: center;
-            gap: 6px;
-        }
-        
-        .pve-badge .count {
-            background: var(--accent-purple);
-            color: #fff;
-            padding: 2px 6px;
-            border-radius: 10px;
-            font-size: 10px;
-        }
-        
-        .theme-toggle {
-            background: var(--bg-tertiary);
-            border: 1px solid var(--border-color);
-            color: var(--text-primary);
-            padding: 8px 12px;
-            border-radius: 6px;
-            cursor: pointer;
-            display: flex;
-            align-items: center;
-            gap: 6px;
-        }
-        
-        .theme-toggle:hover {
-            border-color: var(--accent-blue);
-        }
-        
-        .error-analysis-card {
-            background: var(--bg-secondary);
-            border: 1px solid var(--border-color);
-            border-radius: 8px;
-            padding: 16px;
-            margin-bottom: 24px;
-        }
-        
-        .error-analysis-card h3 {
-            font-size: 14px;
-            font-weight: 600;
-            margin-bottom: 12px;
-            color: var(--text-secondary);
-            display: flex;
-            align-items: center;
-            gap: 8px;
-        }
-        
-        .error-list {
-            display: flex;
-            flex-direction: column;
-            gap: 8px;
-        }
-        
-        .error-item {
-            background: var(--bg-tertiary);
-            border-radius: 6px;
-            padding: 12px;
-            display: flex;
-            justify-content: space-between;
-            align-items: center;
-        }
-        
-        .error-item .pattern {
-            font-family: monospace;
-            color: var(--accent-red);
-            font-size: 13px;
-        }
-        
-        .error-item .meta {
-            font-size: 12px;
-            color: var(--text-secondary);
-        }
-        
-        .error-item .count-badge {
-            background: var(--accent-red);
-            color: #fff;
-            padding: 4px 10px;
-            border-radius: 12px;
             font-size: 12px;
             font-weight: 600;
         }
@@ -1415,185 +1795,307 @@ func DashboardHTML() string {
     </style>
 </head>
 <body>
-    <div class="header">
-        <h1>
-            <svg width="32" height="32" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
-                <path d="M3 3v18h18"/>
-                <path d="M18.7 8l-5.1 5.2-2.8-2.7L7 14.3"/>
+    <!-- Navigation Bar -->
+    <nav class="navbar">
+        <a href="https://community-scripts.github.io/ProxmoxVE/" class="navbar-brand" target="_blank">
+            <svg width="28" height="28" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5">
+                <polyline points="4 17 10 11 4 5"/>
+                <line x1="12" y1="19" x2="20" y2="19"/>
             </svg>
-            Telemetry Dashboard
-        </h1>
-        <div class="controls">
-            <div class="quickfilter">
-                <select id="repoFilter" onchange="refreshData()" title="Filter by repository source" style="background:var(--bg-tertiary);border:none;color:var(--text-primary);padding:6px 10px;border-radius:6px;font-size:13px;cursor:pointer;outline:none;">
+            Proxmox VE Helper-Scripts
+        </a>
+        
+        <div class="navbar-center">
+            <div class="search-box">
+                <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
+                    <circle cx="11" cy="11" r="8"/>
+                    <path d="m21 21-4.35-4.35"/>
+                </svg>
+                <input type="text" id="globalSearch" placeholder="Search scripts..." onkeyup="handleGlobalSearch(event)">
+                <span class="shortcut">Ctrl+K</span>
+            </div>
+        </div>
+        
+        <div class="navbar-actions">
+            <a href="https://github.com/community-scripts/ProxmoxVE" target="_blank" class="github-stars" id="githubStars">
+                <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
+                    <polygon points="12 2 15.09 8.26 22 9.27 17 14.14 18.18 21.02 12 17.77 5.82 21.02 7 14.14 2 9.27 8.91 8.26 12 2"/>
+                </svg>
+                <span id="starCount">-</span>
+            </a>
+            <a href="https://github.com/community-scripts/ProxmoxVE" target="_blank" class="nav-icon" title="GitHub">
+                <svg width="20" height="20" viewBox="0 0 24 24" fill="currentColor">
+                    <path d="M12 0c-6.626 0-12 5.373-12 12 0 5.302 3.438 9.8 8.207 11.387.599.111.793-.261.793-.577v-2.234c-3.338.726-4.033-1.416-4.033-1.416-.546-1.387-1.333-1.756-1.333-1.756-1.089-.745.083-.729.083-.729 1.205.084 1.839 1.237 1.839 1.237 1.07 1.834 2.807 1.304 3.492.997.107-.775.418-1.305.762-1.604-2.665-.305-5.467-1.334-5.467-5.931 0-1.311.469-2.381 1.236-3.221-.124-.303-.535-1.524.117-3.176 0 0 1.008-.322 3.301 1.23.957-.266 1.983-.399 3.003-.404 1.02.005 2.047.138 3.006.404 2.291-1.552 3.297-1.23 3.297-1.23.653 1.653.242 2.874.118 3.176.77.84 1.235 1.911 1.235 3.221 0 4.609-2.807 5.624-5.479 5.921.43.372.823 1.102.823 2.222v3.293c0 .319.192.694.801.576 4.765-1.589 8.199-6.086 8.199-11.386 0-6.627-5.373-12-12-12z"/>
+                </svg>
+            </a>
+            <a href="https://discord.gg/2wvnMDgeFz" target="_blank" class="nav-icon" title="Discord">
+                <svg width="20" height="20" viewBox="0 0 24 24" fill="currentColor">
+                    <path d="M20.317 4.37a19.79 19.79 0 00-4.885-1.515.074.074 0 00-.079.037c-.21.375-.444.865-.608 1.25a18.27 18.27 0 00-5.487 0 12.64 12.64 0 00-.617-1.25.077.077 0 00-.079-.037A19.74 19.74 0 003.677 4.37a.07.07 0 00-.032.028C.533 9.046-.32 13.58.099 18.057a.082.082 0 00.031.057 19.9 19.9 0 005.993 3.03.078.078 0 00.084-.028c.462-.63.873-1.295 1.226-1.994a.076.076 0 00-.041-.106 13.11 13.11 0 01-1.872-.892.077.077 0 01-.008-.128c.126-.094.252-.192.372-.291a.074.074 0 01.078-.01c3.928 1.793 8.18 1.793 12.062 0a.074.074 0 01.078.009c.12.1.246.198.373.292a.077.077 0 01-.006.127 12.3 12.3 0 01-1.873.892.076.076 0 00-.041.107c.36.698.772 1.363 1.225 1.993a.076.076 0 00.084.029 19.84 19.84 0 006.002-3.03.077.077 0 00.032-.054c.5-5.177-.838-9.674-3.549-13.66a.06.06 0 00-.031-.03zM8.02 15.33c-1.183 0-2.157-1.086-2.157-2.419s.955-2.419 2.157-2.419c1.21 0 2.176 1.096 2.157 2.42 0 1.332-.956 2.418-2.157 2.418zm7.975 0c-1.183 0-2.157-1.086-2.157-2.419s.955-2.419 2.157-2.419c1.21 0 2.176 1.096 2.157 2.42 0 1.332-.946 2.418-2.157 2.418z"/>
+                </svg>
+            </a>
+            <button class="theme-toggle" onclick="toggleTheme()" title="Toggle theme">
+                <span id="themeIcon">🌙</span>
+            </button>
+        </div>
+    </nav>
+    
+    <!-- Main Content -->
+    <div class="main-content">
+        <!-- Page Header -->
+        <div class="page-header">
+            <h1>Analytics</h1>
+            <p>Overview of container installations and system statistics.</p>
+        </div>
+        
+        <!-- Filters Bar -->
+        <div class="filters-bar" style="background: var(--bg-card); border: 1px solid var(--border-color); border-radius: 12px; margin-bottom: 24px;">
+            <div class="filter-group">
+                <label>Source:</label>
+                <select id="repoFilter" class="custom-select" onchange="refreshData()">
                     <option value="ProxmoxVE" selected>ProxmoxVE</option>
                     <option value="ProxmoxVED">ProxmoxVED</option>
+                    <option value="Proxmox VE">Proxmox VE (Legacy)</option>
                     <option value="external">External</option>
                     <option value="all">All Sources</option>
                 </select>
-                <span style="color:var(--border-color);padding:0 2px;">|</span>
-                <button class="filter-btn" data-days="7">7 Days</button>
-                <button class="filter-btn active" data-days="30">30 Days</button>
-                <button class="filter-btn" data-days="90">90 Days</button>
-                <button class="filter-btn" data-days="365">1 Year</button>
-                <button class="filter-btn" data-days="0">All</button>
             </div>
-            <button onclick="refreshData()">Refresh</button>
-            <button class="theme-toggle" onclick="toggleTheme()">
-                <span id="themeIcon">🌙</span>
-            </button>
-            <span class="last-updated" id="lastUpdated"></span>
-        </div>
-    </div>
-    
-    <div id="error" class="error" style="display: none;"></div>
-    
-    <div class="stats-grid">
-        <div class="stat-card">
-            <div class="label">Total Installations</div>
-            <div class="value" id="totalInstalls">-</div>
-        </div>
-        <div class="stat-card">
-            <div class="label">Successful</div>
-            <div class="value success" id="successCount">-</div>
-        </div>
-        <div class="stat-card">
-            <div class="label">Failed</div>
-            <div class="value failed" id="failedCount">-</div>
-        </div>
-        <div class="stat-card">
-            <div class="label">In Progress</div>
-            <div class="value pending" id="installingCount">-</div>
-        </div>
-        <div class="stat-card">
-            <div class="label">Success Rate</div>
-            <div class="value rate" id="successRate">-</div>
-        </div>
-        <div class="stat-card">
-            <div class="label">LXC / VM</div>
-            <div class="value" id="typeStats" style="font-size: 20px;">-</div>
-        </div>
-    </div>
-    
-    <div class="pve-version-card">
-        <h3>Proxmox VE Versions</h3>
-        <div class="pve-versions" id="pveVersions">
-            <span class="loading">Loading...</span>
-        </div>
-    </div>
-    
-    <div class="charts-grid">
-        <div class="chart-card">
-            <h3>Installations Over Time</h3>
-            <div class="chart-container">
-                <canvas id="dailyChart"></canvas>
+            <div class="filter-group">
+                <label>Period:</label>
+                <div class="quickfilter">
+                    <button class="filter-btn" data-days="7">7 Days</button>
+                    <button class="filter-btn active" data-days="30">30 Days</button>
+                    <button class="filter-btn" data-days="90">90 Days</button>
+                    <button class="filter-btn" data-days="365">1 Year</button>
+                    <button class="filter-btn" data-days="0">All</button>
+                </div>
+            </div>
+            <div style="margin-left: auto; display: flex; gap: 8px;">
+                <button class="btn" onclick="refreshData()">
+                    <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
+                        <path d="M23 4v6h-6"/><path d="M1 20v-6h6"/>
+                        <path d="M3.51 9a9 9 0 0114.85-3.36L23 10M1 14l4.64 4.36A9 9 0 0020.49 15"/>
+                    </svg>
+                    Refresh
+                </button>
+                <span class="last-updated" id="lastUpdated" style="align-self: center; font-size: 12px; color: var(--text-muted);"></span>
             </div>
         </div>
-        <div class="chart-card">
-            <h3>Status Distribution</h3>
-            <div class="chart-container">
-                <canvas id="statusChart"></canvas>
-            </div>
-        </div>
-    </div>
-    
-    <div class="small-charts">
-        <div class="chart-card">
-            <h3>Top Applications</h3>
-            <div class="chart-container">
-                <canvas id="appsChart"></canvas>
-            </div>
-        </div>
-        <div class="chart-card">
-            <h3>OS Distribution</h3>
-            <div class="chart-container">
-                <canvas id="osChart"></canvas>
-            </div>
-        </div>
-        <div class="chart-card">
-            <h3>Installation Method</h3>
-            <div class="chart-container">
-                <canvas id="methodChart"></canvas>
-            </div>
-        </div>
-    </div>
-    
-    <div class="error-analysis-card">
-        <h3>
-            <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
+        
+        <!-- Error Banner -->
+        <div id="error" class="error-banner" style="display: none;">
+            <svg width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
                 <circle cx="12" cy="12" r="10"/>
                 <line x1="12" y1="8" x2="12" y2="12"/>
                 <line x1="12" y1="16" x2="12.01" y2="16"/>
             </svg>
-            Error Analysis
-        </h3>
-        <div class="error-list" id="errorList">
-            <span class="loading">Loading...</span>
+            <span id="errorText"></span>
         </div>
-    </div>
-    
-    <div class="error-analysis-card">
-        <h3>
-            <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
-                <path d="M10.29 3.86L1.82 18a2 2 0 0 0 1.71 3h16.94a2 2 0 0 0 1.71-3L13.71 3.86a2 2 0 0 0-3.42 0z"/>
-                <line x1="12" y1="9" x2="12" y2="13"/>
-                <line x1="12" y1="17" x2="12.01" y2="17"/>
-            </svg>
-            Apps with Highest Failure Rates
-        </h3>
-        <div class="failed-apps-grid" id="failedAppsGrid">
-            <span class="loading">Loading...</span>
+        
+        <!-- Stats Cards -->
+        <div class="stats-grid">
+            <div class="stat-card">
+                <div class="stat-card-header">
+                    <span class="stat-card-label">Total Created</span>
+                    <div class="stat-card-icon">
+                        <svg width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
+                            <rect x="3" y="3" width="18" height="18" rx="2" ry="2"/>
+                            <line x1="9" y1="9" x2="15" y2="9"/>
+                            <line x1="9" y1="13" x2="15" y2="13"/>
+                            <line x1="9" y1="17" x2="11" y2="17"/>
+                        </svg>
+                    </div>
+                </div>
+                <div class="stat-card-value" id="totalInstalls">-</div>
+                <div class="stat-card-subtitle">Total LXC/VM entries found</div>
+            </div>
+            
+            <div class="stat-card success">
+                <div class="stat-card-header">
+                    <span class="stat-card-label">Success Rate</span>
+                    <div class="stat-card-icon">
+                        <svg width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
+                            <path d="M22 11.08V12a10 10 0 1 1-5.93-9.14"/>
+                            <polyline points="22 4 12 14.01 9 11.01"/>
+                        </svg>
+                    </div>
+                </div>
+                <div class="stat-card-value" id="successRate">-</div>
+                <div class="stat-card-subtitle" id="successSubtitle">successful installations</div>
+            </div>
+            
+            <div class="stat-card failed">
+                <div class="stat-card-header">
+                    <span class="stat-card-label">Failures</span>
+                    <div class="stat-card-icon">
+                        <svg width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
+                            <circle cx="12" cy="12" r="10"/>
+                            <line x1="15" y1="9" x2="9" y2="15"/>
+                            <line x1="9" y1="9" x2="15" y2="15"/>
+                        </svg>
+                    </div>
+                </div>
+                <div class="stat-card-value" id="failedCount">-</div>
+                <div class="stat-card-subtitle">Installations encountered errors</div>
+            </div>
+            
+            <div class="stat-card popular">
+                <div class="stat-card-header">
+                    <span class="stat-card-label">Most Popular</span>
+                    <div class="stat-card-icon">
+                        <svg width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
+                            <path d="M12 2L15.09 8.26 22 9.27 17 14.14 18.18 21.02 12 17.77 5.82 21.02 7 14.14 2 9.27 8.91 8.26 12 2z"/>
+                        </svg>
+                    </div>
+                </div>
+                <div class="stat-card-value" id="mostPopular">-</div>
+                <div class="stat-card-subtitle" id="popularSubtitle">installations</div>
+            </div>
         </div>
-    </div>
-    
-    <div class="table-card">
-        <h3>Recent Installations</h3>
-        <div class="filters">
-            <input type="text" id="filterApp" placeholder="Filter by app..." oninput="filterTable()">
-            <select id="filterStatus" onchange="filterTable()">
-                <option value="">All Status</option>
-                <option value="success">Success</option>
-                <option value="failed">Failed</option>
-                <option value="installing">Installing</option>
-            </select>
-            <select id="filterOs" onchange="filterTable()">
-                <option value="">All OS</option>
-            </select>
+        
+        <!-- Top Applications Section -->
+        <div class="section-card">
+            <div class="section-header">
+                <div>
+                    <h2>Top Applications</h2>
+                    <p>The most frequently installed applications.</p>
+                </div>
+                <div class="section-actions">
+                    <button class="btn" id="viewAllAppsBtn" onclick="toggleAllApps()">
+                        <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
+                            <line x1="8" y1="6" x2="21" y2="6"/>
+                            <line x1="8" y1="12" x2="21" y2="12"/>
+                            <line x1="8" y1="18" x2="21" y2="18"/>
+                            <line x1="3" y1="6" x2="3.01" y2="6"/>
+                            <line x1="3" y1="12" x2="3.01" y2="12"/>
+                            <line x1="3" y1="18" x2="3.01" y2="18"/>
+                        </svg>
+                        View All
+                    </button>
+                </div>
+            </div>
+            <div class="chart-container" id="appsChartContainer">
+                <canvas id="appsChart"></canvas>
+            </div>
         </div>
-        <table id="installTable">
-            <thead>
-                <tr>
-                    <th data-sort="nsapp" class="sortable">App</th>
-                    <th data-sort="status" class="sortable">Status</th>
-                    <th data-sort="os_type" class="sortable">OS</th>
-                    <th data-sort="type" class="sortable">Type</th>
-                    <th data-sort="method" class="sortable">Method</th>
-                    <th>Resources</th>
-                    <th data-sort="exit_code" class="sortable">Exit Code</th>
-                    <th>Error</th>
-                    <th data-sort="created" class="sortable sort-desc">Created ▼</th>
-                </tr>
-            </thead>
-            <tbody id="recordsTable">
-                <tr><td colspan="9" class="loading">Loading...</td></tr>
-            </tbody>
-        </table>
-        <div class="pagination">
-            <button onclick="prevPage()" id="prevBtn" disabled>← Previous</button>
-            <span id="pageInfo">Page 1</span>
-            <button onclick="nextPage()" id="nextBtn">Next →</button>
+        
+        <!-- Secondary Charts -->
+        <div class="charts-grid">
+            <div class="chart-card">
+                <h3>Installations Over Time</h3>
+                <div class="chart-wrapper">
+                    <canvas id="dailyChart"></canvas>
+                </div>
+            </div>
+            <div class="chart-card">
+                <h3>OS Distribution</h3>
+                <div class="chart-wrapper">
+                    <canvas id="osChart"></canvas>
+                </div>
+            </div>
+            <div class="chart-card">
+                <h3>Status Distribution</h3>
+                <div class="chart-wrapper">
+                    <canvas id="statusChart"></canvas>
+                </div>
+            </div>
         </div>
-    </div>
-    
-    <div class="footer">
-        <div>
-            <a href="https://github.com/community-scripts/ProxmoxVED" target="_blank">ProxmoxVE Helper Scripts</a> 
-            &bull; Telemetry is anonymous and privacy-friendly
+        
+        <!-- Error Analysis Section -->
+        <div class="section-card">
+            <div class="section-header">
+                <div>
+                    <h2>Error Analysis</h2>
+                    <p>Common error patterns and affected applications.</p>
+                </div>
+            </div>
+            <div class="error-list" id="errorList">
+                <div class="loading"><div class="loading-spinner"></div>Loading...</div>
+            </div>
         </div>
-        <div>
-            <button class="footer-btn" onclick="exportCSV()">Export CSV</button>
-            <button class="footer-btn" onclick="showHealthCheck()">Health Check</button>
-            <a href="/api/dashboard" target="_blank">API</a>
+        
+        <!-- Failed Apps Section -->
+        <div class="section-card">
+            <div class="section-header">
+                <div>
+                    <h2>Apps with Highest Failure Rates</h2>
+                    <p>Applications that need attention.</p>
+                </div>
+            </div>
+            <div class="failed-apps-grid" id="failedAppsGrid">
+                <div class="loading"><div class="loading-spinner"></div>Loading...</div>
+            </div>
+        </div>
+        
+        <!-- Installation Log Section -->
+        <div class="section-card">
+            <div class="section-header">
+                <div>
+                    <h2>Installation Log</h2>
+                    <p>Detailed records of all container creation attempts.</p>
+                </div>
+                <div class="section-actions">
+                    <button class="btn" onclick="exportCSV()">
+                        <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
+                            <path d="M21 15v4a2 2 0 01-2 2H5a2 2 0 01-2-2v-4"/>
+                            <polyline points="7 10 12 15 17 10"/>
+                            <line x1="12" y1="15" x2="12" y2="3"/>
+                        </svg>
+                        Export CSV
+                    </button>
+                </div>
+            </div>
+            <div class="filters-bar">
+                <input type="text" class="search-input" id="filterApp" placeholder="Filter by application..." oninput="filterTable()">
+                <select id="filterStatus" class="custom-select" onchange="filterTable()">
+                    <option value="">All Status</option>
+                    <option value="success">Success</option>
+                    <option value="failed">Failed</option>
+                    <option value="installing">Installing</option>
+                    <option value="unknown">Unknown</option>
+                </select>
+                <select id="filterOs" class="custom-select" onchange="filterTable()">
+                    <option value="">All OS</option>
+                </select>
+                <select id="filterType" class="custom-select" onchange="filterTable()">
+                    <option value="">All Types</option>
+                    <option value="lxc">LXC</option>
+                    <option value="vm">VM</option>
+                </select>
+            </div>
+            <div class="table-wrapper">
+                <table id="installTable">
+                    <thead>
+                        <tr>
+                            <th data-sort="status" class="sortable">Status</th>
+                            <th data-sort="type" class="sortable">Type</th>
+                            <th data-sort="nsapp" class="sortable">Application</th>
+                            <th data-sort="os_type" class="sortable">OS</th>
+                            <th>Disk Size</th>
+                            <th>Core Count</th>
+                            <th>RAM Size</th>
+                            <th data-sort="created" class="sortable sort-desc">Created At</th>
+                        </tr>
+                    </thead>
+                    <tbody id="recordsTable">
+                        <tr><td colspan="8"><div class="loading"><div class="loading-spinner"></div>Loading...</div></td></tr>
+                    </tbody>
+                </table>
+            </div>
+            <div class="table-footer">
+                <div class="per-page-select">
+                    <label>Show:</label>
+                    <select id="perPageSelect" class="custom-select" onchange="changePerPage()">
+                        <option value="25" selected>25</option>
+                        <option value="50">50</option>
+                        <option value="100">100</option>
+                    </select>
+                </div>
+                <div class="pagination">
+                    <button onclick="prevPage()" id="prevBtn" disabled>Previous</button>
+                    <span class="pagination-info" id="pageInfo">Page 1</span>
+                    <button onclick="nextPage()" id="nextBtn">Next</button>
+                </div>
+            </div>
         </div>
     </div>
     
@@ -1601,11 +2103,11 @@ func DashboardHTML() string {
     <div class="modal-overlay" id="healthModal" onclick="closeHealthModal(event)">
         <div class="modal-content health-modal" onclick="event.stopPropagation()">
             <div class="modal-header">
-                <h2>🏥 Health Check</h2>
+                <h2>Health Check</h2>
                 <button class="modal-close" onclick="closeHealthModal()">&times;</button>
             </div>
             <div class="modal-body" id="healthModalBody">
-                <div class="loading">Checking...</div>
+                <div class="loading"><div class="loading-spinner"></div>Checking...</div>
             </div>
         </div>
     </div>
@@ -1634,16 +2136,41 @@ func DashboardHTML() string {
     <script>
         let charts = {};
         let allRecords = [];
+        let allAppsData = [];
+        let showingAllApps = false;
         let currentPage = 1;
         let totalPages = 1;
+        let perPage = 25;
         let currentTheme = localStorage.getItem('theme') || 'dark';
         let currentSort = { field: 'created', dir: 'desc' };
+        
+        // Colorful palette for Top Applications chart
+        const appBarColors = [
+            '#3b82f6', '#f97316', '#22c55e', '#a855f7', '#ef4444',
+            '#22d3ee', '#eab308', '#ec4899', '#84cc16', '#6366f1',
+            '#14b8a6', '#f43f5e', '#8b5cf6', '#10b981', '#06b6d4',
+            '#d946ef', '#facc15', '#2dd4bf'
+        ];
         
         // Apply saved theme on load
         if (currentTheme === 'light') {
             document.documentElement.setAttribute('data-theme', 'light');
             document.getElementById('themeIcon').textContent = '☀️';
         }
+        
+        // Fetch GitHub stars
+        async function fetchGitHubStars() {
+            try {
+                const resp = await fetch('https://api.github.com/repos/community-scripts/ProxmoxVE');
+                const data = await resp.json();
+                if (data.stargazers_count) {
+                    document.getElementById('starCount').textContent = data.stargazers_count.toLocaleString();
+                }
+            } catch (e) {
+                console.log('Could not fetch GitHub stars');
+            }
+        }
+        fetchGitHubStars();
         
         function toggleTheme() {
             if (currentTheme === 'dark') {
@@ -1656,37 +2183,46 @@ func DashboardHTML() string {
                 currentTheme = 'dark';
             }
             localStorage.setItem('theme', currentTheme);
-            // Redraw charts with new colors
             if (Object.keys(charts).length > 0) {
                 refreshData();
             }
         }
         
-        const chartColors = {
-            blue: 'rgba(88, 166, 255, 0.8)',
-            green: 'rgba(63, 185, 80, 0.8)',
-            red: 'rgba(248, 81, 73, 0.8)',
-            yellow: 'rgba(210, 153, 34, 0.8)',
-            purple: 'rgba(163, 113, 247, 0.8)',
-            gray: 'rgba(139, 148, 158, 0.8)'
-        };
+        function handleGlobalSearch(event) {
+            if (event.key === 'Enter') {
+                const query = event.target.value.trim();
+                if (query) {
+                    document.getElementById('filterApp').value = query;
+                    filterTable();
+                    document.querySelector('.section-card:last-of-type').scrollIntoView({ behavior: 'smooth' });
+                }
+            }
+        }
+        
+        // Keyboard shortcut for search
+        document.addEventListener('keydown', function(e) {
+            if ((e.ctrlKey || e.metaKey) && e.key === 'k') {
+                e.preventDefault();
+                document.getElementById('globalSearch').focus();
+            }
+        });
         
         const chartDefaults = {
             responsive: true,
             maintainAspectRatio: false,
             plugins: {
                 legend: {
-                    labels: { color: '#c9d1d9' }
+                    labels: { color: '#8b949e' }
                 }
             },
             scales: {
                 x: {
                     ticks: { color: '#8b949e' },
-                    grid: { color: '#30363d' }
+                    grid: { color: '#2d3748' }
                 },
                 y: {
                     ticks: { color: '#8b949e' },
-                    grid: { color: '#30363d' }
+                    grid: { color: '#2d3748' }
                 }
             }
         };
@@ -1700,37 +2236,29 @@ func DashboardHTML() string {
                 if (!response.ok) throw new Error('Failed to fetch data');
                 return await response.json();
             } catch (error) {
-                document.getElementById('error').style.display = 'block';
-                document.getElementById('error').textContent = 'Error: ' + error.message;
+                document.getElementById('error').style.display = 'flex';
+                document.getElementById('errorText').textContent = error.message;
                 throw error;
             }
         }
         
         function updateStats(data) {
             document.getElementById('totalInstalls').textContent = data.total_installs.toLocaleString();
-            document.getElementById('successCount').textContent = data.success_count.toLocaleString();
             document.getElementById('failedCount').textContent = data.failed_count.toLocaleString();
-            document.getElementById('installingCount').textContent = data.installing_count.toLocaleString();
             document.getElementById('successRate').textContent = data.success_rate.toFixed(1) + '%';
-            document.getElementById('lastUpdated').textContent = 'Updated: ' + new Date().toLocaleTimeString();
+            document.getElementById('successSubtitle').textContent = data.success_count.toLocaleString() + ' successful installations';
+            document.getElementById('lastUpdated').textContent = 'Updated ' + new Date().toLocaleTimeString();
             document.getElementById('error').style.display = 'none';
             
-            // Type stats (LXC/VM)
-            if (data.type_stats && data.type_stats.length > 0) {
-                const lxc = data.type_stats.find(t => t.type === 'lxc');
-                const vm = data.type_stats.find(t => t.type === 'vm');
-                document.getElementById('typeStats').textContent = 
-                    (lxc ? lxc.count.toLocaleString() : '0') + ' / ' + (vm ? vm.count.toLocaleString() : '0');
+            // Most Popular App
+            if (data.top_apps && data.top_apps.length > 0) {
+                const topApp = data.top_apps[0];
+                document.getElementById('mostPopular').textContent = topApp.app;
+                document.getElementById('popularSubtitle').textContent = topApp.count.toLocaleString() + ' installations';
             }
             
-            // PVE Versions
-            if (data.pve_versions && data.pve_versions.length > 0) {
-                document.getElementById('pveVersions').innerHTML = data.pve_versions.map(p => 
-                    '<span class="pve-badge">PVE ' + (p.version || 'unknown') + ' <span class="count">' + p.count + '</span></span>'
-                ).join('');
-            } else {
-                document.getElementById('pveVersions').innerHTML = '<span>No version data</span>';
-            }
+            // Store all apps data for View All feature
+            allAppsData = data.top_apps || [];
             
             // Error Analysis
             updateErrorAnalysis(data.error_analysis || []);
@@ -1742,7 +2270,7 @@ func DashboardHTML() string {
         function updateErrorAnalysis(errors) {
             const container = document.getElementById('errorList');
             if (!errors || errors.length === 0) {
-                container.innerHTML = '<span class="loading">No errors recorded</span>';
+                container.innerHTML = '<div style="padding: 20px; color: var(--text-muted); text-align: center;">No errors recorded</div>';
                 return;
             }
             
@@ -1752,7 +2280,7 @@ func DashboardHTML() string {
                         '<div class="pattern">' + escapeHtml(e.pattern) + '</div>' +
                         '<div class="meta">Affects: ' + escapeHtml(e.apps) + '</div>' +
                     '</div>' +
-                    '<span class="count-badge">' + e.count + ' apps</span>' +
+                    '<span class="count-badge">' + e.count + '</span>' +
                 '</div>'
             ).join('');
         }
@@ -1760,7 +2288,7 @@ func DashboardHTML() string {
         function updateFailedApps(apps) {
             const container = document.getElementById('failedAppsGrid');
             if (!apps || apps.length === 0) {
-                container.innerHTML = '<span class="loading">No failures recorded</span>';
+                container.innerHTML = '<div style="padding: 20px; color: var(--text-muted); text-align: center;">No failures recorded</div>';
                 return;
             }
             
@@ -1781,20 +2309,15 @@ func DashboardHTML() string {
         function formatTimestamp(ts) {
             if (!ts) return '-';
             const d = new Date(ts);
-            const now = new Date();
-            const diff = now - d;
-            
-            // Less than 1 minute ago
-            if (diff < 60000) return 'just now';
-            // Less than 1 hour ago
-            if (diff < 3600000) return Math.floor(diff / 60000) + 'm ago';
-            // Less than 24 hours ago
-            if (diff < 86400000) return Math.floor(diff / 3600000) + 'h ago';
-            // Less than 7 days ago
-            if (diff < 604800000) return Math.floor(diff / 86400000) + 'd ago';
-            
-            // Older - show date
-            return d.toLocaleDateString() + ' ' + d.toLocaleTimeString([], {hour: '2-digit', minute:'2-digit'});
+            // Format: "Feb 11, 2026, 4:33 PM"
+            return d.toLocaleDateString('en-US', { 
+                month: 'short', 
+                day: 'numeric', 
+                year: 'numeric',
+                hour: 'numeric',
+                minute: '2-digit',
+                hour12: true
+            });
         }
         
         function initSortableHeaders() {
@@ -1805,7 +2328,6 @@ func DashboardHTML() string {
         }
         
         function sortByColumn(field) {
-            // Toggle direction if same field
             if (currentSort.field === field) {
                 currentSort.dir = currentSort.dir === 'asc' ? 'desc' : 'asc';
             } else {
@@ -1813,22 +2335,98 @@ func DashboardHTML() string {
                 currentSort.dir = 'desc';
             }
             
-            // Update header indicators
             document.querySelectorAll('th.sortable').forEach(th => {
                 th.classList.remove('sort-asc', 'sort-desc');
-                const arrow = th.textContent.replace(/[▲▼]/g, '').trim();
-                th.textContent = arrow;
+                th.textContent = th.textContent.replace(/[▲▼]/g, '').trim();
             });
             
             const activeTh = document.querySelector('th[data-sort=\"' + field + '\"]');
             if (activeTh) {
                 activeTh.classList.add(currentSort.dir === 'asc' ? 'sort-asc' : 'sort-desc');
-                activeTh.textContent = activeTh.textContent + ' ' + (currentSort.dir === 'asc' ? '▲' : '▼');
+                activeTh.textContent += ' ' + (currentSort.dir === 'asc' ? '▲' : '▼');
             }
             
-            // Re-fetch with new sort
             currentPage = 1;
             fetchPaginatedRecords();
+        }
+        
+        function toggleAllApps() {
+            showingAllApps = !showingAllApps;
+            const btn = document.getElementById('viewAllAppsBtn');
+            const container = document.getElementById('appsChartContainer');
+            
+            if (showingAllApps) {
+                btn.innerHTML = '<svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><polyline points="4 14 10 14 10 20"/><polyline points="20 10 14 10 14 4"/><line x1="14" y1="10" x2="21" y2="3"/><line x1="3" y1="21" x2="10" y2="14"/></svg> Show Less';
+                container.style.height = '600px';
+            } else {
+                btn.innerHTML = '<svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><line x1="8" y1="6" x2="21" y2="6"/><line x1="8" y1="12" x2="21" y2="12"/><line x1="8" y1="18" x2="21" y2="18"/><line x1="3" y1="6" x2="3.01" y2="6"/><line x1="3" y1="12" x2="3.01" y2="12"/><line x1="3" y1="18" x2="3.01" y2="18"/></svg> View All';
+                container.style.height = '420px';
+            }
+            
+            updateAppsChart(allAppsData);
+        }
+        
+        function updateAppsChart(topApps) {
+            const displayApps = showingAllApps ? topApps.slice(0, 30) : topApps.slice(0, 15);
+            const colors = displayApps.map((_, i) => appBarColors[i % appBarColors.length]);
+            
+            if (charts.apps) charts.apps.destroy();
+            charts.apps = new Chart(document.getElementById('appsChart'), {
+                type: 'bar',
+                data: {
+                    labels: displayApps.map(a => a.app),
+                    datasets: [{
+                        label: 'Installations',
+                        data: displayApps.map(a => a.count),
+                        backgroundColor: colors,
+                        borderRadius: 6,
+                        borderSkipped: false
+                    }]
+                },
+                options: {
+                    responsive: true,
+                    maintainAspectRatio: false,
+                    indexAxis: 'x',
+                    plugins: { 
+                        legend: { display: false },
+                        tooltip: {
+                            backgroundColor: 'rgba(21, 27, 35, 0.95)',
+                            titleColor: '#e2e8f0',
+                            bodyColor: '#e2e8f0',
+                            borderColor: '#2d3748',
+                            borderWidth: 1,
+                            padding: 12,
+                            displayColors: true,
+                            callbacks: {
+                                label: function(ctx) {
+                                    return ctx.parsed.y.toLocaleString() + ' installations';
+                                }
+                            }
+                        }
+                    },
+                    scales: {
+                        x: {
+                            ticks: { 
+                                color: '#8b949e',
+                                maxRotation: 45,
+                                minRotation: 45
+                            },
+                            grid: { display: false }
+                        },
+                        y: {
+                            beginAtZero: true,
+                            ticks: { 
+                                color: '#8b949e',
+                                callback: function(value) { 
+                                    if (value >= 1000) return (value/1000).toFixed(0) + 'k';
+                                    return value;
+                                }
+                            },
+                            grid: { color: '#2d3748' }
+                        }
+                    }
+                }
+            });
         }
         
         function updateCharts(data) {
@@ -1837,27 +2435,53 @@ func DashboardHTML() string {
             charts.daily = new Chart(document.getElementById('dailyChart'), {
                 type: 'line',
                 data: {
-                    labels: data.daily_stats.map(d => d.date.slice(5)), // MM-DD
+                    labels: data.daily_stats.map(d => d.date.slice(5)),
                     datasets: [
                         {
                             label: 'Success',
                             data: data.daily_stats.map(d => d.success),
-                            borderColor: chartColors.green,
-                            backgroundColor: 'rgba(63, 185, 80, 0.1)',
+                            borderColor: '#22c55e',
+                            backgroundColor: 'rgba(34, 197, 94, 0.1)',
                             fill: true,
-                            tension: 0.3
+                            tension: 0.4,
+                            borderWidth: 2
                         },
                         {
                             label: 'Failed',
                             data: data.daily_stats.map(d => d.failed),
-                            borderColor: chartColors.red,
-                            backgroundColor: 'rgba(248, 81, 73, 0.1)',
+                            borderColor: '#ef4444',
+                            backgroundColor: 'rgba(239, 68, 68, 0.1)',
                             fill: true,
-                            tension: 0.3
+                            tension: 0.4,
+                            borderWidth: 2
                         }
                     ]
                 },
-                options: chartDefaults
+                options: {
+                    ...chartDefaults,
+                    plugins: { legend: { display: true, position: 'top', labels: { color: '#8b949e', usePointStyle: true } } }
+                }
+            });
+            
+            // OS distribution pie chart
+            if (charts.os) charts.os.destroy();
+            charts.os = new Chart(document.getElementById('osChart'), {
+                type: 'doughnut',
+                data: {
+                    labels: data.os_distribution.map(o => o.os),
+                    datasets: [{
+                        data: data.os_distribution.map(o => o.count),
+                        backgroundColor: appBarColors.slice(0, data.os_distribution.length),
+                        borderWidth: 0
+                    }]
+                },
+                options: {
+                    responsive: true,
+                    maintainAspectRatio: false,
+                    plugins: {
+                        legend: { position: 'right', labels: { color: '#8b949e', padding: 12 } }
+                    }
+                }
             });
             
             // Status pie chart
@@ -1868,99 +2492,21 @@ func DashboardHTML() string {
                     labels: ['Success', 'Failed', 'Installing'],
                     datasets: [{
                         data: [data.success_count, data.failed_count, data.installing_count],
-                        backgroundColor: [chartColors.green, chartColors.red, chartColors.yellow]
+                        backgroundColor: ['#22c55e', '#ef4444', '#eab308'],
+                        borderWidth: 0
                     }]
                 },
                 options: {
                     responsive: true,
                     maintainAspectRatio: false,
                     plugins: {
-                        legend: {
-                            position: 'bottom',
-                            labels: { color: '#c9d1d9' }
-                        }
+                        legend: { position: 'right', labels: { color: '#8b949e', padding: 12 } }
                     }
                 }
             });
             
             // Top apps chart
-            if (charts.apps) charts.apps.destroy();
-            charts.apps = new Chart(document.getElementById('appsChart'), {
-                type: 'bar',
-                data: {
-                    labels: data.top_apps.map(a => a.app),
-                    datasets: [{
-                        label: 'Installations',
-                        data: data.top_apps.map(a => a.count),
-                        backgroundColor: chartColors.blue
-                    }]
-                },
-                options: {
-                    responsive: true,
-                    maintainAspectRatio: false,
-                    indexAxis: 'y',
-                    plugins: { legend: { display: false } },
-                    scales: {
-                        x: {
-                            beginAtZero: true,
-                            ticks: { 
-                                color: '#8b949e',
-                                stepSize: 1,
-                                callback: function(value) { return Number.isInteger(value) ? value : ''; }
-                            },
-                            grid: { color: '#30363d' }
-                        },
-                        y: {
-                            ticks: { color: '#8b949e' },
-                            grid: { color: '#30363d' }
-                        }
-                    }
-                }
-            });
-            
-            // OS distribution chart
-            if (charts.os) charts.os.destroy();
-            charts.os = new Chart(document.getElementById('osChart'), {
-                type: 'pie',
-                data: {
-                    labels: data.os_distribution.map(o => o.os),
-                    datasets: [{
-                        data: data.os_distribution.map(o => o.count),
-                        backgroundColor: [
-                            chartColors.blue, chartColors.green, chartColors.purple,
-                            chartColors.yellow, chartColors.red, chartColors.gray
-                        ]
-                    }]
-                },
-                options: {
-                    responsive: true,
-                    maintainAspectRatio: false,
-                    plugins: {
-                        legend: {
-                            position: 'right',
-                            labels: { color: '#c9d1d9' }
-                        }
-                    }
-                }
-            });
-            
-            // Method chart
-            if (charts.method) charts.method.destroy();
-            charts.method = new Chart(document.getElementById('methodChart'), {
-                type: 'bar',
-                data: {
-                    labels: data.method_stats.map(m => m.method || 'default'),
-                    datasets: [{
-                        label: 'Count',
-                        data: data.method_stats.map(m => m.count),
-                        backgroundColor: chartColors.purple
-                    }]
-                },
-                options: {
-                    ...chartDefaults,
-                    plugins: { legend: { display: false } }
-                }
-            });
+            updateAppsChart(data.top_apps || []);
         }
         
         function updateTable(records) {
@@ -1975,16 +2521,24 @@ func DashboardHTML() string {
             filterTable();
         }
         
+        function changePerPage() {
+            perPage = parseInt(document.getElementById('perPageSelect').value);
+            currentPage = 1;
+            fetchPaginatedRecords();
+        }
+        
         async function fetchPaginatedRecords() {
             const status = document.getElementById('filterStatus').value;
             const app = document.getElementById('filterApp').value;
             const os = document.getElementById('filterOs').value;
+            const type = document.getElementById('filterType').value;
             
             try {
-                let url = '/api/records?page=' + currentPage + '&limit=50';
+                let url = '/api/records?page=' + currentPage + '&limit=' + perPage;
                 if (status) url += '&status=' + encodeURIComponent(status);
                 if (app) url += '&app=' + encodeURIComponent(app);
                 if (os) url += '&os=' + encodeURIComponent(os);
+                if (type) url += '&type=' + encodeURIComponent(type);
                 if (currentSort.field) {
                     url += '&sort=' + (currentSort.dir === 'desc' ? '-' : '') + currentSort.field;
                 }
@@ -2023,30 +2577,31 @@ func DashboardHTML() string {
         
         function renderTableRows(records) {
             const tbody = document.getElementById('recordsTable');
-            currentRecords = records; // Store for detail modal
+            currentRecords = records;
             
             if (records.length === 0) {
-                tbody.innerHTML = '<tr><td colspan="9" class="loading">No records found</td></tr>';
+                tbody.innerHTML = '<tr><td colspan="8"><div class="loading" style="padding: 40px;">No records found</div></td></tr>';
                 return;
             }
             
             tbody.innerHTML = records.map((r, index) => {
                 const statusClass = r.status || 'unknown';
-                const resources = r.core_count || r.ram_size || r.disk_size 
-                    ? (r.core_count || '?') + 'C / ' + (r.ram_size ? Math.round(r.ram_size/1024) + 'G' : '?') + ' / ' + (r.disk_size || '?') + 'GB'
-                    : '-';
+                const typeClass = (r.type || '').toLowerCase();
+                const diskSize = r.disk_size ? r.disk_size + 'GB' : '-';
+                const coreCount = r.core_count || '-';
+                const ramSize = r.ram_size ? r.ram_size + 'MB' : '-';
                 const created = r.created ? formatTimestamp(r.created) : '-';
+                const osDisplay = r.os_type ? (r.os_type + (r.os_version ? ' ' + r.os_version : '')) : '-';
+                
                 return '<tr class="clickable-row" onclick="showRecordDetail(' + index + ')">' +
+                    '<td><span class="status-badge ' + statusClass + '">' + escapeHtml(r.status || 'unknown') + '</span></td>' +
+                    '<td><span class="type-badge ' + typeClass + '">' + escapeHtml((r.type || '-').toUpperCase()) + '</span></td>' +
                     '<td><strong>' + escapeHtml(r.nsapp || '-') + '</strong></td>' +
-                    '<td><span class="status-badge ' + statusClass + '">' + escapeHtml(r.status || '-') + '</span></td>' +
-                    '<td>' + escapeHtml(r.os_type || '-') + ' ' + escapeHtml(r.os_version || '') + '</td>' +
-                    '<td>' + escapeHtml(r.type || '-') + '</td>' +
-                    '<td>' + escapeHtml(r.method || 'default') + '</td>' +
-                    '<td>' + resources + '</td>' +
-                    '<td>' + (r.exit_code || '-') + '</td>' +
-                    '<td title="' + escapeHtml(r.error || '') + '">' + 
-                        escapeHtml((r.error || '').slice(0, 40)) + (r.error && r.error.length > 40 ? '...' : '') + '</td>' +
-                    '<td title="' + escapeHtml(r.created || '') + '">' + created + '</td>' +
+                    '<td>' + escapeHtml(osDisplay) + '</td>' +
+                    '<td>' + diskSize + '</td>' +
+                    '<td style="text-align: center;">' + coreCount + '</td>' +
+                    '<td>' + ramSize + '</td>' +
+                    '<td>' + created + '</td>' +
                 '</tr>';
             }).join('');
         }
