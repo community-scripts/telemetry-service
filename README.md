@@ -38,29 +38,12 @@ This service acts as a telemetry ingestion layer between the bash installation s
 
 ## Architecture
 
+```mermaid
+flowchart LR
+    A[Bash Scripts<br>ProxmoxVE/VED] --> B[Telemetry Service]
+    B --> C[(PocketBase)]
+    B --> D[Dashboard]
 ```
-Bash Scripts (ProxmoxVE/VED)  --->  Telemetry Service  --->  PocketBase
-                                          |
-                                          v
-                                      Dashboard
-```
-
-## Configuration
-
-Environment variables for deployment:
-
-| Variable | Description | Default |
-|----------|-------------|---------|
-| `POCKETBASE_URL` | PocketBase API URL | `http://localhost:8090` |
-| `POCKETBASE_TOKEN` | Admin API token | - |
-| `RATE_LIMIT` | Requests per minute per IP | `60` |
-| `CACHE_TTL_SECONDS` | Dashboard cache TTL | `300` |
-| `SMTP_HOST` | SMTP server for alerts | - |
-| `SMTP_PORT` | SMTP port | `587` |
-| `SMTP_USER` | SMTP username | - |
-| `SMTP_PASS` | SMTP password | - |
-| `ALERT_EMAIL` | Alert recipient email | - |
-| `FAILURE_THRESHOLD` | Failure rate % for alerts | `20` |
 
 ## Dashboard
 
