@@ -1090,7 +1090,7 @@ func runSQLExport(jsonFile, sqlOutput, tableName string) {
 	fileSize := fileInfo.Size()
 	fmt.Printf("[INFO] File size: %.2f GB\n", float64(fileSize)/(1024*1024*1024))
 
-	// Open SQL output file
+	// Open SQL output file stream
 	sqlFile, err := os.Create(sqlOutput)
 	if err != nil {
 		fmt.Printf("[ERROR] Cannot create SQL file: %v\n", err)
