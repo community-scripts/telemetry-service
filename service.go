@@ -1128,8 +1128,9 @@ func main() {
 		// Upsert: Creates new record if random_id doesn't exist, updates if it does
 		// repo_source is stored as a field on the record for filtering
 		if err := pb.UpsertTelemetry(ctx, out); err != nil {
-			// GDPR: don't log raw payload, don't log IPs; log only generic error
-			log.Printf("pocketbase write failed: %v", err)
+			// Log enough context to debug without exposing personal data (GDPR-safe)
+			log.Printf("pocketbase write failed: %v | nsapp=%s type=%s status=%s ct_type=%d repo=%s method=%s",
+				err, out.NSAPP, out.Type, out.Status, out.CTType, out.RepoSource, out.Method)
 			http.Error(w, "upstream error", http.StatusBadGateway)
 			return
 		}
