@@ -933,18 +933,18 @@ func DashboardHTML() string {
         /* Stat Cards Grid */
         .stats-grid {
             display: grid;
-            grid-template-columns: repeat(3, 1fr);
+            grid-template-columns: repeat(4, 1fr);
             gap: 20px;
             margin-bottom: 32px;
         }
         
-        @media (max-width: 1200px) {
+        @media (max-width: 1400px) {
             .stats-grid {
                 grid-template-columns: repeat(2, 1fr);
             }
         }
         
-        @media (max-width: 640px) {
+        @media (max-width: 768px) {
             .stats-grid {
                 grid-template-columns: 1fr;
             }
@@ -1707,74 +1707,61 @@ func DashboardHTML() string {
             white-space: nowrap;
         }
         
-        /* Podium Section */
-        .podium-section {
-            background: var(--bg-card);
-            border: 1px solid var(--border-color);
-            border-radius: 12px;
-            padding: 24px;
-            margin-bottom: 24px;
-            text-align: center;
+        /* Mini Podium in Stat Card */
+        .podium-card {
+            min-width: 280px;
         }
         
-        .podium-section h2 {
-            font-size: 18px;
-            font-weight: 600;
-            margin-bottom: 24px;
-            color: var(--text-secondary);
-        }
-        
-        .podium {
+        .mini-podium {
             display: flex;
-            justify-content: center;
-            align-items: flex-end;
-            gap: 20px;
-            max-width: 600px;
-            margin: 0 auto;
+            flex-direction: column;
+            gap: 8px;
+            margin-top: 8px;
         }
         
-        .podium-step {
+        .mini-podium-item {
+            display: flex;
+            align-items: center;
+            gap: 10px;
+            padding: 8px 12px;
+            border-radius: 8px;
+            background: var(--bg-body);
+        }
+        
+        .mini-podium-item .medal {
+            font-size: 20px;
+            flex-shrink: 0;
+        }
+        
+        .mini-podium-item .app-name {
             flex: 1;
-            text-align: center;
-        }
-        
-        .podium-medal {
-            font-size: 32px;
-            margin-bottom: 8px;
-        }
-        
-        .podium-app {
-            font-size: 15px;
             font-weight: 600;
-            margin-bottom: 4px;
-            word-break: break-word;
+            font-size: 14px;
             color: var(--text-primary);
+            white-space: nowrap;
+            overflow: hidden;
+            text-overflow: ellipsis;
         }
         
-        .podium-count {
+        .mini-podium-item .count {
             font-size: 12px;
             color: var(--text-secondary);
-            margin-bottom: 12px;
+            flex-shrink: 0;
         }
         
-        .podium-bar {
-            border-radius: 8px 8px 0 0;
-            width: 100%;
+        .mini-podium-item.gold {
+            background: linear-gradient(135deg, rgba(255, 215, 0, 0.15) 0%, rgba(255, 215, 0, 0.05) 100%);
+            border-left: 3px solid #ffd700;
         }
         
-        .podium-step.first .podium-bar {
-            height: 120px;
-            background: linear-gradient(180deg, #ffd700 0%, #b8860b 100%);
+        .mini-podium-item.silver {
+            background: linear-gradient(135deg, rgba(192, 192, 192, 0.15) 0%, rgba(192, 192, 192, 0.05) 100%);
+            border-left: 3px solid #c0c0c0;
         }
         
-        .podium-step.second .podium-bar {
-            height: 85px;
-            background: linear-gradient(180deg, #c0c0c0 0%, #808080 100%);
-        }
-        
-        .podium-step.third .podium-bar {
-            height: 55px;
-            background: linear-gradient(180deg, #cd7f32 0%, #8b4513 100%);
+        .mini-podium-item.bronze {
+            background: linear-gradient(135deg, rgba(205, 127, 50, 0.15) 0%, rgba(205, 127, 50, 0.05) 100%);
+            border-left: 3px solid #cd7f32;
         }
         
         .pagination {
@@ -2022,7 +2009,6 @@ func DashboardHTML() string {
                 <select id="repoFilter" class="custom-select" onchange="refreshData()">
                     <option value="ProxmoxVE" selected>ProxmoxVE</option>
                     <option value="ProxmoxVED">ProxmoxVED</option>
-                    <option value="Proxmox VE">Proxmox VE (Legacy)</option>
                     <option value="external">External</option>
                     <option value="all">All Sources</option>
                 </select>
@@ -2105,29 +2091,29 @@ func DashboardHTML() string {
                 <div class="stat-card-value" id="failedCount">-</div>
                 <div class="stat-card-subtitle">Installations encountered errors</div>
             </div>
-        </div>
-        
-        <!-- Most Popular Podium -->
-        <div class="podium-section">
-            <h2>🏆 Most Popular Applications</h2>
-            <div class="podium">
-                <div class="podium-step second">
-                    <div class="podium-medal">🥈</div>
-                    <div class="podium-app" id="podium2App">-</div>
-                    <div class="podium-count" id="podium2Count">-</div>
-                    <div class="podium-bar"></div>
+            
+            <!-- Most Popular Card -->
+            <div class="stat-card podium-card">
+                <div class="stat-card-header">
+                    <span class="stat-card-label">Most Popular</span>
+                    <div class="stat-card-icon" style="font-size: 20px;">🏆</div>
                 </div>
-                <div class="podium-step first">
-                    <div class="podium-medal">🥇</div>
-                    <div class="podium-app" id="podium1App">-</div>
-                    <div class="podium-count" id="podium1Count">-</div>
-                    <div class="podium-bar"></div>
-                </div>
-                <div class="podium-step third">
-                    <div class="podium-medal">🥉</div>
-                    <div class="podium-app" id="podium3App">-</div>
-                    <div class="podium-count" id="podium3Count">-</div>
-                    <div class="podium-bar"></div>
+                <div class="mini-podium">
+                    <div class="mini-podium-item gold">
+                        <span class="medal">🥇</span>
+                        <span class="app-name" id="podium1App">-</span>
+                        <span class="count" id="podium1Count">-</span>
+                    </div>
+                    <div class="mini-podium-item silver">
+                        <span class="medal">🥈</span>
+                        <span class="app-name" id="podium2App">-</span>
+                        <span class="count" id="podium2Count">-</span>
+                    </div>
+                    <div class="mini-podium-item bronze">
+                        <span class="medal">🥉</span>
+                        <span class="app-name" id="podium3App">-</span>
+                        <span class="count" id="podium3Count">-</span>
+                    </div>
                 </div>
             </div>
         </div>
@@ -2461,16 +2447,21 @@ func DashboardHTML() string {
             document.getElementById('error').style.display = 'none';
             
             // Most Popular - update podium
+            function formatCompact(n) {
+                if (n >= 1000000) return (n/1000000).toFixed(1) + 'M';
+                if (n >= 1000) return (n/1000).toFixed(1) + 'k';
+                return n.toString();
+            }
             if (data.top_apps && data.top_apps.length >= 3) {
                 document.getElementById('podium1App').textContent = data.top_apps[0].app;
-                document.getElementById('podium1Count').textContent = data.top_apps[0].count.toLocaleString() + ' installs';
+                document.getElementById('podium1Count').textContent = formatCompact(data.top_apps[0].count);
                 document.getElementById('podium2App').textContent = data.top_apps[1].app;
-                document.getElementById('podium2Count').textContent = data.top_apps[1].count.toLocaleString() + ' installs';
+                document.getElementById('podium2Count').textContent = formatCompact(data.top_apps[1].count);
                 document.getElementById('podium3App').textContent = data.top_apps[2].app;
-                document.getElementById('podium3Count').textContent = data.top_apps[2].count.toLocaleString() + ' installs';
+                document.getElementById('podium3Count').textContent = formatCompact(data.top_apps[2].count);
             } else if (data.top_apps && data.top_apps.length > 0) {
                 document.getElementById('podium1App').textContent = data.top_apps[0].app;
-                document.getElementById('podium1Count').textContent = data.top_apps[0].count.toLocaleString() + ' installs';
+                document.getElementById('podium1Count').textContent = formatCompact(data.top_apps[0].count);
             }
             
             // Store all apps data for View All feature

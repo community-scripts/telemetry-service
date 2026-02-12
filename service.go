@@ -814,6 +814,16 @@ func main() {
 	}, pb)
 	alerter.Start()
 
+	// Initialize cleanup/retention job (GDPR Löschkonzept)
+	cleaner := NewCleaner(CleanupConfig{
+		Enabled:          envBool("CLEANUP_ENABLED", true),
+		CheckInterval:    time.Duration(envInt("CLEANUP_INTERVAL_MIN", 60)) * time.Minute,
+		StuckAfterHours:  envInt("CLEANUP_STUCK_HOURS", 24),
+		RetentionEnabled: envBool("RETENTION_ENABLED", true),
+		RetentionDays:    envInt("RETENTION_DAYS", 365),
+	}, pb)
+	cleaner.Start()
+
 	mux := http.NewServeMux()
 
 	mux.HandleFunc("/healthz", func(w http.ResponseWriter, r *http.Request) {
