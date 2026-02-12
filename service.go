@@ -762,7 +762,7 @@ func main() {
 		// Cache config
 		RedisURL:     env("REDIS_URL", ""),
 		EnableRedis:  envBool("ENABLE_REDIS", false),
-		CacheTTL:     time.Duration(envInt("CACHE_TTL_SECONDS", 60)) * time.Second,
+		CacheTTL:     time.Duration(envInt("CACHE_TTL_SECONDS", 300)) * time.Second,
 		CacheEnabled: envBool("ENABLE_CACHE", true),
 
 		// Alert config
@@ -905,7 +905,8 @@ func main() {
 			repoSource = ""
 		}
 
-		ctx, cancel := context.WithTimeout(r.Context(), 10*time.Second)
+		// Increase timeout for large datasets (dashboard aggregation takes time)
+		ctx, cancel := context.WithTimeout(r.Context(), 120*time.Second)
 		defer cancel()
 
 		// Try cache first

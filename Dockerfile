@@ -24,7 +24,7 @@ ENV ENABLE_REQUEST_LOGGING="false"
 
 # Cache config (optional)
 ENV ENABLE_CACHE="true"
-ENV CACHE_TTL_SECONDS="60"
+ENV CACHE_TTL_SECONDS="300"
 ENV ENABLE_REDIS="false"
 # ENV REDIS_URL="redis://localhost:6379"
 

@@ -312,6 +312,7 @@ func (p *PBClient) fetchRecords(ctx context.Context, filter string) ([]Telemetry
 	var allRecords []TelemetryRecord
 	page := 1
 	perPage := 500
+	maxRecords := 100000 // Limit to prevent timeout with large datasets
 
 	for {
 		var url string
@@ -346,7 +347,8 @@ func (p *PBClient) fetchRecords(ctx context.Context, filter string) ([]Telemetry
 
 		allRecords = append(allRecords, result.Items...)
 
-		if len(allRecords) >= result.TotalItems {
+		// Stop if we have enough records or reached the end
+		if len(allRecords) >= maxRecords || len(allRecords) >= result.TotalItems {
 			break
 		}
 		page++
