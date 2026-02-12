@@ -3,6 +3,7 @@ package main
 import (
 	"context"
 	"encoding/json"
+	"fmt"
 	"log"
 	"sync"
 	"time"
@@ -18,19 +19,25 @@ type CacheConfig struct {
 }
 
 // Cache provides caching functionality with Redis or in-memory fallback
+// Supports stale-while-revalidate: returns stale data immediately while refreshing in background
 type Cache struct {
 	redis      *redis.Client
 	useRedis   bool
 	defaultTTL time.Duration
 
-	// In-memory fallback
+	// In-memory cache
 	mu      sync.RWMutex
 	memData map[string]cacheEntry
+
+	// Refresh tracking: prevents multiple concurrent refreshes for the same key
+	refreshMu   sync.Mutex
+	refreshing  map[string]bool
 }
 
 type cacheEntry struct {
 	data      []byte
-	expiresAt time.Time
+	expiresAt time.Time // When the entry becomes stale (soft expiry)
+	deadAt    time.Time // When the entry is truly expired and must be removed (hard expiry = 2x TTL)
 }
 
 // NewCache creates a new cache instance
@@ -38,6 +45,7 @@ func NewCache(cfg CacheConfig) *Cache {
 	c := &Cache{
 		defaultTTL: cfg.DefaultTTL,
 		memData:    make(map[string]cacheEntry),
+		refreshing: make(map[string]bool),
 	}
 
 	if cfg.EnableRedis && cfg.RedisURL != "" {
@@ -77,7 +85,8 @@ func (c *Cache) cleanupLoop() {
 		c.mu.Lock()
 		now := time.Now()
 		for k, v := range c.memData {
-			if now.After(v.expiresAt) {
+			// Only remove truly dead entries (hard expiry)
+			if now.After(v.deadAt) {
 				delete(c.memData, k)
 			}
 		}
@@ -85,7 +94,8 @@ func (c *Cache) cleanupLoop() {
 	}
 }
 
-// Get retrieves a value from cache
+// Get retrieves a value from cache. Returns (found, stale).
+// If stale=true, the data is still valid but should be refreshed in the background.
 func (c *Cache) Get(ctx context.Context, key string, dest interface{}) bool {
 	if c.useRedis {
 		data, err := c.redis.Get(ctx, key).Bytes()
@@ -95,16 +105,34 @@ func (c *Cache) Get(ctx context.Context, key string, dest interface{}) bool {
 		return json.Unmarshal(data, dest) == nil
 	}
 
-	// In-memory fallback
+	// In-memory
 	c.mu.RLock()
 	entry, ok := c.memData[key]
 	c.mu.RUnlock()
 
-	if !ok || time.Now().After(entry.expiresAt) {
+	if !ok || time.Now().After(entry.deadAt) {
 		return false
 	}
 
 	return json.Unmarshal(entry.data, dest) == nil
+}
+
+// IsStale checks if a cached entry exists but is past its soft expiry
+func (c *Cache) IsStale(ctx context.Context, key string) bool {
+	if c.useRedis {
+		// Redis handles expiry itself; treat as not stale
+		return false
+	}
+
+	c.mu.RLock()
+	entry, ok := c.memData[key]
+	c.mu.RUnlock()
+
+	if !ok {
+		return false
+	}
+
+	return time.Now().After(entry.expiresAt)
 }
 
 // Set stores a value in cache
@@ -122,15 +150,36 @@ func (c *Cache) Set(ctx context.Context, key string, value interface{}, ttl time
 		return c.redis.Set(ctx, key, data, ttl).Err()
 	}
 
-	// In-memory fallback
+	// In-memory: soft expiry at TTL, hard expiry at 2x TTL (stale-while-revalidate window)
 	c.mu.Lock()
 	c.memData[key] = cacheEntry{
 		data:      data,
 		expiresAt: time.Now().Add(ttl),
+		deadAt:    time.Now().Add(ttl * 2),
 	}
 	c.mu.Unlock()
 
 	return nil
+}
+
+// TryStartRefresh attempts to claim a refresh lock for a key.
+// Returns true if this caller should perform the refresh, false if another goroutine is already refreshing.
+func (c *Cache) TryStartRefresh(key string) bool {
+	c.refreshMu.Lock()
+	defer c.refreshMu.Unlock()
+
+	if c.refreshing[key] {
+		return false // Someone else is already refreshing
+	}
+	c.refreshing[key] = true
+	return true
+}
+
+// FinishRefresh releases the refresh lock for a key
+func (c *Cache) FinishRefresh(key string) {
+	c.refreshMu.Lock()
+	delete(c.refreshing, key)
+	c.refreshMu.Unlock()
 }
 
 // Delete removes a key from cache
@@ -145,14 +194,26 @@ func (c *Cache) Delete(ctx context.Context, key string) error {
 	return nil
 }
 
-// InvalidateDashboard clears dashboard cache
+// InvalidateDashboard clears all dashboard cache keys
 func (c *Cache) InvalidateDashboard(ctx context.Context) {
-	// Delete all dashboard cache keys
-	for days := 1; days <= 365; days++ {
-		_ = c.Delete(ctx, dashboardCacheKey(days))
+	if c.useRedis {
+		// Scan and delete dashboard keys
+		iter := c.redis.Scan(ctx, 0, "dashboard:*", 100).Iterator()
+		for iter.Next(ctx) {
+			c.redis.Del(ctx, iter.Val())
+		}
+		return
 	}
+
+	c.mu.Lock()
+	for k := range c.memData {
+		if len(k) > 10 && k[:10] == "dashboard:" {
+			delete(c.memData, k)
+		}
+	}
+	c.mu.Unlock()
 }
 
-func dashboardCacheKey(days int) string {
-	return "dashboard:" + string(rune(days))
+func dashboardCacheKey(days int, repoSource string) string {
+	return fmt.Sprintf("dashboard:%d:%s", days, repoSource)
 }

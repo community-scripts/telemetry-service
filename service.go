@@ -762,7 +762,7 @@ func main() {
 		// Cache config
 		RedisURL:     env("REDIS_URL", ""),
 		EnableRedis:  envBool("ENABLE_REDIS", false),
-		CacheTTL:     time.Duration(envInt("CACHE_TTL_SECONDS", 300)) * time.Second,
+		CacheTTL:     time.Duration(envInt("CACHE_TTL_SECONDS", 3600)) * time.Second,
 		CacheEnabled: envBool("ENABLE_CACHE", true),
 
 		// Alert config
@@ -919,12 +919,33 @@ func main() {
 		ctx, cancel := context.WithTimeout(r.Context(), 120*time.Second)
 		defer cancel()
 
-		// Try cache first
+		// Try cache first (stale-while-revalidate)
 		cacheKey := fmt.Sprintf("dashboard:%d:%s", days, repoSource)
 		var data *DashboardData
 		if cfg.CacheEnabled && cache.Get(ctx, cacheKey, &data) {
+			// Serve cached data immediately
 			w.Header().Set("Content-Type", "application/json")
 			w.Header().Set("X-Cache", "HIT")
+
+			// If stale, trigger background refresh (non-blocking)
+			if cache.IsStale(ctx, cacheKey) {
+				w.Header().Set("X-Cache", "STALE")
+				if cache.TryStartRefresh(cacheKey) {
+					go func() {
+						defer cache.FinishRefresh(cacheKey)
+						refreshCtx, cancel := context.WithTimeout(context.Background(), 120*time.Second)
+						defer cancel()
+						freshData, err := pb.FetchDashboardData(refreshCtx, days, repoSource)
+						if err != nil {
+							log.Printf("[CACHE] background refresh failed for %s: %v", cacheKey, err)
+							return
+						}
+						_ = cache.Set(context.Background(), cacheKey, freshData, cfg.CacheTTL)
+						log.Printf("[CACHE] background refresh completed for %s", cacheKey)
+					}()
+				}
+			}
+
 			json.NewEncoder(w).Encode(data)
 			return
 		}
@@ -1117,6 +1138,11 @@ func main() {
 			log.Printf("telemetry accepted nsapp=%s status=%s repo=%s", out.NSAPP, out.Status, in.RepoSource)
 		}
 
+		// Invalidate dashboard cache so new data appears on next request
+		if cfg.CacheEnabled {
+			cache.InvalidateDashboard(context.Background())
+		}
+
 		w.WriteHeader(http.StatusAccepted)
 		_, _ = w.Write([]byte("accepted"))
 	})
@@ -1134,13 +1160,13 @@ func main() {
 			time.Sleep(10 * time.Second)
 			warmupDashboardCache(pb, cache, cfg)
 			
-			// Periodic refresh (every 8 minutes, before 10-minute TTL expires)
-			ticker := time.NewTicker(8 * time.Minute)
+			// Periodic refresh every 30 minutes (well within 1h TTL)
+			ticker := time.NewTicker(30 * time.Minute)
 			for range ticker.C {
 				warmupDashboardCache(pb, cache, cfg)
 			}
 		}()
-		log.Println("background cache warmup enabled")
+		log.Printf("background cache warmup enabled (TTL=%v, refresh=30m)", cfg.CacheTTL)
 	}
 
 	log.Printf("telemetry-ingest listening on %s", cfg.ListenAddr)
@@ -1231,41 +1257,42 @@ func splitCSV(s string) []string {
 }
 
 // warmupDashboardCache pre-populates the cache with common dashboard queries
+// Always refreshes all entries regardless of current cache state
 func warmupDashboardCache(pb *PBClient, cache *Cache, cfg Config) {
 	log.Println("[CACHE] Starting dashboard cache warmup...")
+	start := time.Now()
 	
 	// Common day ranges and repos to pre-cache
 	dayRanges := []int{7, 30, 90, 365}
 	repos := []string{"ProxmoxVE", "ProxmoxVED", ""}  // ProxmoxVE, ProxmoxVED, and "all"
 	
 	warmed := 0
+	failed := 0
 	for _, days := range dayRanges {
 		for _, repo := range repos {
-			ctx, cancel := context.WithTimeout(context.Background(), 120*time.Second)
-			
 			cacheKey := fmt.Sprintf("dashboard:%d:%s", days, repo)
-			
-			// Check if already cached
-			var existing *DashboardData
-			if cache.Get(ctx, cacheKey, &existing) {
-				cancel()
-				continue // Already cached, skip
+
+			// Always refresh - don't skip cached entries
+			if !cache.TryStartRefresh(cacheKey) {
+				continue // Another goroutine is already refreshing this key
 			}
-			
-			// Fetch and cache
+
+			ctx, cancel := context.WithTimeout(context.Background(), 180*time.Second)
 			data, err := pb.FetchDashboardData(ctx, days, repo)
 			cancel()
+			cache.FinishRefresh(cacheKey)
 			
 			if err != nil {
 				log.Printf("[CACHE] Warmup failed for days=%d repo=%s: %v", days, repo, err)
+				failed++
 				continue
 			}
 			
 			_ = cache.Set(context.Background(), cacheKey, data, cfg.CacheTTL)
 			warmed++
-			log.Printf("[CACHE] Warmed cache for days=%d repo=%s (%d installs)", days, repo, data.TotalAllTime)
+			log.Printf("[CACHE] Warmed days=%d repo=%q (%d records)", days, repo, data.TotalInstalls)
 		}
 	}
 	
-	log.Printf("[CACHE] Dashboard cache warmup complete (%d entries)", warmed)
+	log.Printf("[CACHE] Warmup complete: %d refreshed, %d failed (took %v)", warmed, failed, time.Since(start).Round(time.Second))
 }

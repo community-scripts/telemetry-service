@@ -288,7 +288,8 @@ func (p *PBClient) FetchDashboardData(ctx context.Context, days int, repoSource 
 	data.ErrorAnalysis = buildErrorAnalysis(errorApps, errorCounts, 15)
 
 	// Failed apps with failure rates (min 10 installs threshold)
-	data.FailedApps = buildFailedApps(appTypeCounts, appTypeFailures, 15)
+	// Returns 16 items: 8 LXC + 8 VM balanced, LXC prioritized
+	data.FailedApps = buildFailedApps(appTypeCounts, appTypeFailures, 16)
 
 	// Daily stats for chart
 	data.DailyStats = buildDailyStats(dailySuccess, dailyFailed, days)
@@ -338,7 +339,6 @@ func (p *PBClient) fetchRecords(ctx context.Context, filter string) (*fetchRecor
 	var allRecords []TelemetryRecord
 	page := 1
 	perPage := 500
-	maxRecords := 100000 // Limit to prevent timeout with large datasets
 	totalItems := 0
 
 	for {
@@ -379,8 +379,8 @@ func (p *PBClient) fetchRecords(ctx context.Context, filter string) (*fetchRecor
 
 		allRecords = append(allRecords, result.Items...)
 
-		// Stop if we have enough records or reached the end
-		if len(allRecords) >= maxRecords || len(allRecords) >= result.TotalItems {
+		// Stop when we've fetched all records for the time period
+		if len(allRecords) >= result.TotalItems {
 			break
 		}
 		page++
@@ -568,7 +568,8 @@ func buildErrorAnalysis(apps map[string]map[string]bool, counts map[string]int, 
 }
 
 func buildFailedApps(total, failed map[string]int, n int) []AppFailure {
-	result := make([]AppFailure, 0)
+	lxcApps := make([]AppFailure, 0)
+	vmApps := make([]AppFailure, 0)
 	minInstalls := 10 // Minimum installations to be considered (avoid noise from rare apps)
 
 	for key, failCount := range failed {
@@ -586,27 +587,80 @@ func buildFailedApps(total, failed map[string]int, n int) []AppFailure {
 		}
 
 		rate := float64(failCount) / float64(totalCount) * 100
-		result = append(result, AppFailure{
+		failure := AppFailure{
 			App:         app,
 			Type:        appType,
 			TotalCount:  totalCount,
 			FailedCount: failCount,
 			FailureRate: rate,
-		})
+		}
+
+		// Separate LXC and VM apps (LXC has higher priority)
+		if strings.ToLower(appType) == "lxc" {
+			lxcApps = append(lxcApps, failure)
+		} else {
+			vmApps = append(vmApps, failure)
+		}
 	}
 
-	// Sort by failure rate descending
-	for i := 0; i < len(result)-1; i++ {
-		for j := i + 1; j < len(result); j++ {
-			if result[j].FailureRate > result[i].FailureRate {
-				result[i], result[j] = result[j], result[i]
+	// Sort each list by failure rate descending
+	sortByFailureRate := func(apps []AppFailure) {
+		for i := 0; i < len(apps)-1; i++ {
+			for j := i + 1; j < len(apps); j++ {
+				if apps[j].FailureRate > apps[i].FailureRate {
+					apps[i], apps[j] = apps[j], apps[i]
+				}
+			}
+		}
+	}
+	sortByFailureRate(lxcApps)
+	sortByFailureRate(vmApps)
+
+	// Balance: take equal numbers from each, LXC first
+	// n/2 from each type, with LXC getting any extra slot
+	perType := n / 2
+	extra := n % 2 // Extra slot goes to LXC
+
+	result := make([]AppFailure, 0, n)
+
+	// Take LXC apps first (higher priority)
+	lxcCount := perType + extra
+	if lxcCount > len(lxcApps) {
+		lxcCount = len(lxcApps)
+	}
+	result = append(result, lxcApps[:lxcCount]...)
+
+	// Take VM apps
+	vmCount := perType
+	if vmCount > len(vmApps) {
+		vmCount = len(vmApps)
+	}
+	result = append(result, vmApps[:vmCount]...)
+
+	// Fill remaining slots if one type had fewer
+	remaining := n - len(result)
+	if remaining > 0 {
+		// Try to fill with more LXC apps
+		extraLxc := len(lxcApps) - lxcCount
+		if extraLxc > remaining {
+			extraLxc = remaining
+		}
+		if extraLxc > 0 {
+			result = append(result, lxcApps[lxcCount:lxcCount+extraLxc]...)
+			remaining -= extraLxc
+		}
+		// Fill with more VM apps if still slots available
+		if remaining > 0 {
+			extraVm := len(vmApps) - vmCount
+			if extraVm > remaining {
+				extraVm = remaining
+			}
+			if extraVm > 0 {
+				result = append(result, vmApps[vmCount:vmCount+extraVm]...)
 			}
 		}
 	}
 
-	if len(result) > n {
-		return result[:n]
-	}
 	return result
 }
 
@@ -2431,15 +2485,6 @@ func DashboardHTML() string {
             const displayTotal = data.total_all_time || data.total_installs;
             document.getElementById('totalInstalls').textContent = displayTotal.toLocaleString();
             
-            // Show sample info if data was sampled
-            const sampleInfo = document.getElementById('sampleInfo');
-            if (sampleInfo && data.sample_size && data.sample_size < data.total_all_time) {
-                sampleInfo.textContent = '(based on ' + data.sample_size.toLocaleString() + ' recent records)';
-                sampleInfo.style.display = 'block';
-            } else if (sampleInfo) {
-                sampleInfo.style.display = 'none';
-            }
-            
             document.getElementById('failedCount').textContent = data.failed_count.toLocaleString();
             document.getElementById('successRate').textContent = data.success_rate.toFixed(1) + '%';
             document.getElementById('successSubtitle').textContent = data.success_count.toLocaleString() + ' successful installations';
@@ -2499,7 +2544,8 @@ func DashboardHTML() string {
                 return;
             }
             
-            container.innerHTML = apps.slice(0, 8).map(a => {
+            // Show all apps (balanced: LXC first, then VMs)
+            container.innerHTML = apps.map(a => {
                 const typeClass = (a.type || '').toLowerCase();
                 const typeBadge = a.type && a.type !== 'unknown' ? '<span class="type-badge ' + typeClass + '">' + a.type.toUpperCase() + '</span> ' : '';
                 return '<div class="failed-app-card">' +
