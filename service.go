@@ -1263,7 +1263,7 @@ func warmupDashboardCache(pb *PBClient, cache *Cache, cfg Config) {
 	start := time.Now()
 	
 	// Common day ranges and repos to pre-cache
-	dayRanges := []int{7, 30, 90, 365}
+	dayRanges := []int{1, 7, 30, 90, 365}
 	repos := []string{"ProxmoxVE", "ProxmoxVED", ""}  // ProxmoxVE, ProxmoxVED, and "all"
 	
 	warmed := 0

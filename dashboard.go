@@ -1140,6 +1140,13 @@ func DashboardHTML() string {
             align-items: center;
             gap: 8px;
         }
+
+        .filter-divider {
+            width: 1px;
+            height: 32px;
+            background: var(--border-color);
+            margin: 0 4px;
+        }
         
         .filter-group label {
             font-size: 13px;
@@ -1175,6 +1182,28 @@ func DashboardHTML() string {
         
         .filter-btn.active {
             background: var(--accent-blue);
+            color: #fff;
+        }
+
+        .source-btn {
+            background: transparent;
+            border: none;
+            color: var(--text-secondary);
+            padding: 6px 14px;
+            border-radius: 6px;
+            font-size: 13px;
+            font-weight: 500;
+            cursor: pointer;
+            transition: all 0.2s;
+        }
+        
+        .source-btn:hover {
+            background: var(--bg-tertiary);
+            color: var(--text-primary);
+        }
+        
+        .source-btn.active {
+            background: var(--accent-green, #22c55e);
             color: #fff;
         }
         
@@ -2060,16 +2089,18 @@ func DashboardHTML() string {
         <div class="filters-bar" style="background: var(--bg-card); border: 1px solid var(--border-color); border-radius: 12px; margin-bottom: 24px;">
             <div class="filter-group">
                 <label>Source:</label>
-                <select id="repoFilter" class="custom-select" onchange="refreshData()">
-                    <option value="ProxmoxVE" selected>ProxmoxVE</option>
-                    <option value="ProxmoxVED">ProxmoxVED</option>
-                    <option value="external">External</option>
-                    <option value="all">All Sources</option>
-                </select>
+                <div class="quickfilter">
+                    <button class="source-btn active" data-repo="ProxmoxVE">ProxmoxVE</button>
+                    <button class="source-btn" data-repo="ProxmoxVED">ProxmoxVED</button>
+                    <button class="source-btn" data-repo="external">External</button>
+                    <button class="source-btn" data-repo="all">All</button>
+                </div>
             </div>
+            <div class="filter-divider"></div>
             <div class="filter-group">
                 <label>Period:</label>
                 <div class="quickfilter">
+                    <button class="filter-btn" data-days="1">Today</button>
                     <button class="filter-btn active" data-days="7">7 Days</button>
                     <button class="filter-btn" data-days="30">30 Days</button>
                     <button class="filter-btn" data-days="90">90 Days</button>
@@ -2456,7 +2487,7 @@ func DashboardHTML() string {
         async function fetchData() {
             const activeBtn = document.querySelector('.filter-btn.active');
             const days = activeBtn ? activeBtn.dataset.days : '7';
-            const repo = document.getElementById('repoFilter').value;
+            const repo = document.querySelector('.source-btn.active')?.dataset.repo || 'ProxmoxVE';
             
             // Show loading indicator
             document.getElementById('loadingIndicator').style.display = 'flex';
@@ -3145,6 +3176,15 @@ func DashboardHTML() string {
         refreshData();
         initSortableHeaders();
         
+        // Source button clicks
+        document.querySelectorAll('.source-btn').forEach(btn => {
+            btn.addEventListener('click', function() {
+                document.querySelectorAll('.source-btn').forEach(b => b.classList.remove('active'));
+                this.classList.add('active');
+                refreshData();
+            });
+        });
+
         // Quickfilter button clicks
         document.querySelectorAll('.filter-btn').forEach(btn => {
             btn.addEventListener('click', function() {
