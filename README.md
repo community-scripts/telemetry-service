@@ -35,21 +35,14 @@ This service acts as a telemetry ingestion layer between the bash installation s
 - **Caching** - In-memory or Redis-backed caching support
 - **Email Alerts** - SMTP-based alerts when failure rates exceed thresholds
 - **Dashboard** - Built-in HTML dashboard for telemetry visualization
-- **Migration Tool** - Migrate data from external sources to PocketBase
 
 ## Architecture
 
 ```
-┌─────────────────┐     ┌───────────────────┐     ┌────────────┐
-│  Bash Scripts   │────▶│ Telemetry Service │────▶│ PocketBase │
-│ (ProxmoxVE/VED) │     │    (this repo)    │     │  Database  │
-└─────────────────┘     └───────────────────┘     └────────────┘
-                               │
-                               ▼
-                        ┌────────────┐
-                        │ Dashboard  │
-                        │   (HTML)   │
-                        └────────────┘
+Bash Scripts (ProxmoxVE/VED)  --->  Telemetry Service  --->  PocketBase
+                                          |
+                                          v
+                                      Dashboard
 ```
 
 ## Configuration
@@ -89,16 +82,13 @@ The built-in dashboard (`/dashboard`) provides real-time analytics:
 ## Project Structure
 
 ```
-├── service.go          # Main service, HTTP handlers, rate limiting
-├── cache.go            # In-memory and Redis caching
-├── alerts.go           # SMTP alert system
-├── dashboard.go        # Dashboard HTML generation
-├── migration/
-│   ├── migrate.go      # Data migration tool
-│   └── migrate.sh      # Migration shell script
-├── Dockerfile          # Container build
-├── entrypoint.sh       # Container entrypoint with migration support
-└── go.mod              # Go module definition
+service.go      # Main service, HTTP handlers, rate limiting
+cache.go        # In-memory and Redis caching
+alerts.go       # SMTP alert system
+dashboard.go    # Dashboard HTML generation
+Dockerfile      # Container build
+entrypoint.sh   # Container entrypoint
+go.mod          # Go module definition
 ```
 
 ## Related Projects
@@ -114,25 +104,6 @@ The built-in dashboard (`/dashboard`) provides real-time analytics:
 | `/health` | GET | Health check endpoint |
 | `/dashboard` | GET | HTML dashboard UI |
 | `/api/dashboard` | GET | Dashboard data as JSON |
-
-## Deployment
-
-### Docker (recommended)
-
-```bash
-docker run -d \
-  -e POCKETBASE_URL=http://pocketbase:8090 \
-  -e POCKETBASE_TOKEN=your_token \
-  -p 8080:8080 \
-  ghcr.io/community-scripts/telemetry-service:latest
-```
-
-### Coolify
-
-1. Create a new service from this Git repository
-2. Set the required environment variables
-3. Configure the network to reach your PocketBase instance
-4. Deploy
 
 ## Privacy & Compliance
 
