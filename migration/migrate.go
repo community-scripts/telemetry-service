@@ -83,7 +83,7 @@ type OldDataModel struct {
 	RandomID   string `json:"random_id"`
 	Type       string `json:"type"`
 	Error      string `json:"error"`
-}
+} 
 
 // MongoNumberLong represents MongoDB's $numberLong type
 type MongoNumberLong struct {
@@ -1098,7 +1098,7 @@ func runSQLExport(jsonFile, sqlOutput, tableName string) {
 	}
 	defer sqlFile.Close()
 
-	writer := bufio.NewWriterSize(sqlFile, 16*1024*1024) // 16MB buffer
+	writer := bufio.NewWriterSize(sqlFile, 1*1024*1024) // 1MB buffer for faster feedback
 
 	// Write SQL header
 	writer.WriteString("-- Auto-generated SQL import for PocketBase\n")
@@ -1107,6 +1107,8 @@ func runSQLExport(jsonFile, sqlOutput, tableName string) {
 	writer.WriteString("PRAGMA synchronous=OFF;\n")
 	writer.WriteString("PRAGMA cache_size=100000;\n")
 	writer.WriteString("BEGIN TRANSACTION;\n\n")
+	writer.Flush() // Flush header immediately
+	fmt.Println("[INFO] SQL header written, starting record processing...")
 
 	startTime := time.Now()
 	var recordCount int64
@@ -1116,6 +1118,7 @@ func runSQLExport(jsonFile, sqlOutput, tableName string) {
 	reader := bufio.NewReaderSize(file, 16*1024*1024)
 
 	// Skip BOM and whitespace, find the opening '[' 
+	fmt.Println("[INFO] Scanning for JSON array start...")
 	for {
 		b, err := reader.ReadByte()
 		if err != nil {
@@ -1127,6 +1130,7 @@ func runSQLExport(jsonFile, sqlOutput, tableName string) {
 			continue
 		}
 		if b == '[' {
+			fmt.Println("[INFO] Found JSON array, starting decode...")
 			break // Found the start of array
 		}
 		fmt.Printf("[ERROR] Invalid JSON array format (expected '[', got 0x%02X '%c')\n", b, b)
@@ -1146,7 +1150,10 @@ func runSQLExport(jsonFile, sqlOutput, tableName string) {
 			if err == io.EOF {
 				break
 			}
-			// Skip malformed records
+			// Log first few errors for debugging
+			if recordCount < 5 {
+				fmt.Printf("[WARN] Skipping malformed record: %v\n", err)
+			}
 			continue
 		}
 
@@ -1252,8 +1259,9 @@ func runSQLExport(jsonFile, sqlOutput, tableName string) {
 		writer.WriteString(sql)
 		recordCount++
 
-		// Progress every 100k records
-		if recordCount%100000 == 0 {
+		// Progress every 10k records (and flush to show file growing)
+		if recordCount%10000 == 0 {
+			writer.Flush()
 			elapsed := time.Since(startTime)
 			rate := float64(recordCount) / elapsed.Seconds()
 			fmt.Printf("[PROGRESS] %d records processed (%.0f rec/s)\n", recordCount, rate)
