@@ -9,8 +9,15 @@
 ### 1.1 Physical Access Control
 | Measure | Implementation | Status |
 |---------|----------------|--------|
-| Data Center | Hetzner Cloud (ISO 27001 certified) | ✅ |
-| Physical Access | Secured by Hetzner (biometrics, 24/7 monitoring) | ✅ |
+| Data Center | IONOS VPS Germany (Frankfurt/Berlin) | ✅ |
+| Physical Access | Secured by IONOS (biometrics, 24/7 monitoring) | ✅ |
+| ISO 27001 | Information Security Management System (ISMS) certified | ✅ |
+| BSI IT-Grundschutz | ISO 27001 on basis of IT-Grundschutz (BSI-IGZ-0730-2025) | ✅ |
+| BSI C5 Testat | Cloud Computing Compliance Controls Catalog (Type 1, Nov 2023) | ✅ |
+| ISAE 3000 | International Standard on Assurance Engagements | ✅ |
+| ISO 50001 | Energy Management System certified | ✅ |
+| GDPR/DSGVO | Full EU data protection compliance | ✅ |
+| Gaia-X | Member for sovereign data handling (EU independence from US CLOUD Act) | ✅ |
 
 ### 1.2 System Access Control
 | Measure | Implementation | Status |
