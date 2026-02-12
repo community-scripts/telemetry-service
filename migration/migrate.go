@@ -33,6 +33,7 @@ package main
 import (
 	"bufio"
 	"bytes"
+	cryptoRand "crypto/rand"
 	"encoding/json"
 	"fmt"
 	"io"
@@ -1040,4 +1041,229 @@ func processBatch(pbURL, pbCollection string, records []OldDataModel, batchNum i
 	}
 
 	return migrated, skipped, failed
+}
+
+// runSQLExport generates a SQL file for direct SQLite import (fastest method!)
+func runSQLExport(jsonFile, sqlOutput, tableName string) {
+	fmt.Println("=========================================================")
+	fmt.Println("        SQL Export Mode (Direct SQLite Import)")
+	fmt.Println("=========================================================")
+	fmt.Printf("JSON File:   %s\n", jsonFile)
+	fmt.Printf("SQL Output:  %s\n", sqlOutput)
+	fmt.Printf("Table:       %s\n", tableName)
+	fmt.Printf("Repo Source: %s\n", repoSource)
+	fmt.Println("---------------------------------------------------------")
+
+	// Open JSON file
+	file, err := os.Open(jsonFile)
+	if err != nil {
+		fmt.Printf("[ERROR] Cannot open JSON file: %v\n", err)
+		os.Exit(1)
+	}
+	defer file.Close()
+
+	// Get file size for progress
+	fileInfo, _ := file.Stat()
+	fileSize := fileInfo.Size()
+	fmt.Printf("[INFO] File size: %.2f GB\n", float64(fileSize)/(1024*1024*1024))
+
+	// Open SQL output file
+	sqlFile, err := os.Create(sqlOutput)
+	if err != nil {
+		fmt.Printf("[ERROR] Cannot create SQL file: %v\n", err)
+		os.Exit(1)
+	}
+	defer sqlFile.Close()
+
+	writer := bufio.NewWriterSize(sqlFile, 16*1024*1024) // 16MB buffer
+
+	// Write SQL header
+	writer.WriteString("-- Auto-generated SQL import for PocketBase\n")
+	writer.WriteString("-- Generated: " + time.Now().Format(time.RFC3339) + "\n")
+	writer.WriteString("PRAGMA journal_mode=WAL;\n")
+	writer.WriteString("PRAGMA synchronous=OFF;\n")
+	writer.WriteString("PRAGMA cache_size=100000;\n")
+	writer.WriteString("BEGIN TRANSACTION;\n\n")
+
+	startTime := time.Now()
+	var recordCount int64
+	var filteredCount int64
+
+	// Create buffered reader
+	reader := bufio.NewReaderSize(file, 16*1024*1024)
+
+	// Skip initial '[' 
+	firstByte, err := reader.ReadByte()
+	if err != nil || firstByte != '[' {
+		fmt.Printf("[ERROR] Invalid JSON array format\n")
+		os.Exit(1)
+	}
+
+	decoder := json.NewDecoder(reader)
+
+	for {
+		// Check for end of array
+		if !decoder.More() {
+			break
+		}
+
+		var mongoRecord MongoDataModel
+		if err := decoder.Decode(&mongoRecord); err != nil {
+			if err == io.EOF {
+				break
+			}
+			// Skip malformed records
+			continue
+		}
+
+		// Convert MongoDB format to normal format
+		record := OldDataModel{
+			ID:         parseMongoString(mongoRecord.ID),
+			CtType:     parseMongoInt(mongoRecord.CtType),
+			DiskSize:   parseMongoInt(mongoRecord.DiskSize),
+			CoreCount:  parseMongoInt(mongoRecord.CoreCount),
+			RamSize:    parseMongoInt(mongoRecord.RamSize),
+			OsType:     mongoRecord.OsType,
+			OsVersion:  mongoRecord.OsVersion,
+			DisableIP6: mongoRecord.DisableIP6,
+			NsApp:      mongoRecord.NsApp,
+			Method:     mongoRecord.Method,
+			CreatedAt:  parseMongoDate(mongoRecord.CreatedAt),
+			PveVersion: mongoRecord.PveVersion,
+			Status:     mongoRecord.Status,
+			RandomID:   mongoRecord.RandomID,
+			Type:       mongoRecord.Type,
+		}
+		if mongoRecord.Error != nil {
+			record.Error = *mongoRecord.Error
+		}
+
+		// Apply date filters
+		if hasDateFrom || hasDateUntil {
+			recordTime, err := parseTimestamp(record.CreatedAt)
+			if err == nil {
+				if hasDateFrom && recordTime.Before(dateFrom) {
+					filteredCount++
+					continue
+				}
+				if hasDateUntil && recordTime.After(dateUntil) {
+					filteredCount++
+					continue
+				}
+			}
+		}
+
+		// Generate unique ID for PocketBase
+		pbID := generatePocketBaseID()
+
+		// Normalize values
+		status := record.Status
+		if status == "done" {
+			status = "success"
+		}
+		if status == "" {
+			status = "unknown"
+		}
+
+		nsapp := record.NsApp
+		if nsapp == "" {
+			nsapp = "unknown"
+		}
+
+		disableip6 := record.DisableIP6
+		if disableip6 == "" {
+			disableip6 = "no"
+		}
+
+		recType := record.Type
+		if recType == "" {
+			recType = "lxc"
+		}
+
+		// Format created date
+		createdAt := record.CreatedAt
+		if createdAt == "" {
+			createdAt = time.Now().UTC().Format("2006-01-02 15:04:05.000Z")
+		}
+
+		// Escape strings for SQL
+		escapeSQLString := func(s string) string {
+			return strings.ReplaceAll(s, "'", "''")
+		}
+
+		// Write INSERT statement
+		sql := fmt.Sprintf(
+			"INSERT OR IGNORE INTO %s (id,created,updated,ct_type,disk_size,core_count,ram_size,os_type,os_version,disableip6,nsapp,method,pve_version,status,random_id,type,error,repo_source) VALUES ('%s','%s','%s',%d,%d,%d,%d,'%s','%s','%s','%s','%s','%s','%s','%s','%s','%s','%s');\n",
+			tableName,
+			pbID,
+			escapeSQLString(createdAt),
+			escapeSQLString(createdAt),
+			record.CtType,
+			record.DiskSize,
+			record.CoreCount,
+			record.RamSize,
+			escapeSQLString(record.OsType),
+			escapeSQLString(record.OsVersion),
+			escapeSQLString(disableip6),
+			escapeSQLString(nsapp),
+			escapeSQLString(record.Method),
+			escapeSQLString(record.PveVersion),
+			escapeSQLString(status),
+			escapeSQLString(record.RandomID),
+			escapeSQLString(recType),
+			escapeSQLString(record.Error),
+			escapeSQLString(repoSource),
+		)
+
+		writer.WriteString(sql)
+		recordCount++
+
+		// Progress every 100k records
+		if recordCount%100000 == 0 {
+			elapsed := time.Since(startTime)
+			rate := float64(recordCount) / elapsed.Seconds()
+			fmt.Printf("[PROGRESS] %d records processed (%.0f rec/s)\n", recordCount, rate)
+		}
+	}
+
+	// Write footer
+	writer.WriteString("\nCOMMIT;\n")
+	writer.Flush()
+
+	elapsed := time.Since(startTime)
+	rate := float64(recordCount) / elapsed.Seconds()
+
+	fmt.Println()
+	fmt.Println("=========================================================")
+	fmt.Println("        SQL Export Complete")
+	fmt.Println("=========================================================")
+	fmt.Printf("Records exported:    %d\n", recordCount)
+	fmt.Printf("Filtered (date):     %d\n", filteredCount)
+	fmt.Printf("Duration:            %s\n", formatDuration(elapsed))
+	fmt.Printf("Speed:               %.0f records/sec\n", rate)
+	fmt.Printf("Output file:         %s\n", sqlOutput)
+	fmt.Println("---------------------------------------------------------")
+	fmt.Println()
+	fmt.Println("To import into PocketBase:")
+	fmt.Printf("  sqlite3 /app/pb_data/data.db < %s\n", sqlOutput)
+	fmt.Println()
+}
+
+// generatePocketBaseID generates a 15-char alphanumeric ID like PocketBase does
+func generatePocketBaseID() string {
+	const chars = "abcdefghijklmnopqrstuvwxyz0123456789"
+	b := make([]byte, 15)
+	// Use crypto/rand for randomness
+	randBytes := make([]byte, 15)
+	if _, err := io.ReadFull(cryptoRand.Reader, randBytes); err != nil {
+		// Fallback to time-based
+		for i := range b {
+			b[i] = chars[(time.Now().UnixNano()+int64(i))%int64(len(chars))]
+		}
+		return string(b)
+	}
+	for i := range b {
+		b[i] = chars[randBytes[i]%byte(len(chars))]
+	}
+	return string(b)
 }
