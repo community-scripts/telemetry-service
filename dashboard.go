@@ -13,6 +13,8 @@ import (
 // DashboardData holds aggregated statistics for the dashboard
 type DashboardData struct {
 	TotalInstalls   int               `json:"total_installs"`
+	TotalAllTime    int               `json:"total_all_time"`    // Total records in DB (not limited)
+	SampleSize      int               `json:"sample_size"`       // How many records were sampled
 	SuccessCount    int               `json:"success_count"`
 	FailedCount     int               `json:"failed_count"`
 	InstallingCount int               `json:"installing_count"`
@@ -132,10 +134,15 @@ func (p *PBClient) FetchDashboardData(ctx context.Context, days int, repoSource 
 	}
 
 	// Fetch all records for the period
-	records, err := p.fetchRecords(ctx, filter)
+	result, err := p.fetchRecords(ctx, filter)
 	if err != nil {
 		return nil, err
 	}
+	records := result.Records
+	
+	// Set total counts
+	data.TotalAllTime = result.TotalItems    // Actual total in database
+	data.SampleSize = len(records)           // How many we actually processed
 
 	// Aggregate statistics
 	appCounts := make(map[string]int)
@@ -257,18 +264,18 @@ func (p *PBClient) FetchDashboardData(ctx context.Context, days int, repoSource 
 		data.SuccessRate = float64(data.SuccessCount) / float64(completed) * 100
 	}
 
-	// Convert maps to sorted slices (top 10)
-	data.TopApps = topN(appCounts, 10)
-	data.OsDistribution = topNOs(osCounts, 10)
+	// Convert maps to sorted slices (increased limits for better analytics)
+	data.TopApps = topN(appCounts, 20)
+	data.OsDistribution = topNOs(osCounts, 15)
 	data.MethodStats = topNMethod(methodCounts, 10)
-	data.PveVersions = topNPve(pveCounts, 10)
+	data.PveVersions = topNPve(pveCounts, 15)
 	data.TypeStats = topNType(typeCounts, 10)
 
 	// Error analysis
-	data.ErrorAnalysis = buildErrorAnalysis(errorPatterns, 10)
+	data.ErrorAnalysis = buildErrorAnalysis(errorPatterns, 15)
 
-	// Failed apps with failure rates
-	data.FailedApps = buildFailedApps(appCounts, appFailures, 10)
+	// Failed apps with failure rates (min 10 installs threshold)
+	data.FailedApps = buildFailedApps(appCounts, appFailures, 15)
 
 	// Daily stats for chart
 	data.DailyStats = buildDailyStats(dailySuccess, dailyFailed, days)
@@ -282,10 +289,10 @@ func (p *PBClient) FetchDashboardData(ctx context.Context, days int, repoSource 
 	data.ErrorCategories = buildErrorCategories(errorCatCounts)
 
 	// Top tools
-	data.TopTools = buildToolStats(toolCounts, 10)
+	data.TopTools = buildToolStats(toolCounts, 15)
 
 	// Top addons
-	data.TopAddons = buildAddonStats(addonCounts, 10)
+	data.TopAddons = buildAddonStats(addonCounts, 15)
 
 	// Average install duration
 	if durationCount > 0 {
@@ -308,23 +315,30 @@ type TelemetryRecord struct {
 	Created string `json:"created"`
 }
 
-func (p *PBClient) fetchRecords(ctx context.Context, filter string) ([]TelemetryRecord, error) {
+// fetchRecordsResult contains records and total count
+type fetchRecordsResult struct {
+	Records    []TelemetryRecord
+	TotalItems int // Actual total in database (not limited)
+}
+
+func (p *PBClient) fetchRecords(ctx context.Context, filter string) (*fetchRecordsResult, error) {
 	var allRecords []TelemetryRecord
 	page := 1
 	perPage := 500
 	maxRecords := 100000 // Limit to prevent timeout with large datasets
+	totalItems := 0
 
 	for {
-		var url string
+		var reqURL string
 		if filter != "" {
-			url = fmt.Sprintf("%s/api/collections/%s/records?filter=%s&sort=-created&page=%d&perPage=%d",
+			reqURL = fmt.Sprintf("%s/api/collections/%s/records?filter=%s&sort=-created&page=%d&perPage=%d",
 				p.baseURL, p.targetColl, filter, page, perPage)
 		} else {
-			url = fmt.Sprintf("%s/api/collections/%s/records?sort=-created&page=%d&perPage=%d",
+			reqURL = fmt.Sprintf("%s/api/collections/%s/records?sort=-created&page=%d&perPage=%d",
 				p.baseURL, p.targetColl, page, perPage)
 		}
 
-		req, err := http.NewRequestWithContext(ctx, http.MethodGet, url, nil)
+		req, err := http.NewRequestWithContext(ctx, http.MethodGet, reqURL, nil)
 		if err != nil {
 			return nil, err
 		}
@@ -345,6 +359,11 @@ func (p *PBClient) fetchRecords(ctx context.Context, filter string) ([]Telemetry
 		}
 		resp.Body.Close()
 
+		// Store total on first page
+		if page == 1 {
+			totalItems = result.TotalItems
+		}
+
 		allRecords = append(allRecords, result.Items...)
 
 		// Stop if we have enough records or reached the end
@@ -354,7 +373,10 @@ func (p *PBClient) fetchRecords(ctx context.Context, filter string) ([]Telemetry
 		page++
 	}
 
-	return allRecords, nil
+	return &fetchRecordsResult{
+		Records:    allRecords,
+		TotalItems: totalItems,
+	}, nil
 }
 
 func topN(m map[string]int, n int) []AppCount {
@@ -533,11 +555,12 @@ func buildErrorAnalysis(patterns map[string]map[string]bool, n int) []ErrorGroup
 
 func buildFailedApps(total, failed map[string]int, n int) []AppFailure {
 	result := make([]AppFailure, 0)
+	minInstalls := 10 // Minimum installations to be considered (avoid noise from rare apps)
 
 	for app, failCount := range failed {
 		totalCount := total[app]
-		if totalCount == 0 {
-			continue
+		if totalCount < minInstalls {
+			continue // Skip apps with too few installations
 		}
 
 		rate := float64(failCount) / float64(totalCount) * 100
@@ -1808,13 +1831,15 @@ func DashboardHTML() string {
         </a>
         
         <div class="navbar-center">
-            <div class="search-box">
-                <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
-                    <circle cx="11" cy="11" r="8"/>
-                    <path d="m21 21-4.35-4.35"/>
-                </svg>
-                <input type="text" id="globalSearch" placeholder="Search scripts..." onkeyup="handleGlobalSearch(event)">
-                <span class="shortcut">Ctrl+K</span>
+            <div style="display: flex; align-items: center; gap: 12px;">
+                <span id="loadingIndicator" style="display: none; color: var(--accent-cyan); font-size: 14px;">
+                    <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" style="animation: spin 1s linear infinite; margin-right: 6px;">
+                        <circle cx="12" cy="12" r="10" stroke-opacity="0.3"/>
+                        <path d="M12 2a10 10 0 0 1 10 10"/>
+                    </svg>
+                    Loading data...
+                </span>
+                <span id="cacheStatus" style="font-size: 12px; color: var(--text-muted);"></span>
             </div>
         </div>
         
@@ -1864,8 +1889,8 @@ func DashboardHTML() string {
             <div class="filter-group">
                 <label>Period:</label>
                 <div class="quickfilter">
-                    <button class="filter-btn" data-days="7">7 Days</button>
-                    <button class="filter-btn active" data-days="30">30 Days</button>
+                    <button class="filter-btn active" data-days="7">7 Days</button>
+                    <button class="filter-btn" data-days="30">30 Days</button>
                     <button class="filter-btn" data-days="90">90 Days</button>
                     <button class="filter-btn" data-days="365">1 Year</button>
                     <button class="filter-btn" data-days="0">All</button>
@@ -2231,21 +2256,45 @@ func DashboardHTML() string {
         
         async function fetchData() {
             const activeBtn = document.querySelector('.filter-btn.active');
-            const days = activeBtn ? activeBtn.dataset.days : '30';
+            const days = activeBtn ? activeBtn.dataset.days : '7';
             const repo = document.getElementById('repoFilter').value;
+            
+            // Show loading indicator
+            document.getElementById('loadingIndicator').style.display = 'flex';
+            document.getElementById('cacheStatus').textContent = '';
+            
             try {
                 const response = await fetch('/api/dashboard?days=' + days + '&repo=' + repo);
                 if (!response.ok) throw new Error('Failed to fetch data');
+                
+                // Check cache status from header
+                const cacheHit = response.headers.get('X-Cache') === 'HIT';
+                document.getElementById('cacheStatus').textContent = cacheHit ? '(cached)' : '(fresh)';
+                
                 return await response.json();
             } catch (error) {
                 document.getElementById('error').style.display = 'flex';
                 document.getElementById('errorText').textContent = error.message;
                 throw error;
+            } finally {
+                document.getElementById('loadingIndicator').style.display = 'none';
             }
         }
         
         function updateStats(data) {
-            document.getElementById('totalInstalls').textContent = data.total_installs.toLocaleString();
+            // Use total_all_time for display if available, otherwise total_installs
+            const displayTotal = data.total_all_time || data.total_installs;
+            document.getElementById('totalInstalls').textContent = displayTotal.toLocaleString();
+            
+            // Show sample info if data was sampled
+            const sampleInfo = document.getElementById('sampleInfo');
+            if (sampleInfo && data.sample_size && data.sample_size < data.total_all_time) {
+                sampleInfo.textContent = '(based on ' + data.sample_size.toLocaleString() + ' recent records)';
+                sampleInfo.style.display = 'block';
+            } else if (sampleInfo) {
+                sampleInfo.style.display = 'none';
+            }
+            
             document.getElementById('failedCount').textContent = data.failed_count.toLocaleString();
             document.getElementById('successRate').textContent = data.success_rate.toFixed(1) + '%';
             document.getElementById('successSubtitle').textContent = data.success_count.toLocaleString() + ' successful installations';

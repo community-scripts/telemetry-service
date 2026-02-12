@@ -886,12 +886,12 @@ func main() {
 
 	// Dashboard API endpoint (with caching)
 	mux.HandleFunc("/api/dashboard", func(w http.ResponseWriter, r *http.Request) {
-		days := 30
+		days := 7 // Default: 7 days
 		if d := r.URL.Query().Get("days"); d != "" {
 			fmt.Sscanf(d, "%d", &days)
 			// days=0 means "all entries", negative values are invalid
 			if days < 0 {
-				days = 30
+				days = 7
 			}
 		}
 
@@ -1117,6 +1117,22 @@ func main() {
 		ReadHeaderTimeout: 3 * time.Second,
 	}
 
+	// Background cache warmup job - pre-populates cache for common dashboard queries
+	if cfg.CacheEnabled {
+		go func() {
+			// Initial warmup after startup
+			time.Sleep(10 * time.Second)
+			warmupDashboardCache(pb, cache, cfg)
+			
+			// Periodic refresh (every 4 minutes, before 5-minute TTL expires)
+			ticker := time.NewTicker(4 * time.Minute)
+			for range ticker.C {
+				warmupDashboardCache(pb, cache, cfg)
+			}
+		}()
+		log.Println("background cache warmup enabled")
+	}
+
 	log.Printf("telemetry-ingest listening on %s", cfg.ListenAddr)
 	log.Fatal(srv.ListenAndServe())
 }
@@ -1202,4 +1218,44 @@ func splitCSV(s string) []string {
 		}
 	}
 	return out
+}
+
+// warmupDashboardCache pre-populates the cache with common dashboard queries
+func warmupDashboardCache(pb *PBClient, cache *Cache, cfg Config) {
+	log.Println("[CACHE] Starting dashboard cache warmup...")
+	
+	// Common day ranges and repos to pre-cache
+	dayRanges := []int{7, 30, 90}
+	repos := []string{"ProxmoxVE", ""}  // ProxmoxVE and "all"
+	
+	warmed := 0
+	for _, days := range dayRanges {
+		for _, repo := range repos {
+			ctx, cancel := context.WithTimeout(context.Background(), 120*time.Second)
+			
+			cacheKey := fmt.Sprintf("dashboard:%d:%s", days, repo)
+			
+			// Check if already cached
+			var existing *DashboardData
+			if cache.Get(ctx, cacheKey, &existing) {
+				cancel()
+				continue // Already cached, skip
+			}
+			
+			// Fetch and cache
+			data, err := pb.FetchDashboardData(ctx, days, repo)
+			cancel()
+			
+			if err != nil {
+				log.Printf("[CACHE] Warmup failed for days=%d repo=%s: %v", days, repo, err)
+				continue
+			}
+			
+			_ = cache.Set(context.Background(), cacheKey, data, cfg.CacheTTL)
+			warmed++
+			log.Printf("[CACHE] Warmed cache for days=%d repo=%s (%d installs)", days, repo, data.TotalAllTime)
+		}
+	}
+	
+	log.Printf("[CACHE] Dashboard cache warmup complete (%d entries)", warmed)
 }
