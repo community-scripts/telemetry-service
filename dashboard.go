@@ -2105,7 +2105,6 @@ func DashboardHTML() string {
                     <button class="filter-btn" data-days="30">30 Days</button>
                     <button class="filter-btn" data-days="90">90 Days</button>
                     <button class="filter-btn" data-days="365">1 Year</button>
-                    <button class="filter-btn" data-days="0">All</button>
                 </div>
             </div>
             <div style="margin-left: auto; display: flex; gap: 8px;">

@@ -899,9 +899,12 @@ func main() {
 		days := 7 // Default: 7 days
 		if d := r.URL.Query().Get("days"); d != "" {
 			fmt.Sscanf(d, "%d", &days)
-			// days=0 means "all entries", negative values are invalid
 			if days < 0 {
 				days = 7
+			}
+			// Cap to 365 days to prevent unbounded queries that timeout
+			if days == 0 || days > 365 {
+				days = 365
 			}
 		}
 
@@ -1139,10 +1142,9 @@ func main() {
 			log.Printf("telemetry accepted nsapp=%s status=%s repo=%s", out.NSAPP, out.Status, in.RepoSource)
 		}
 
-		// Invalidate dashboard cache so new data appears on next request
-		if cfg.CacheEnabled {
-			cache.InvalidateDashboard(context.Background())
-		}
+		// Don't invalidate cache on every write - the background warmup
+		// refreshes every 30 minutes, which is sufficient for a dashboard.
+		// Invalidating on every write caused cascading timeouts with large datasets.
 
 		w.WriteHeader(http.StatusAccepted)
 		_, _ = w.Write([]byte("accepted"))
@@ -1278,7 +1280,14 @@ func warmupDashboardCache(pb *PBClient, cache *Cache, cfg Config) {
 				continue // Another goroutine is already refreshing this key
 			}
 
-			ctx, cancel := context.WithTimeout(context.Background(), 180*time.Second)
+			// Scale timeout by data volume: larger ranges need more time
+			timeout := 180 * time.Second
+			if days >= 365 {
+				timeout = 600 * time.Second // 10 minutes for full year
+			} else if days >= 90 {
+				timeout = 300 * time.Second // 5 minutes for 90 days
+			}
+			ctx, cancel := context.WithTimeout(context.Background(), timeout)
 			data, err := pb.FetchDashboardData(ctx, days, repo)
 			cancel()
 			cache.FinishRefresh(cacheKey)
