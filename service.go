@@ -12,6 +12,7 @@ import (
 	"log"
 	"net"
 	"net/http"
+	"net/url"
 	"os"
 	"strings"
 	"sync"
@@ -339,7 +340,7 @@ func (p *PBClient) FetchRecordsPaginated(ctx context.Context, page, limit int, s
 
 	filterStr := ""
 	if len(filters) > 0 {
-		filterStr = "&filter=" + strings.Join(filters, "&&")
+		filterStr = "&filter=" + url.QueryEscape(strings.Join(filters, " && "))
 	}
 
 	// Handle sort parameter (default: -created)
