@@ -1113,46 +1113,35 @@ func runSQLExport(jsonFile, sqlOutput, tableName string) {
 	startTime := time.Now()
 	var recordCount int64
 	var filteredCount int64
+	var skippedCount int64
 
-	// Create buffered reader
-	reader := bufio.NewReaderSize(file, 16*1024*1024)
-
-	// Skip BOM and whitespace, find the opening '[' 
-	fmt.Println("[INFO] Scanning for JSON array start...")
-	for {
-		b, err := reader.ReadByte()
-		if err != nil {
-			fmt.Printf("[ERROR] Cannot read JSON file: %v\n", err)
-			os.Exit(1)
-		}
-		// Skip UTF-8 BOM (EF BB BF) and whitespace
-		if b == 0xEF || b == 0xBB || b == 0xBF || b == ' ' || b == '\t' || b == '\n' || b == '\r' {
-			continue
-		}
-		if b == '[' {
-			fmt.Println("[INFO] Found JSON array, starting decode...")
-			break // Found the start of array
-		}
-		fmt.Printf("[ERROR] Invalid JSON array format (expected '[', got 0x%02X '%c')\n", b, b)
+	// Create decoder directly from file (not buffered reader)
+	decoder := json.NewDecoder(file)
+	
+	// Read opening bracket of array
+	fmt.Println("[INFO] Reading JSON array...")
+	token, err := decoder.Token()
+	if err != nil {
+		fmt.Printf("[ERROR] Cannot read JSON: %v\n", err)
 		os.Exit(1)
 	}
+	if delim, ok := token.(json.Delim); !ok || delim != '[' {
+		fmt.Printf("[ERROR] Expected JSON array, got: %v\n", token)
+		os.Exit(1)
+	}
+	fmt.Println("[INFO] Found JSON array, starting decode...")
 
-	decoder := json.NewDecoder(reader)
-
-	for {
-		// Check for end of array
-		if !decoder.More() {
-			break
-		}
-
+	// Decode each element
+	for decoder.More() {
 		var mongoRecord MongoDataModel
 		if err := decoder.Decode(&mongoRecord); err != nil {
 			if err == io.EOF {
 				break
 			}
+			skippedCount++
 			// Log first few errors for debugging
-			if recordCount < 5 {
-				fmt.Printf("[WARN] Skipping malformed record: %v\n", err)
+			if skippedCount <= 5 {
+				fmt.Printf("[WARN] Skipping malformed record #%d: %v\n", skippedCount, err)
 			}
 			continue
 		}
@@ -1280,6 +1269,7 @@ func runSQLExport(jsonFile, sqlOutput, tableName string) {
 	fmt.Println("        SQL Export Complete")
 	fmt.Println("=========================================================")
 	fmt.Printf("Records exported:    %d\n", recordCount)
+	fmt.Printf("Skipped (errors):    %d\n", skippedCount)
 	fmt.Printf("Filtered (date):     %d\n", filteredCount)
 	fmt.Printf("Duration:            %s\n", formatDuration(elapsed))
 	fmt.Printf("Speed:               %.0f records/sec\n", rate)
