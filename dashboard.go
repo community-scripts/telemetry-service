@@ -2263,7 +2263,7 @@ func DashboardHTML() string {
             
             <div class="stat-card failed">
                 <div class="stat-card-header">
-                    <span class="stat-card-label">Failures</span>
+                    <span class="stat-card-label">Failures & Aborted</span>
                     <div class="stat-card-icon">
                         <svg width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
                             <circle cx="12" cy="12" r="10"/>
@@ -2273,22 +2273,7 @@ func DashboardHTML() string {
                     </div>
                 </div>
                 <div class="stat-card-value" id="failedCount">-</div>
-                <div class="stat-card-subtitle">Installations encountered errors</div>
-            </div>
-            
-            <div class="stat-card aborted">
-                <div class="stat-card-header">
-                    <span class="stat-card-label">Aborted</span>
-                    <div class="stat-card-icon">
-                        <svg width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
-                            <circle cx="12" cy="12" r="10"/>
-                            <path d="M12 8v4"/>
-                            <path d="M12 16h.01"/>
-                        </svg>
-                    </div>
-                </div>
-                <div class="stat-card-value" id="abortedCount">-</div>
-                <div class="stat-card-subtitle">Terminated by Ctrl+C (SIGINT)</div>
+                <div class="stat-card-subtitle" id="failedSubtitle">Loading...</div>
             </div>
             
             <!-- Most Popular Card -->
@@ -2636,8 +2621,15 @@ func DashboardHTML() string {
             const displayTotal = data.total_all_time || data.total_installs;
             document.getElementById('totalInstalls').textContent = displayTotal.toLocaleString();
             
-            document.getElementById('failedCount').textContent = data.failed_count.toLocaleString();
-            document.getElementById('abortedCount').textContent = data.aborted_count.toLocaleString();
+            const totalFailures = (data.failed_count || 0) + (data.aborted_count || 0);
+            document.getElementById('failedCount').textContent = totalFailures.toLocaleString();
+            
+            // Show breakdown in subtitle
+            const failedText = data.failed_count > 0 ? data.failed_count.toLocaleString() + ' errors' : '';
+            const abortedText = data.aborted_count > 0 ? data.aborted_count.toLocaleString() + ' aborted (Ctrl+C)' : '';
+            const subtitleParts = [failedText, abortedText].filter(x => x);
+            document.getElementById('failedSubtitle').textContent = subtitleParts.length > 0 ? subtitleParts.join(' • ') : 'No failures recorded';
+            
             document.getElementById('successRate').textContent = data.success_rate.toFixed(1) + '%';
             document.getElementById('successSubtitle').textContent = data.success_count.toLocaleString() + ' successful installations';
             document.getElementById('lastUpdated').textContent = 'Updated ' + new Date().toLocaleTimeString();
