@@ -1978,6 +1978,99 @@ func DashboardHTML() string {
             color: var(--text-secondary);
             font-size: 14px;
         }
+
+        /* ── Mobile Optimizations ── */
+        @media (max-width: 768px) {
+            .filters-bar {
+                flex-direction: column;
+                align-items: stretch;
+                gap: 12px;
+                padding: 14px 16px;
+            }
+
+            .filter-group {
+                flex-direction: column;
+                align-items: flex-start;
+                gap: 6px;
+            }
+
+            .quickfilter {
+                flex-wrap: wrap;
+                width: 100%;
+            }
+
+            .filter-btn, .source-btn {
+                padding: 6px 10px;
+                font-size: 12px;
+                flex: 1 1 auto;
+                text-align: center;
+            }
+
+            .filter-divider {
+                width: 100%;
+                height: 1px;
+                margin: 0;
+            }
+
+            .auto-refresh-toggle {
+                justify-content: flex-start;
+            }
+
+            .filters-bar > div[style*="margin-left: auto"] {
+                margin-left: 0 !important;
+                width: 100%;
+                justify-content: space-between;
+            }
+
+            /* OS / Status chart grid */
+            .chart-pair-grid {
+                grid-template-columns: 1fr !important;
+            }
+
+            /* Modal: full-screen on mobile */
+            .modal-content {
+                width: 100% !important;
+                max-width: 100% !important;
+                max-height: 100vh !important;
+                height: 100vh;
+                border-radius: 0 !important;
+                margin: 0;
+            }
+
+            .modal-overlay {
+                align-items: stretch !important;
+            }
+
+            .modal-header {
+                padding: 16px !important;
+            }
+
+            .modal-header h2 {
+                font-size: 16px !important;
+            }
+
+            .modal-body {
+                padding: 16px !important;
+            }
+
+            .detail-grid {
+                grid-template-columns: 1fr 1fr !important;
+            }
+
+            .error-box {
+                font-size: 11px !important;
+                max-height: 200px;
+                overflow-y: auto;
+            }
+
+            .page-header h1 {
+                font-size: 22px;
+            }
+
+            .main-content {
+                padding: 16px 12px;
+            }
+        }
         
         /* Auto-Refresh Toggle */
         .auto-refresh-toggle {
@@ -2432,7 +2525,7 @@ func DashboardHTML() string {
             </div>
         </div>
         
-        <div style="display: grid; grid-template-columns: 1fr 1fr; gap: 20px; margin-bottom: 24px;">
+        <div class="chart-pair-grid" style="display: grid; grid-template-columns: 1fr 1fr; gap: 20px; margin-bottom: 24px;">
             <div class="chart-card">
                 <h3>OS Distribution</h3>
                 <div class="chart-wrapper" style="height: 260px;">
