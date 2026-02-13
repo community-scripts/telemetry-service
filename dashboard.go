@@ -1651,7 +1651,7 @@ func DashboardHTML() string {
             color: var(--accent-red);
             white-space: pre-wrap;
             word-break: break-word;
-            max-height: 200px;
+            max-height: 400px;
             overflow-y: auto;
         }
         
@@ -2122,7 +2122,7 @@ func DashboardHTML() string {
             color: var(--accent-red);
             white-space: pre-wrap;
             word-break: break-word;
-            max-height: 200px;
+            max-height: 400px;
             overflow-y: auto;
         }
         

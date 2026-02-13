@@ -639,6 +639,20 @@ func sanitizeShort(s string, max int) string {
 	return s
 }
 
+// sanitizeMultiLine allows newlines (for log output) but limits total length.
+func sanitizeMultiLine(s string, max int) string {
+	s = strings.TrimSpace(s)
+	if s == "" {
+		return ""
+	}
+	s = strings.ReplaceAll(s, "\r\n", "\n")
+	s = strings.ReplaceAll(s, "\r", "\n")
+	if len(s) > max {
+		s = s[:max]
+	}
+	return s
+}
+
 func validate(in *TelemetryIn) error {
 	// Sanitize all string fields
 	in.RandomID = sanitizeShort(in.RandomID, 64)
@@ -673,8 +687,8 @@ func validate(in *TelemetryIn) error {
 		in.CPUVendor = "unknown"
 	}
 
-	// IMPORTANT: "error" must be short and not contain identifiers/logs
-	in.Error = sanitizeShort(in.Error, 120)
+	// Allow longer error text to capture log output from get_error_text()
+	in.Error = sanitizeMultiLine(in.Error, 4000)
 
 	// Required fields for all requests
 	if in.RandomID == "" || in.Type == "" || in.NSAPP == "" || in.Status == "" {
