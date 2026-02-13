@@ -570,43 +570,156 @@ func normalizeError(err string) string {
 		return "unknown"
 	}
 
-	// Normalize common patterns
-	err = strings.ToLower(err)
-
-	// Remove specific numbers, IPs, paths that vary
-	// Keep it simple for now - just truncate and normalize
-	if len(err) > 60 {
-		err = err[:60]
-	}
-
-	// Common error pattern replacements
-	patterns := map[string]string{
-		"connection refused":  "connection refused",
-		"timeout":             "timeout",
-		"no space left":       "disk full",
-		"permission denied":   "permission denied",
-		"not found":           "not found",
-		"failed to download":  "download failed",
-		"apt":                 "apt error",
-		"dpkg":                "dpkg error",
-		"curl":                "network error",
-		"wget":                "network error",
-		"docker":              "docker error",
-		"systemctl":           "systemd error",
-		"service":             "service error",
-	}
-
-	for pattern, label := range patterns {
-		if strings.Contains(err, pattern) {
-			return label
+	// If it's already a short explain_exit_code result, return as-is (lowercased)
+	lower := strings.ToLower(err)
+	if !strings.Contains(err, "\n") && len(err) <= 120 {
+		// Single-line error from explain_exit_code — classify by keywords
+		switch {
+		case strings.Contains(lower, "sigint") || strings.Contains(lower, "ctrl+c") || strings.Contains(lower, "ctrl-c"):
+			return "aborted by user (SIGINT)"
+		case strings.Contains(lower, "sigkill") || strings.Contains(lower, "out of memory") || strings.Contains(lower, "killed"):
+			return "killed (SIGKILL / out of memory?)"
+		case strings.Contains(lower, "sigterm") || strings.Contains(lower, "terminated"):
+			return "terminated (SIGTERM)"
+		case strings.Contains(lower, "command not found"):
+			return "command not found"
+		case strings.Contains(lower, "timeout"):
+			return "timeout"
+		case strings.Contains(lower, "permission denied") || strings.Contains(lower, "operation not permitted"):
+			return "general error / operation not permitted"
+		case strings.Contains(lower, "unknown error"):
+			return "unknown error"
+		default:
+			if len(err) > 80 {
+				return lower[:80] + "..."
+			}
+			return lower
 		}
 	}
 
-	// If no pattern matches, return first 40 chars
-	if len(err) > 40 {
-		return err[:40] + "..."
+	// Multi-line error text (from get_error_text / last 20 lines of log)
+	// Extract the most meaningful error line
+	lines := strings.Split(err, "\n")
+	var bestLine string
+	var bestScore int
+
+	// Error indicator keywords scored by relevance
+	errorIndicators := []struct {
+		pattern string
+		score   int
+	}{
+		{"error:", 10},
+		{"fatal:", 10},
+		{"failed", 8},
+		{"exception", 8},
+		{"e:", 7},          // APT error lines
+		{"err!", 7},
+		{"unable to", 7},
+		{"cannot", 6},
+		{"no such file", 6},
+		{"not found", 6},
+		{"permission denied", 6},
+		{"dpkg:", 6},
+		{"sub-process", 5},
+		{"broken", 5},
+		{"segfault", 5},
+		{"traceback", 5},
+		{"panic:", 5},
+		{"killed", 5},
+		{"abort", 5},
+		{"denied", 4},
+		{"refused", 4},
+		{"timeout", 4},
+		{"could not", 4},
+		{"no space", 4},
+		{"exit code", 3},
+		{"exit status", 3},
 	}
-	return err
+
+	for _, line := range lines {
+		trimmed := strings.TrimSpace(line)
+		if trimmed == "" || trimmed == "---" || strings.HasPrefix(trimmed, "#") || strings.HasPrefix(trimmed, "---") {
+			continue
+		}
+		lowerLine := strings.ToLower(trimmed)
+
+		// Skip noisy / unhelpful lines
+		if strings.HasPrefix(lowerLine, "reading package") ||
+			strings.HasPrefix(lowerLine, "processing") ||
+			strings.HasPrefix(lowerLine, "setting up") ||
+			strings.HasPrefix(lowerLine, "unpacking") ||
+			strings.HasPrefix(lowerLine, "selecting") ||
+			strings.HasPrefix(lowerLine, "preparing") ||
+			strings.HasPrefix(lowerLine, "hit:") ||
+			strings.HasPrefix(lowerLine, "get:") ||
+			strings.HasPrefix(lowerLine, "fetched") {
+			continue
+		}
+
+		score := 0
+		for _, ind := range errorIndicators {
+			if strings.Contains(lowerLine, ind.pattern) {
+				score += ind.score
+			}
+		}
+
+		// Prefer longer lines (more context)
+		if len(trimmed) > 15 {
+			score++
+		}
+
+		if score > bestScore {
+			bestScore = score
+			bestLine = trimmed
+		}
+	}
+
+	// If we found a good error line, use it
+	if bestLine != "" && bestScore >= 3 {
+		result := strings.ToLower(bestLine)
+		// Classify into broader categories
+		switch {
+		case strings.Contains(result, "dpkg") && (strings.Contains(result, "error") || strings.Contains(result, "failed")):
+			// Keep specific dpkg error
+			if len(result) > 100 {
+				return result[:100] + "..."
+			}
+			return result
+		case strings.Contains(result, "apt") || strings.Contains(result, "e: "):
+			if len(result) > 100 {
+				return result[:100] + "..."
+			}
+			return result
+		case strings.Contains(result, "no space left"):
+			return "disk full"
+		case strings.Contains(result, "connection refused"):
+			return "connection refused"
+		default:
+			if len(result) > 100 {
+				return result[:100] + "..."
+			}
+			return result
+		}
+	}
+
+	// Fallback: take the last non-empty meaningful line
+	for i := len(lines) - 1; i >= 0; i-- {
+		trimmed := strings.TrimSpace(lines[i])
+		if trimmed != "" && len(trimmed) > 5 {
+			result := strings.ToLower(trimmed)
+			if len(result) > 80 {
+				return result[:80] + "..."
+			}
+			return result
+		}
+	}
+
+	// Last resort
+	result := strings.ToLower(strings.TrimSpace(err))
+	if len(result) > 80 {
+		return result[:80] + "..."
+	}
+	return result
 }
 
 func buildErrorAnalysis(apps map[string]map[string]int, counts map[string]int, n int) []ErrorGroup {
