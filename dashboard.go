@@ -66,18 +66,31 @@ type TypeCount struct {
 }
 
 type ErrorGroup struct {
-	Pattern    string `json:"pattern"`
-	Count      int    `json:"count"`       // Total error occurrences
-	UniqueApps int    `json:"unique_apps"` // Number of unique apps affected
-	Apps       string `json:"apps"`        // Comma-separated list of affected apps
+	Pattern      string           `json:"pattern"`
+	Count        int              `json:"count"`         // Total error occurrences
+	UniqueApps   int              `json:"unique_apps"`   // Number of unique apps affected
+	Apps         string           `json:"apps"`          // Comma-separated list of affected apps
+	AppBreakdown []ErrorAppDetail `json:"app_breakdown"` // Per-app counts
+}
+
+type ErrorAppDetail struct {
+	App   string `json:"app"`
+	Count int    `json:"count"`
 }
 
 type AppFailure struct {
-	App         string  `json:"app"`
-	Type        string  `json:"type"`
-	TotalCount  int     `json:"total_count"`
-	FailedCount int     `json:"failed_count"`
-	FailureRate float64 `json:"failure_rate"`
+	App         string             `json:"app"`
+	Type        string             `json:"type"`
+	TotalCount  int                `json:"total_count"`
+	FailedCount int                `json:"failed_count"`
+	FailureRate float64            `json:"failure_rate"`
+	TopErrors   []AppErrorDetail   `json:"top_errors,omitempty"`
+}
+
+type AppErrorDetail struct {
+	Pattern string  `json:"pattern"`
+	Count   int     `json:"count"`
+	Percent float64 `json:"percent"`
 }
 
 type DailyStat struct {
@@ -160,8 +173,9 @@ func (p *PBClient) FetchDashboardData(ctx context.Context, days int, repoSource 
 	methodCounts := make(map[string]int)
 	pveCounts := make(map[string]int)
 	typeCounts := make(map[string]int)
-	errorApps := make(map[string]map[string]bool) // pattern -> set of apps
+	errorApps := make(map[string]map[string]int)  // pattern -> app -> count
 	errorCounts := make(map[string]int)            // pattern -> total occurrences
+	appErrors := make(map[string]map[string]int)   // "app|type" -> pattern -> count
 	dailySuccess := make(map[string]int)
 	dailyFailed := make(map[string]int)
 
@@ -198,10 +212,20 @@ func (p *PBClient) FetchDashboardData(ctx context.Context, days int, repoSource 
 				pattern := normalizeError(r.Error)
 				errorCounts[pattern]++
 				if errorApps[pattern] == nil {
-					errorApps[pattern] = make(map[string]bool)
+					errorApps[pattern] = make(map[string]int)
 				}
 				if r.NSAPP != "" {
-					errorApps[pattern][r.NSAPP] = true
+					errorApps[pattern][r.NSAPP]++
+					// Track per-app errors for failed apps drill-down
+					typeLabel := r.Type
+					if typeLabel == "" {
+						typeLabel = "unknown"
+					}
+					aeKey := r.NSAPP + "|" + typeLabel
+					if appErrors[aeKey] == nil {
+						appErrors[aeKey] = make(map[string]int)
+					}
+					appErrors[aeKey][pattern]++
 				}
 			}
 		case "aborted":
@@ -306,6 +330,7 @@ func (p *PBClient) FetchDashboardData(ctx context.Context, days int, repoSource 
 	// Error analysis
 	data.ErrorAnalysis = buildErrorAnalysis(errorApps, errorCounts, 15)
 
+
 	// Failed apps with failure rates - dynamic threshold based on time period
 	minInstalls := 10 // default
 	switch {
@@ -321,7 +346,7 @@ func (p *PBClient) FetchDashboardData(ctx context.Context, days int, repoSource 
 		minInstalls = 100 // 1 year+: need at least 100 installs
 	}
 	// Returns 16 items: 8 LXC + 8 VM balanced, LXC prioritized
-	data.FailedApps = buildFailedApps(appTypeCounts, appTypeFailures, 16, minInstalls)
+	data.FailedApps = buildFailedApps(appTypeCounts, appTypeFailures, appErrors, 16, minInstalls)
 
 	// Daily stats for chart
 	data.DailyStats = buildDailyStats(dailySuccess, dailyFailed, days)
@@ -370,7 +395,7 @@ type fetchRecordsResult struct {
 func (p *PBClient) fetchRecords(ctx context.Context, filter string) (*fetchRecordsResult, error) {
 	var allRecords []TelemetryRecord
 	page := 1
-	perPage := 500
+	perPage := 1000
 	totalItems := 0
 
 	for {
@@ -561,13 +586,28 @@ func normalizeError(err string) string {
 	return err
 }
 
-func buildErrorAnalysis(apps map[string]map[string]bool, counts map[string]int, n int) []ErrorGroup {
+func buildErrorAnalysis(apps map[string]map[string]int, counts map[string]int, n int) []ErrorGroup {
 	result := make([]ErrorGroup, 0, len(apps))
 
-	for pattern, appSet := range apps {
-		appList := make([]string, 0, len(appSet))
-		for app := range appSet {
+	for pattern, appCounts := range apps {
+		appList := make([]string, 0, len(appCounts))
+		breakdown := make([]ErrorAppDetail, 0, len(appCounts))
+		for app, count := range appCounts {
 			appList = append(appList, app)
+			breakdown = append(breakdown, ErrorAppDetail{App: app, Count: count})
+		}
+
+		// Sort breakdown by count descending
+		for i := 0; i < len(breakdown)-1; i++ {
+			for j := i + 1; j < len(breakdown); j++ {
+				if breakdown[j].Count > breakdown[i].Count {
+					breakdown[i], breakdown[j] = breakdown[j], breakdown[i]
+				}
+			}
+		}
+		// Keep top 10 apps per pattern
+		if len(breakdown) > 10 {
+			breakdown = breakdown[:10]
 		}
 
 		// Limit app list display
@@ -577,10 +617,11 @@ func buildErrorAnalysis(apps map[string]map[string]bool, counts map[string]int, 
 		}
 
 		result = append(result, ErrorGroup{
-			Pattern:    pattern,
-			Count:      counts[pattern],
-			UniqueApps: len(appSet),
-			Apps:       appsStr,
+			Pattern:      pattern,
+			Count:        counts[pattern],
+			UniqueApps:   len(appCounts),
+			Apps:         appsStr,
+			AppBreakdown: breakdown,
 		})
 	}
 
@@ -599,7 +640,7 @@ func buildErrorAnalysis(apps map[string]map[string]bool, counts map[string]int, 
 	return result
 }
 
-func buildFailedApps(total, failed map[string]int, n int, minInstalls int) []AppFailure {
+func buildFailedApps(total, failed map[string]int, appErrors map[string]map[string]int, n int, minInstalls int) []AppFailure {
 	lxcApps := make([]AppFailure, 0)
 	vmApps := make([]AppFailure, 0)
 
@@ -624,6 +665,27 @@ func buildFailedApps(total, failed map[string]int, n int, minInstalls int) []App
 			TotalCount:  totalCount,
 			FailedCount: failCount,
 			FailureRate: rate,
+		}
+
+		// Add top errors for this app
+		if errMap, ok := appErrors[key]; ok {
+			topErrors := make([]AppErrorDetail, 0, len(errMap))
+			for pattern, count := range errMap {
+				pct := float64(count) / float64(failCount) * 100
+				topErrors = append(topErrors, AppErrorDetail{Pattern: pattern, Count: count, Percent: pct})
+			}
+			// Sort by count descending
+			for i := 0; i < len(topErrors)-1; i++ {
+				for j := i + 1; j < len(topErrors); j++ {
+					if topErrors[j].Count > topErrors[i].Count {
+						topErrors[i], topErrors[j] = topErrors[j], topErrors[i]
+					}
+				}
+			}
+			if len(topErrors) > 8 {
+				topErrors = topErrors[:8]
+			}
+			failure.TopErrors = topErrors
 		}
 
 		// Separate LXC and VM apps (LXC has higher priority)
@@ -1763,6 +1825,13 @@ func DashboardHTML() string {
             background: var(--bg-tertiary);
             border-radius: 6px;
             padding: 12px;
+            cursor: pointer;
+            transition: transform 0.15s, box-shadow 0.15s;
+        }
+        
+        .failed-app-card:hover {
+            transform: translateY(-2px);
+            box-shadow: 0 4px 12px rgba(0,0,0,0.3);
         }
         
         .failed-app-card .app-name {
@@ -1801,6 +1870,13 @@ func DashboardHTML() string {
             background: var(--bg-tertiary);
             border-radius: 8px;
             margin-bottom: 8px;
+            cursor: pointer;
+            transition: transform 0.15s, box-shadow 0.15s;
+        }
+        
+        .error-item:hover {
+            transform: translateY(-1px);
+            box-shadow: 0 4px 12px rgba(0,0,0,0.3);
         }
         
         .error-item:last-child {
@@ -2614,9 +2690,14 @@ func DashboardHTML() string {
             document.getElementById('cacheStatus').textContent = '';
             
             try {
+                // Timeout: 5 minutes for large datasets (1 Year)
+                const controller = new AbortController();
+                const timeoutId = setTimeout(() => controller.abort(), 300000);
+                
                 // Add cache-busting timestamp for filter changes to ensure fresh data
                 const cacheBuster = '&_t=' + Date.now();
-                const response = await fetch('/api/dashboard?days=' + days + '&repo=' + repo + cacheBuster);
+                const response = await fetch('/api/dashboard?days=' + days + '&repo=' + repo + cacheBuster, { signal: controller.signal });
+                clearTimeout(timeoutId);
                 if (!response.ok) throw new Error('Failed to fetch data');
                 
                 // Check cache status from header
@@ -2625,6 +2706,9 @@ func DashboardHTML() string {
                 
                 return await response.json();
             } catch (error) {
+                if (error.name === 'AbortError') {
+                    error.message = 'Request timed out - try a shorter time period';
+                }
                 document.getElementById('error').style.display = 'flex';
                 document.getElementById('errorText').textContent = error.message;
                 throw error;
@@ -2648,7 +2732,8 @@ func DashboardHTML() string {
             document.getElementById('failedSubtitle').textContent = subtitleParts.length > 0 ? subtitleParts.join(' • ') : 'No failures recorded';
             
             document.getElementById('successRate').textContent = data.success_rate.toFixed(1) + '%';
-            document.getElementById('successSubtitle').textContent = data.success_count.toLocaleString() + ' successful installations';
+            const avgText = data.avg_install_duration > 0 ? ' • ⌀ ' + formatDuration(Math.round(data.avg_install_duration)) : '';
+            document.getElementById('successSubtitle').textContent = data.success_count.toLocaleString() + ' successful' + avgText;
             document.getElementById('lastUpdated').textContent = 'Updated ' + new Date().toLocaleTimeString();
             document.getElementById('error').style.display = 'none';
             
@@ -2687,15 +2772,56 @@ func DashboardHTML() string {
                 return;
             }
             
-            container.innerHTML = errors.slice(0, 8).map(e => 
-                '<div class="error-item">' +
+            window._errorAnalysisData = errors;
+            
+            container.innerHTML = errors.slice(0, 8).map(function(e, idx) {
+                return '<div class="error-item" style="cursor: pointer;" onclick="showErrorBreakdown(' + idx + ')">' +
                     '<div>' +
                         '<div class="pattern">' + escapeHtml(e.pattern) + '</div>' +
                         '<div class="meta">' + e.unique_apps + ' apps affected: ' + escapeHtml(e.apps) + '</div>' +
                     '</div>' +
                     '<span class="count-badge">' + e.count.toLocaleString() + ' occurrences</span>' +
-                '</div>'
-            ).join('');
+                '</div>';
+            }).join('');
+        }
+        
+        function showErrorBreakdown(idx) {
+            const err = window._errorAnalysisData[idx];
+            if (!err) return;
+            
+            const modal = document.getElementById('recordDetailModal');
+            const modalBody = document.getElementById('recordDetailBody');
+            
+            let html = '<div class="detail-section">';
+            html += '<div class="detail-section-header"><svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><circle cx="12" cy="12" r="10"/><line x1="15" y1="9" x2="9" y2="15"/><line x1="9" y1="9" x2="15" y2="15"/></svg> Error Pattern Details</div>';
+            html += '<div class="error-box" style="margin-bottom: 16px;">' + escapeHtml(err.pattern) + '</div>';
+            html += '<div class="detail-grid">';
+            html += '<div class="detail-item"><div class="label">Total Occurrences</div><div class="value status-failed">' + err.count.toLocaleString() + '</div></div>';
+            html += '<div class="detail-item"><div class="label">Apps Affected</div><div class="value">' + err.unique_apps + '</div></div>';
+            html += '</div></div>';
+            
+            if (err.app_breakdown && err.app_breakdown.length > 0) {
+                html += '<div class="detail-section">';
+                html += '<div class="detail-section-header"><svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><rect x="3" y="3" width="7" height="7"/><rect x="14" y="3" width="7" height="7"/><rect x="14" y="14" width="7" height="7"/><rect x="3" y="14" width="7" height="7"/></svg> Affected Scripts</div>';
+                err.app_breakdown.forEach(function(a) {
+                    const pct = (a.count / err.count * 100).toFixed(1);
+                    html += '<div style="display: flex; justify-content: space-between; align-items: center; padding: 10px 16px; background: var(--bg-tertiary); border-radius: 6px; margin-bottom: 6px;">';
+                    html += '<div style="flex: 1; min-width: 0;">';
+                    html += '<div style="font-weight: 600; font-size: 13px;">' + escapeHtml(a.app) + '</div>';
+                    html += '<div style="margin-top: 4px; height: 4px; background: var(--bg-secondary); border-radius: 2px; overflow: hidden;">';
+                    html += '<div style="height: 100%; width: ' + pct + '%; background: var(--accent-red); border-radius: 2px;"></div></div>';
+                    html += '</div>';
+                    html += '<div style="display: flex; gap: 8px; align-items: center; margin-left: 12px;">';
+                    html += '<span style="font-size: 12px; color: var(--text-secondary);">' + a.count + 'x</span>';
+                    html += '<div style="background: rgba(239,68,68,0.15); color: var(--accent-red); padding: 4px 10px; border-radius: 12px; font-size: 12px; font-weight: 600;">' + pct + '%</div>';
+                    html += '</div></div>';
+                });
+                html += '</div>';
+            }
+            
+            modalBody.innerHTML = html;
+            modal.classList.add('active');
+            document.body.style.overflow = 'hidden';
         }
         
         function updateFailedApps(apps) {
@@ -2718,15 +2844,54 @@ func DashboardHTML() string {
             }
             
             // Show all apps (balanced: LXC first, then VMs)
-            container.innerHTML = apps.map(a => {
+            container.innerHTML = apps.map(function(a, idx) {
                 const typeClass = (a.type || '').toLowerCase();
                 const typeBadge = a.type && a.type !== 'unknown' ? '<span class="type-badge ' + typeClass + '">' + a.type.toUpperCase() + '</span> ' : '';
-                return '<div class="failed-app-card">' +
+                return '<div class="failed-app-card" onclick="showAppErrors(' + idx + ')">' +
                     '<div class="app-name">' + typeBadge + escapeHtml(a.app) + '</div>' +
                     '<div class="failure-rate">' + a.failure_rate.toFixed(1) + '%</div>' +
                     '<div class="details">' + a.failed_count + ' / ' + a.total_count + ' failed</div>' +
                 '</div>';
             }).join('');
+            
+            // Store for modal access
+            window._failedAppsData = apps;
+        }
+        
+        function showAppErrors(idx) {
+            const app = window._failedAppsData[idx];
+            if (!app) return;
+            
+            const modal = document.getElementById('recordDetailModal');
+            const modalBody = document.getElementById('recordDetailBody');
+            
+            let html = '<div class="detail-section">';
+            html += '<div class="detail-section-header"><svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><circle cx="12" cy="12" r="10"/><line x1="15" y1="9" x2="9" y2="15"/><line x1="9" y1="9" x2="15" y2="15"/></svg> ' + escapeHtml(app.app) + ' — Error Breakdown</div>';
+            html += '<div class="detail-grid">';
+            html += '<div class="detail-item"><div class="label">Total Installs</div><div class="value">' + app.total_count.toLocaleString() + '</div></div>';
+            html += '<div class="detail-item"><div class="label">Failed</div><div class="value status-failed">' + app.failed_count.toLocaleString() + '</div></div>';
+            html += '<div class="detail-item"><div class="label">Failure Rate</div><div class="value status-failed">' + app.failure_rate.toFixed(1) + '%</div></div>';
+            html += '<div class="detail-item"><div class="label">Type</div><div class="value">' + (app.type || 'unknown').toUpperCase() + '</div></div>';
+            html += '</div></div>';
+            
+            if (app.top_errors && app.top_errors.length > 0) {
+                html += '<div class="detail-section">';
+                html += '<div class="detail-section-header"><svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M10.29 3.86L1.82 18a2 2 0 001.71 3h16.94a2 2 0 001.71-3L13.71 3.86a2 2 0 00-3.42 0z"/><line x1="12" y1="9" x2="12" y2="13"/><line x1="12" y1="17" x2="12.01" y2="17"/></svg> Top Errors</div>';
+                app.top_errors.forEach(function(e) {
+                    html += '<div style="display: flex; justify-content: space-between; align-items: center; padding: 10px 16px; background: var(--bg-tertiary); border-radius: 6px; margin-bottom: 6px;">';
+                    html += '<div style="flex: 1; min-width: 0;"><div style="font-weight: 600; color: var(--accent-red); font-size: 13px; margin-bottom: 2px;">' + escapeHtml(e.pattern) + '</div>';
+                    html += '<div style="font-size: 11px; color: var(--text-secondary);">' + e.count + ' occurrences</div></div>';
+                    html += '<div style="background: rgba(239,68,68,0.15); color: var(--accent-red); padding: 4px 12px; border-radius: 12px; font-size: 12px; font-weight: 600; white-space: nowrap; margin-left: 12px;">' + e.percent.toFixed(1) + '%</div>';
+                    html += '</div>';
+                });
+                html += '</div>';
+            } else {
+                html += '<div class="detail-section"><div style="padding: 16px; color: var(--text-muted); text-align: center;">No error details available</div></div>';
+            }
+            
+            modalBody.innerHTML = html;
+            modal.classList.add('active');
+            document.body.style.overflow = 'hidden';
         }
         
         function escapeHtml(str) {

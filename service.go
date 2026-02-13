@@ -957,7 +957,7 @@ func main() {
 		}
 
 		// Increase timeout for large datasets (dashboard aggregation takes time)
-		ctx, cancel := context.WithTimeout(r.Context(), 120*time.Second)
+		ctx, cancel := context.WithTimeout(r.Context(), 300*time.Second)
 		defer cancel()
 
 		// Try cache first (stale-while-revalidate)
@@ -974,7 +974,7 @@ func main() {
 				if cache.TryStartRefresh(cacheKey) {
 					go func() {
 						defer cache.FinishRefresh(cacheKey)
-						refreshCtx, cancel := context.WithTimeout(context.Background(), 120*time.Second)
+						refreshCtx, cancel := context.WithTimeout(context.Background(), 300*time.Second)
 						defer cancel()
 						freshData, err := pb.FetchDashboardData(refreshCtx, days, repoSource)
 						if err != nil {
