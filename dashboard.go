@@ -2789,8 +2789,8 @@ func DashboardHTML() string {
             const err = window._errorAnalysisData[idx];
             if (!err) return;
             
-            const modal = document.getElementById('recordDetailModal');
-            const modalBody = document.getElementById('recordDetailBody');
+            const modal = document.getElementById('detailModal');
+            const modalBody = document.getElementById('modalBody');
             
             let html = '<div class="detail-section">';
             html += '<div class="detail-section-header"><svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><circle cx="12" cy="12" r="10"/><line x1="15" y1="9" x2="9" y2="15"/><line x1="9" y1="9" x2="15" y2="15"/></svg> Error Pattern Details</div>';
@@ -2862,8 +2862,8 @@ func DashboardHTML() string {
             const app = window._failedAppsData[idx];
             if (!app) return;
             
-            const modal = document.getElementById('recordDetailModal');
-            const modalBody = document.getElementById('recordDetailBody');
+            const modal = document.getElementById('detailModal');
+            const modalBody = document.getElementById('modalBody');
             
             let html = '<div class="detail-section">';
             html += '<div class="detail-section-header"><svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><circle cx="12" cy="12" r="10"/><line x1="15" y1="9" x2="9" y2="15"/><line x1="9" y1="9" x2="15" y2="15"/></svg> ' + escapeHtml(app.app) + ' — Error Breakdown</div>';
