@@ -786,7 +786,7 @@ func main() {
 		PBPassword:       mustEnv("PB_PASSWORD"),
 		PBTargetColl:     mustEnv("PB_TARGET_COLLECTION"),
 
-		MaxBodyBytes:     envInt64("MAX_BODY_BYTES", 8192),
+		MaxBodyBytes:     envInt64("MAX_BODY_BYTES", 32768),
 		RateLimitRPM:     envInt("RATE_LIMIT_RPM", 60),
 		RateBurst:        envInt("RATE_BURST", 20),
 		RateKeyMode:      env("RATE_KEY_MODE", "ip"), // "ip" or "header"
@@ -1154,7 +1154,8 @@ func main() {
 		r.Body = http.MaxBytesReader(w, r.Body, cfg.MaxBodyBytes)
 		raw, err := io.ReadAll(r.Body)
 		if err != nil {
-			http.Error(w, "invalid body", http.StatusBadRequest)
+			log.Printf("telemetry rejected: body read error (maxBytes=%d): %v", cfg.MaxBodyBytes, err)
+			http.Error(w, "body too large", http.StatusBadRequest)
 			return
 		}
 
@@ -1163,14 +1164,13 @@ func main() {
 		dec := json.NewDecoder(bytes.NewReader(raw))
 		dec.DisallowUnknownFields()
 		if err := dec.Decode(&in); err != nil {
-			http.Error(w, "invalid json", http.StatusBadRequest)
+			log.Printf("telemetry rejected: json decode error: %v (payload %d bytes)", err, len(raw))
+			http.Error(w, fmt.Sprintf("invalid json: %v", err), http.StatusBadRequest)
 			return
 		}
 		if err := validate(&in); err != nil {
-			if cfg.EnableReqLogging {
-				log.Printf("telemetry rejected: %v", err)
-			}
-			http.Error(w, "invalid payload", http.StatusBadRequest)
+			log.Printf("telemetry rejected: validation error: %v (nsapp=%s status=%s)", err, in.NSAPP, in.Status)
+			http.Error(w, fmt.Sprintf("validation: %v", err), http.StatusBadRequest)
 			return
 		}
 
