@@ -41,6 +41,7 @@ type WeeklyReportData struct {
 	TotalInstalls    int
 	SuccessCount     int
 	FailedCount      int
+	AbortedCount     int
 	SuccessRate      float64
 	TopApps          []AppStat
 	TopFailedApps    []AppStat
@@ -432,6 +433,7 @@ func (a *Alerter) fetchWeeklyReportData(ctx context.Context) (*WeeklyReportData,
 		TotalInstalls:    currentData.TotalInstalls,
 		SuccessCount:     currentData.SuccessCount,
 		FailedCount:      currentData.FailedCount,
+		AbortedCount:     currentData.AbortedCount,
 		OsDistribution:   make(map[string]int),
 		TypeDistribution: make(map[string]int),
 	}
@@ -549,7 +551,7 @@ func (a *Alerter) generateWeeklyReportHTML(data *WeeklyReportData) string {
 <td style="padding:24px 40px;">
 <table width="100%" cellpadding="0" cellspacing="0">
 <tr>
-<td width="25%" style="padding:8px;">
+<td width="20%" style="padding:8px;">
 <div style="background:#f0fdf4;border-radius:8px;padding:16px;text-align:center;">
 <div style="color:#16a34a;font-size:28px;font-weight:700;">`)
 	b.WriteString(fmt.Sprintf("%d", data.TotalInstalls))
@@ -557,7 +559,7 @@ func (a *Alerter) generateWeeklyReportHTML(data *WeeklyReportData) string {
 <div style="color:#166534;font-size:11px;text-transform:uppercase;letter-spacing:0.5px;margin-top:4px;">Total</div>
 </div>
 </td>
-<td width="25%" style="padding:8px;">
+<td width="20%" style="padding:8px;">
 <div style="background:#f0fdf4;border-radius:8px;padding:16px;text-align:center;">
 <div style="color:#16a34a;font-size:28px;font-weight:700;">`)
 	b.WriteString(fmt.Sprintf("%d", data.SuccessCount))
@@ -565,7 +567,7 @@ func (a *Alerter) generateWeeklyReportHTML(data *WeeklyReportData) string {
 <div style="color:#166534;font-size:11px;text-transform:uppercase;letter-spacing:0.5px;margin-top:4px;">Successful</div>
 </div>
 </td>
-<td width="25%" style="padding:8px;">
+<td width="20%" style="padding:8px;">
 <div style="background:#fef2f2;border-radius:8px;padding:16px;text-align:center;">
 <div style="color:#dc2626;font-size:28px;font-weight:700;">`)
 	b.WriteString(fmt.Sprintf("%d", data.FailedCount))
@@ -573,7 +575,15 @@ func (a *Alerter) generateWeeklyReportHTML(data *WeeklyReportData) string {
 <div style="color:#991b1b;font-size:11px;text-transform:uppercase;letter-spacing:0.5px;margin-top:4px;">Failed</div>
 </div>
 </td>
-<td width="25%" style="padding:8px;">
+<td width="20%" style="padding:8px;">
+<div style="background:#f3f0ff;border-radius:8px;padding:16px;text-align:center;">
+<div style="color:#a855f7;font-size:28px;font-weight:700;">`)
+	b.WriteString(fmt.Sprintf("%d", data.AbortedCount))
+	b.WriteString(`</div>
+<div style="color:#7c3aed;font-size:11px;text-transform:uppercase;letter-spacing:0.5px;margin-top:4px;">Aborted</div>
+</div>
+</td>
+<td width="20%" style="padding:8px;">
 <div style="background:#eff6ff;border-radius:8px;padding:16px;text-align:center;">
 <div style="color:#2563eb;font-size:28px;font-weight:700;">`)
 	b.WriteString(fmt.Sprintf("%.1f%%", data.SuccessRate))
@@ -807,6 +817,7 @@ func (a *Alerter) generateWeeklyReportEmail(data *WeeklyReportData) string {
 	b.WriteString(fmt.Sprintf("Total Installations:  %d\n", data.TotalInstalls))
 	b.WriteString(fmt.Sprintf("Successful:           %d\n", data.SuccessCount))
 	b.WriteString(fmt.Sprintf("Failed:               %d\n", data.FailedCount))
+	b.WriteString(fmt.Sprintf("Aborted (SIGINT):     %d\n", data.AbortedCount))
 	b.WriteString(fmt.Sprintf("Success Rate:         %.1f%%\n\n", data.SuccessRate))
 
 	if data.ComparedToPrev.InstallsChange != 0 || data.ComparedToPrev.FailRateChange != 0 {

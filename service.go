@@ -65,7 +65,7 @@ type TelemetryIn struct {
 	RandomID string `json:"random_id"`         // Session UUID
 	Type     string `json:"type"`              // "lxc", "vm", "tool", "addon"
 	NSAPP    string `json:"nsapp"`             // Application name (e.g., "jellyfin")
-	Status   string `json:"status"`            // "installing", "success", "failed", "unknown"
+	Status   string `json:"status"`            // "installing", "success", "failed", "aborted", "unknown"
 
 	// Container/VM specs
 	CTType    int `json:"ct_type,omitempty"`    // 1=unprivileged, 2=privileged/VM
@@ -585,7 +585,7 @@ var (
 	allowedType = map[string]bool{"lxc": true, "vm": true, "tool": true, "addon": true}
 
 	// Allowed values for 'status' field
-	allowedStatus = map[string]bool{"installing": true, "success": true, "failed": true, "unknown": true}
+	allowedStatus = map[string]bool{"installing": true, "success": true, "failed": true, "aborted": true, "unknown": true}
 
 	// Allowed values for 'os_type' field
 	allowedOsType = map[string]bool{
@@ -892,6 +892,9 @@ func main() {
 		fmt.Fprintf(w, "# HELP telemetry_installs_failed_total Failed installations\n")
 		fmt.Fprintf(w, "# TYPE telemetry_installs_failed_total counter\n")
 		fmt.Fprintf(w, "telemetry_installs_failed_total %d\n\n", data.FailedCount)
+		fmt.Fprintf(w, "# HELP telemetry_installs_aborted_total Aborted installations (SIGINT)\n")
+		fmt.Fprintf(w, "# TYPE telemetry_installs_aborted_total counter\n")
+		fmt.Fprintf(w, "telemetry_installs_aborted_total %d\n\n", data.AbortedCount)
 		fmt.Fprintf(w, "# HELP telemetry_installs_pending Current installing count\n")
 		fmt.Fprintf(w, "# TYPE telemetry_installs_pending gauge\n")
 		fmt.Fprintf(w, "telemetry_installs_pending %d\n\n", data.InstallingCount)

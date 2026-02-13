@@ -17,6 +17,7 @@ type DashboardData struct {
 	SampleSize      int               `json:"sample_size"`       // How many records were sampled
 	SuccessCount    int               `json:"success_count"`
 	FailedCount     int               `json:"failed_count"`
+	AbortedCount    int               `json:"aborted_count"`
 	InstallingCount int               `json:"installing_count"`
 	SuccessRate     float64           `json:"success_rate"`
 	TopApps         []AppCount        `json:"top_apps"`
@@ -187,6 +188,8 @@ func (p *PBClient) FetchDashboardData(ctx context.Context, days int, repoSource 
 					errorApps[pattern][r.NSAPP] = true
 				}
 			}
+		case "aborted":
+			data.AbortedCount++
 		case "installing":
 			data.InstallingCount++
 		}
@@ -1052,6 +1055,8 @@ func DashboardHTML() string {
         .stat-card.success .stat-card-value { color: var(--accent-green); }
         .stat-card.failed .stat-card-icon { color: var(--accent-red); }
         .stat-card.failed .stat-card-value { color: var(--accent-red); }
+        .stat-card.aborted .stat-card-icon { color: var(--accent-purple); }
+        .stat-card.aborted .stat-card-value { color: var(--accent-purple); }
         .stat-card.popular .stat-card-icon { color: var(--accent-yellow); }
         .stat-card.popular .stat-card-value { font-size: 24px; }
         
@@ -1327,6 +1332,12 @@ func DashboardHTML() string {
             background: rgba(234, 179, 8, 0.15);
             color: var(--accent-yellow);
             border-color: rgba(234, 179, 8, 0.3);
+        }
+        
+        .status-badge.aborted {
+            background: rgba(168, 85, 247, 0.15);
+            color: var(--accent-purple);
+            border-color: rgba(168, 85, 247, 0.3);
         }
         
         .status-badge.unknown {
@@ -2176,6 +2187,21 @@ func DashboardHTML() string {
                 <div class="stat-card-subtitle">Installations encountered errors</div>
             </div>
             
+            <div class="stat-card aborted">
+                <div class="stat-card-header">
+                    <span class="stat-card-label">Aborted</span>
+                    <div class="stat-card-icon">
+                        <svg width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
+                            <circle cx="12" cy="12" r="10"/>
+                            <path d="M12 8v4"/>
+                            <path d="M12 16h.01"/>
+                        </svg>
+                    </div>
+                </div>
+                <div class="stat-card-value" id="abortedCount">-</div>
+                <div class="stat-card-subtitle">Terminated by Ctrl+C (SIGINT)</div>
+            </div>
+            
             <!-- Most Popular Card -->
             <div class="stat-card podium-card">
                 <div class="stat-card-header">
@@ -2306,6 +2332,7 @@ func DashboardHTML() string {
                     <option value="">All Status</option>
                     <option value="success">Success</option>
                     <option value="failed">Failed</option>
+                    <option value="aborted">Aborted</option>
                     <option value="installing">Installing</option>
                     <option value="unknown">Unknown</option>
                 </select>
@@ -2516,6 +2543,7 @@ func DashboardHTML() string {
             document.getElementById('totalInstalls').textContent = displayTotal.toLocaleString();
             
             document.getElementById('failedCount').textContent = data.failed_count.toLocaleString();
+            document.getElementById('abortedCount').textContent = data.aborted_count.toLocaleString();
             document.getElementById('successRate').textContent = data.success_rate.toFixed(1) + '%';
             document.getElementById('successSubtitle').textContent = data.success_count.toLocaleString() + ' successful installations';
             document.getElementById('lastUpdated').textContent = 'Updated ' + new Date().toLocaleTimeString();
