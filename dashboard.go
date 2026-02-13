@@ -29,6 +29,7 @@ type DashboardData struct {
 	FailedApps      []AppFailure      `json:"failed_apps"`
 	RecentRecords   []TelemetryRecord `json:"recent_records"`
 	DailyStats      []DailyStat       `json:"daily_stats"`
+	HourlyStats     []HourlyStat      `json:"hourly_stats,omitempty"`
 
 	// Extended metrics
 	GPUStats           []GPUCount       `json:"gpu_stats"`
@@ -95,6 +96,12 @@ type AppErrorDetail struct {
 
 type DailyStat struct {
 	Date    string `json:"date"`
+	Success int    `json:"success"`
+	Failed  int    `json:"failed"`
+}
+
+type HourlyStat struct {
+	Hour    string `json:"hour"`
 	Success int    `json:"success"`
 	Failed  int    `json:"failed"`
 }
@@ -178,6 +185,8 @@ func (p *PBClient) FetchDashboardData(ctx context.Context, days int, repoSource 
 	appErrors := make(map[string]map[string]int)   // "app|type" -> pattern -> count
 	dailySuccess := make(map[string]int)
 	dailyFailed := make(map[string]int)
+	hourlySuccess := make(map[string]int)
+	hourlyFailed := make(map[string]int)
 
 	// Failure tracking per app+type
 	appTypeCounts := make(map[string]int)
@@ -311,6 +320,15 @@ func (p *PBClient) FetchDashboardData(ctx context.Context, days int, repoSource 
 			} else if r.Status == "failed" {
 				dailyFailed[date]++
 			}
+			// Hourly stats for "Today" view
+			if days <= 1 && len(r.Created) >= 13 {
+				hour := r.Created[11:13] // "14" from "2026-02-09 14:33:22"
+				if r.Status == "success" {
+					hourlySuccess[hour]++
+				} else if r.Status == "failed" {
+					hourlyFailed[hour]++
+				}
+			}
 		}
 	}
 
@@ -350,6 +368,11 @@ func (p *PBClient) FetchDashboardData(ctx context.Context, days int, repoSource 
 
 	// Daily stats for chart
 	data.DailyStats = buildDailyStats(dailySuccess, dailyFailed, days)
+
+	// Hourly stats for "Today" view
+	if days <= 1 {
+		data.HourlyStats = buildHourlyStats(hourlySuccess, hourlyFailed)
+	}
 
 	// === Extended metrics ===
 
@@ -765,6 +788,19 @@ func buildDailyStats(success, failed map[string]int, days int) []DailyStat {
 			Date:    date,
 			Success: success[date],
 			Failed:  failed[date],
+		})
+	}
+	return result
+}
+
+func buildHourlyStats(success, failed map[string]int) []HourlyStat {
+	result := make([]HourlyStat, 0, 24)
+	for h := 0; h < 24; h++ {
+		hour := fmt.Sprintf("%02d", h)
+		result = append(result, HourlyStat{
+			Hour:    hour,
+			Success: success[hour],
+			Failed:  failed[hour],
 		})
 	}
 	return result
@@ -2516,8 +2552,8 @@ func DashboardHTML() string {
         <div class="section-card" style="margin-bottom: 24px;">
             <div class="section-header">
                 <div>
-                    <h2>Installations Over Time</h2>
-                    <p>Daily success and failure trends.</p>
+                    <h2 id="timeChartTitle">Installations Over Time</h2>
+                    <p id="timeChartSubtitle">Daily success and failure trends.</p>
                 </div>
             </div>
             <div style="padding: 24px; height: 320px;">
@@ -3116,38 +3152,89 @@ func DashboardHTML() string {
         }
         
         function updateCharts(data) {
-            // Daily chart
+            // Daily / Hourly chart
             if (charts.daily) charts.daily.destroy();
-            charts.daily = new Chart(document.getElementById('dailyChart'), {
-                type: 'line',
-                data: {
-                    labels: data.daily_stats.map(d => d.date.slice(5)),
-                    datasets: [
-                        {
-                            label: 'Success',
-                            data: data.daily_stats.map(d => d.success),
-                            borderColor: '#22c55e',
-                            backgroundColor: 'rgba(34, 197, 94, 0.1)',
-                            fill: true,
-                            tension: 0.4,
-                            borderWidth: 2
-                        },
-                        {
-                            label: 'Failed',
-                            data: data.daily_stats.map(d => d.failed),
-                            borderColor: '#ef4444',
-                            backgroundColor: 'rgba(239, 68, 68, 0.1)',
-                            fill: true,
-                            tension: 0.4,
-                            borderWidth: 2
+            const isToday = data.hourly_stats && data.hourly_stats.length > 0;
+            document.getElementById('timeChartTitle').textContent = isToday ? 'Installations Today (Hourly)' : 'Installations Over Time';
+            document.getElementById('timeChartSubtitle').textContent = isToday ? 'Hourly success and failure breakdown for today.' : 'Daily success and failure trends.';
+            if (isToday) {
+                // Hourly bar chart for "Today"
+                charts.daily = new Chart(document.getElementById('dailyChart'), {
+                    type: 'bar',
+                    data: {
+                        labels: data.hourly_stats.map(h => h.hour + ':00'),
+                        datasets: [
+                            {
+                                label: 'Success',
+                                data: data.hourly_stats.map(h => h.success),
+                                backgroundColor: 'rgba(34, 197, 94, 0.7)',
+                                borderColor: '#22c55e',
+                                borderWidth: 1,
+                                borderRadius: 3,
+                                borderSkipped: false
+                            },
+                            {
+                                label: 'Failed',
+                                data: data.hourly_stats.map(h => h.failed),
+                                backgroundColor: 'rgba(239, 68, 68, 0.7)',
+                                borderColor: '#ef4444',
+                                borderWidth: 1,
+                                borderRadius: 3,
+                                borderSkipped: false
+                            }
+                        ]
+                    },
+                    options: {
+                        ...chartDefaults,
+                        plugins: { legend: { display: true, position: 'top', labels: { color: '#8b949e', usePointStyle: true } } },
+                        scales: {
+                            x: {
+                                ticks: { color: '#8b949e', maxRotation: 45, font: { size: 11 } },
+                                grid: { color: 'rgba(45, 55, 72, 0.5)' },
+                                stacked: true
+                            },
+                            y: {
+                                ticks: { color: '#8b949e', precision: 0 },
+                                grid: { color: 'rgba(45, 55, 72, 0.5)' },
+                                stacked: true,
+                                beginAtZero: true
+                            }
                         }
-                    ]
-                },
-                options: {
-                    ...chartDefaults,
-                    plugins: { legend: { display: true, position: 'top', labels: { color: '#8b949e', usePointStyle: true } } }
-                }
-            });
+                    }
+                });
+            } else {
+                // Daily line chart for multi-day periods
+                charts.daily = new Chart(document.getElementById('dailyChart'), {
+                    type: 'line',
+                    data: {
+                        labels: data.daily_stats.map(d => d.date.slice(5)),
+                        datasets: [
+                            {
+                                label: 'Success',
+                                data: data.daily_stats.map(d => d.success),
+                                borderColor: '#22c55e',
+                                backgroundColor: 'rgba(34, 197, 94, 0.1)',
+                                fill: true,
+                                tension: 0.4,
+                                borderWidth: 2
+                            },
+                            {
+                                label: 'Failed',
+                                data: data.daily_stats.map(d => d.failed),
+                                borderColor: '#ef4444',
+                                backgroundColor: 'rgba(239, 68, 68, 0.1)',
+                                fill: true,
+                                tension: 0.4,
+                                borderWidth: 2
+                            }
+                        ]
+                    },
+                    options: {
+                        ...chartDefaults,
+                        plugins: { legend: { display: true, position: 'top', labels: { color: '#8b949e', usePointStyle: true } } }
+                    }
+                });
+            }
             
             // OS distribution - horizontal bar chart
             if (charts.os) charts.os.destroy();
