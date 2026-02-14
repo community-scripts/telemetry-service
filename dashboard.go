@@ -522,11 +522,25 @@ func normalizeError(err string) string {
 		return "unknown"
 	}
 
-	// Normalize common patterns
+	// Handle structured error format: "exit_code=N | description\n---\n<log lines>"
+	// Extract the header line for grouping, ignore the log lines
+	if strings.HasPrefix(err, "exit_code=") {
+		// Extract just the description part from "exit_code=N | description"
+		headerEnd := strings.Index(err, "\n")
+		header := err
+		if headerEnd > 0 {
+			header = err[:headerEnd]
+		}
+		// Extract description after "| "
+		if pipeIdx := strings.Index(header, "| "); pipeIdx > 0 {
+			return strings.TrimSpace(header[pipeIdx+2:])
+		}
+		return header
+	}
+
+	// Legacy format: normalize common patterns
 	err = strings.ToLower(err)
 
-	// Remove specific numbers, IPs, paths that vary
-	// Keep it simple for now - just truncate and normalize
 	if len(err) > 60 {
 		err = err[:60]
 	}
