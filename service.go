@@ -392,8 +392,7 @@ func (p *PBClient) FetchRecordsPaginated(ctx context.Context, page, limit int, s
 	defer resp.Body.Close()
 
 	if resp.StatusCode < 200 || resp.StatusCode >= 300 {
-		rb, _ := io.ReadAll(io.LimitReader(resp.Body, 4<<10))
-		return nil, 0, fmt.Errorf("pocketbase fetch failed: %s: %s (url=%s)", resp.Status, strings.TrimSpace(string(rb)), reqURL)
+		return nil, 0, fmt.Errorf("pocketbase fetch failed: %s", resp.Status)
 	}
 
 	var result struct {
@@ -608,10 +607,6 @@ var (
 		"debian": true, "ubuntu": true, "alpine": true, "devuan": true,
 		"fedora": true, "rocky": true, "alma": true, "centos": true,
 		"opensuse": true, "gentoo": true, "openeuler": true,
-		// VM-specific OS types
-		"homeassistant": true, "opnsense": true, "openwrt": true,
-		"arch-linux": true, "mikrotik": true, "pimox-haos": true,
-		"turnkey-nextcloud": true, "owncloud": true, "umbrel-os": true,
 	}
 
 	// Allowed values for 'gpu_vendor' field
@@ -626,7 +621,7 @@ var (
 	// Allowed values for 'error_category' field
 	allowedErrorCategory = map[string]bool{
 		"network": true, "storage": true, "dependency": true, "permission": true,
-		"timeout": true, "config": true, "resource": true, "aborted": true, "unknown": true, "": true,
+		"timeout": true, "config": true, "resource": true, "unknown": true, "": true,
 	}
 )
 
@@ -791,7 +786,7 @@ func main() {
 		PBPassword:       mustEnv("PB_PASSWORD"),
 		PBTargetColl:     mustEnv("PB_TARGET_COLLECTION"),
 
-		MaxBodyBytes:     envInt64("MAX_BODY_BYTES", 32768),
+		MaxBodyBytes:     envInt64("MAX_BODY_BYTES", 1024),
 		RateLimitRPM:     envInt("RATE_LIMIT_RPM", 60),
 		RateBurst:        envInt("RATE_BURST", 20),
 		RateKeyMode:      env("RATE_KEY_MODE", "ip"), // "ip" or "header"
@@ -962,7 +957,7 @@ func main() {
 		}
 
 		// Increase timeout for large datasets (dashboard aggregation takes time)
-		ctx, cancel := context.WithTimeout(r.Context(), 300*time.Second)
+		ctx, cancel := context.WithTimeout(r.Context(), 120*time.Second)
 		defer cancel()
 
 		// Try cache first (stale-while-revalidate)
@@ -979,7 +974,7 @@ func main() {
 				if cache.TryStartRefresh(cacheKey) {
 					go func() {
 						defer cache.FinishRefresh(cacheKey)
-						refreshCtx, cancel := context.WithTimeout(context.Background(), 300*time.Second)
+						refreshCtx, cancel := context.WithTimeout(context.Background(), 120*time.Second)
 						defer cancel()
 						freshData, err := pb.FetchDashboardData(refreshCtx, days, repoSource)
 						if err != nil {
@@ -1159,8 +1154,7 @@ func main() {
 		r.Body = http.MaxBytesReader(w, r.Body, cfg.MaxBodyBytes)
 		raw, err := io.ReadAll(r.Body)
 		if err != nil {
-			log.Printf("telemetry rejected: body read error (maxBytes=%d): %v", cfg.MaxBodyBytes, err)
-			http.Error(w, "body too large", http.StatusBadRequest)
+			http.Error(w, "invalid body", http.StatusBadRequest)
 			return
 		}
 
@@ -1169,13 +1163,14 @@ func main() {
 		dec := json.NewDecoder(bytes.NewReader(raw))
 		dec.DisallowUnknownFields()
 		if err := dec.Decode(&in); err != nil {
-			log.Printf("telemetry rejected: json decode error: %v (payload %d bytes)", err, len(raw))
-			http.Error(w, fmt.Sprintf("invalid json: %v", err), http.StatusBadRequest)
+			http.Error(w, "invalid json", http.StatusBadRequest)
 			return
 		}
 		if err := validate(&in); err != nil {
-			log.Printf("telemetry rejected: validation error: %v (nsapp=%s status=%s)", err, in.NSAPP, in.Status)
-			http.Error(w, fmt.Sprintf("validation: %v", err), http.StatusBadRequest)
+			if cfg.EnableReqLogging {
+				log.Printf("telemetry rejected: %v", err)
+			}
+			http.Error(w, "invalid payload", http.StatusBadRequest)
 			return
 		}
 

@@ -438,9 +438,10 @@ func (a *Alerter) fetchWeeklyReportData(ctx context.Context) (*WeeklyReportData,
 		TypeDistribution: make(map[string]int),
 	}
 
-	// Calculate success rate
-	if report.TotalInstalls > 0 {
-		report.SuccessRate = float64(report.SuccessCount) / float64(report.TotalInstalls) * 100
+	// Calculate success rate (only success vs failed, excluding aborted)
+	completed := report.SuccessCount + report.FailedCount
+	if completed > 0 {
+		report.SuccessRate = float64(report.SuccessCount) / float64(completed) * 100
 	}
 
 	// Top 5 installed apps

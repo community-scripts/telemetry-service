@@ -29,7 +29,6 @@ type DashboardData struct {
 	FailedApps      []AppFailure      `json:"failed_apps"`
 	RecentRecords   []TelemetryRecord `json:"recent_records"`
 	DailyStats      []DailyStat       `json:"daily_stats"`
-	HourlyStats     []HourlyStat      `json:"hourly_stats,omitempty"`
 
 	// Extended metrics
 	GPUStats           []GPUCount       `json:"gpu_stats"`
@@ -67,41 +66,22 @@ type TypeCount struct {
 }
 
 type ErrorGroup struct {
-	Pattern      string           `json:"pattern"`
-	Count        int              `json:"count"`         // Total error occurrences
-	UniqueApps   int              `json:"unique_apps"`   // Number of unique apps affected
-	Apps         string           `json:"apps"`          // Comma-separated list of affected apps
-	AppBreakdown []ErrorAppDetail `json:"app_breakdown"` // Per-app counts
-}
-
-type ErrorAppDetail struct {
-	App   string `json:"app"`
-	Count int    `json:"count"`
+	Pattern    string `json:"pattern"`
+	Count      int    `json:"count"`       // Total error occurrences
+	UniqueApps int    `json:"unique_apps"` // Number of unique apps affected
+	Apps       string `json:"apps"`        // Comma-separated list of affected apps
 }
 
 type AppFailure struct {
-	App         string             `json:"app"`
-	Type        string             `json:"type"`
-	TotalCount  int                `json:"total_count"`
-	FailedCount int                `json:"failed_count"`
-	FailureRate float64            `json:"failure_rate"`
-	TopErrors   []AppErrorDetail   `json:"top_errors,omitempty"`
-}
-
-type AppErrorDetail struct {
-	Pattern string  `json:"pattern"`
-	Count   int     `json:"count"`
-	Percent float64 `json:"percent"`
+	App         string  `json:"app"`
+	Type        string  `json:"type"`
+	TotalCount  int     `json:"total_count"`
+	FailedCount int     `json:"failed_count"`
+	FailureRate float64 `json:"failure_rate"`
 }
 
 type DailyStat struct {
 	Date    string `json:"date"`
-	Success int    `json:"success"`
-	Failed  int    `json:"failed"`
-}
-
-type HourlyStat struct {
-	Hour    string `json:"hour"`
 	Success int    `json:"success"`
 	Failed  int    `json:"failed"`
 }
@@ -180,13 +160,10 @@ func (p *PBClient) FetchDashboardData(ctx context.Context, days int, repoSource 
 	methodCounts := make(map[string]int)
 	pveCounts := make(map[string]int)
 	typeCounts := make(map[string]int)
-	errorApps := make(map[string]map[string]int)  // pattern -> app -> count
+	errorApps := make(map[string]map[string]bool) // pattern -> set of apps
 	errorCounts := make(map[string]int)            // pattern -> total occurrences
-	appErrors := make(map[string]map[string]int)   // "app|type" -> pattern -> count
 	dailySuccess := make(map[string]int)
 	dailyFailed := make(map[string]int)
-	hourlySuccess := make(map[string]int)
-	hourlyFailed := make(map[string]int)
 
 	// Failure tracking per app+type
 	appTypeCounts := make(map[string]int)
@@ -221,20 +198,10 @@ func (p *PBClient) FetchDashboardData(ctx context.Context, days int, repoSource 
 				pattern := normalizeError(r.Error)
 				errorCounts[pattern]++
 				if errorApps[pattern] == nil {
-					errorApps[pattern] = make(map[string]int)
+					errorApps[pattern] = make(map[string]bool)
 				}
 				if r.NSAPP != "" {
-					errorApps[pattern][r.NSAPP]++
-					// Track per-app errors for failed apps drill-down
-					typeLabel := r.Type
-					if typeLabel == "" {
-						typeLabel = "unknown"
-					}
-					aeKey := r.NSAPP + "|" + typeLabel
-					if appErrors[aeKey] == nil {
-						appErrors[aeKey] = make(map[string]int)
-					}
-					appErrors[aeKey][pattern]++
+					errorApps[pattern][r.NSAPP] = true
 				}
 			}
 		case "aborted":
@@ -320,15 +287,6 @@ func (p *PBClient) FetchDashboardData(ctx context.Context, days int, repoSource 
 			} else if r.Status == "failed" {
 				dailyFailed[date]++
 			}
-			// Hourly stats for "Today" view
-			if days <= 1 && len(r.Created) >= 13 {
-				hour := r.Created[11:13] // "14" from "2026-02-09 14:33:22"
-				if r.Status == "success" {
-					hourlySuccess[hour]++
-				} else if r.Status == "failed" {
-					hourlyFailed[hour]++
-				}
-			}
 		}
 	}
 
@@ -348,7 +306,6 @@ func (p *PBClient) FetchDashboardData(ctx context.Context, days int, repoSource 
 	// Error analysis
 	data.ErrorAnalysis = buildErrorAnalysis(errorApps, errorCounts, 15)
 
-
 	// Failed apps with failure rates - dynamic threshold based on time period
 	minInstalls := 10 // default
 	switch {
@@ -364,15 +321,10 @@ func (p *PBClient) FetchDashboardData(ctx context.Context, days int, repoSource 
 		minInstalls = 100 // 1 year+: need at least 100 installs
 	}
 	// Returns 16 items: 8 LXC + 8 VM balanced, LXC prioritized
-	data.FailedApps = buildFailedApps(appTypeCounts, appTypeFailures, appErrors, 16, minInstalls)
+	data.FailedApps = buildFailedApps(appTypeCounts, appTypeFailures, 16, minInstalls)
 
 	// Daily stats for chart
 	data.DailyStats = buildDailyStats(dailySuccess, dailyFailed, days)
-
-	// Hourly stats for "Today" view
-	if days <= 1 {
-		data.HourlyStats = buildHourlyStats(hourlySuccess, hourlyFailed)
-	}
 
 	// === Extended metrics ===
 
@@ -418,7 +370,7 @@ type fetchRecordsResult struct {
 func (p *PBClient) fetchRecords(ctx context.Context, filter string) (*fetchRecordsResult, error) {
 	var allRecords []TelemetryRecord
 	page := 1
-	perPage := 1000
+	perPage := 500
 	totalItems := 0
 
 	for {
@@ -570,180 +522,52 @@ func normalizeError(err string) string {
 		return "unknown"
 	}
 
-	// If it's already a short explain_exit_code result, return as-is (lowercased)
-	lower := strings.ToLower(err)
-	if !strings.Contains(err, "\n") && len(err) <= 120 {
-		// Single-line error from explain_exit_code — classify by keywords
-		switch {
-		case strings.Contains(lower, "sigint") || strings.Contains(lower, "ctrl+c") || strings.Contains(lower, "ctrl-c"):
-			return "aborted by user (SIGINT)"
-		case strings.Contains(lower, "sigkill") || strings.Contains(lower, "out of memory") || strings.Contains(lower, "killed"):
-			return "killed (SIGKILL / out of memory?)"
-		case strings.Contains(lower, "sigterm") || strings.Contains(lower, "terminated"):
-			return "terminated (SIGTERM)"
-		case strings.Contains(lower, "command not found"):
-			return "command not found"
-		case strings.Contains(lower, "timeout"):
-			return "timeout"
-		case strings.Contains(lower, "permission denied") || strings.Contains(lower, "operation not permitted"):
-			return "general error / operation not permitted"
-		case strings.Contains(lower, "unknown error"):
-			return "unknown error"
-		default:
-			if len(err) > 80 {
-				return lower[:80] + "..."
-			}
-			return lower
+	// Normalize common patterns
+	err = strings.ToLower(err)
+
+	// Remove specific numbers, IPs, paths that vary
+	// Keep it simple for now - just truncate and normalize
+	if len(err) > 60 {
+		err = err[:60]
+	}
+
+	// Common error pattern replacements
+	patterns := map[string]string{
+		"connection refused":  "connection refused",
+		"timeout":             "timeout",
+		"no space left":       "disk full",
+		"permission denied":   "permission denied",
+		"not found":           "not found",
+		"failed to download":  "download failed",
+		"apt":                 "apt error",
+		"dpkg":                "dpkg error",
+		"curl":                "network error",
+		"wget":                "network error",
+		"docker":              "docker error",
+		"systemctl":           "systemd error",
+		"service":             "service error",
+	}
+
+	for pattern, label := range patterns {
+		if strings.Contains(err, pattern) {
+			return label
 		}
 	}
 
-	// Multi-line error text (from get_error_text / last 20 lines of log)
-	// Extract the most meaningful error line
-	lines := strings.Split(err, "\n")
-	var bestLine string
-	var bestScore int
-
-	// Error indicator keywords scored by relevance
-	errorIndicators := []struct {
-		pattern string
-		score   int
-	}{
-		{"error:", 10},
-		{"fatal:", 10},
-		{"failed", 8},
-		{"exception", 8},
-		{"e:", 7},          // APT error lines
-		{"err!", 7},
-		{"unable to", 7},
-		{"cannot", 6},
-		{"no such file", 6},
-		{"not found", 6},
-		{"permission denied", 6},
-		{"dpkg:", 6},
-		{"sub-process", 5},
-		{"broken", 5},
-		{"segfault", 5},
-		{"traceback", 5},
-		{"panic:", 5},
-		{"killed", 5},
-		{"abort", 5},
-		{"denied", 4},
-		{"refused", 4},
-		{"timeout", 4},
-		{"could not", 4},
-		{"no space", 4},
-		{"exit code", 3},
-		{"exit status", 3},
+	// If no pattern matches, return first 40 chars
+	if len(err) > 40 {
+		return err[:40] + "..."
 	}
-
-	for _, line := range lines {
-		trimmed := strings.TrimSpace(line)
-		if trimmed == "" || trimmed == "---" || strings.HasPrefix(trimmed, "#") || strings.HasPrefix(trimmed, "---") {
-			continue
-		}
-		lowerLine := strings.ToLower(trimmed)
-
-		// Skip noisy / unhelpful lines
-		if strings.HasPrefix(lowerLine, "reading package") ||
-			strings.HasPrefix(lowerLine, "processing") ||
-			strings.HasPrefix(lowerLine, "setting up") ||
-			strings.HasPrefix(lowerLine, "unpacking") ||
-			strings.HasPrefix(lowerLine, "selecting") ||
-			strings.HasPrefix(lowerLine, "preparing") ||
-			strings.HasPrefix(lowerLine, "hit:") ||
-			strings.HasPrefix(lowerLine, "get:") ||
-			strings.HasPrefix(lowerLine, "fetched") {
-			continue
-		}
-
-		score := 0
-		for _, ind := range errorIndicators {
-			if strings.Contains(lowerLine, ind.pattern) {
-				score += ind.score
-			}
-		}
-
-		// Prefer longer lines (more context)
-		if len(trimmed) > 15 {
-			score++
-		}
-
-		if score > bestScore {
-			bestScore = score
-			bestLine = trimmed
-		}
-	}
-
-	// If we found a good error line, use it
-	if bestLine != "" && bestScore >= 3 {
-		result := strings.ToLower(bestLine)
-		// Classify into broader categories
-		switch {
-		case strings.Contains(result, "dpkg") && (strings.Contains(result, "error") || strings.Contains(result, "failed")):
-			// Keep specific dpkg error
-			if len(result) > 100 {
-				return result[:100] + "..."
-			}
-			return result
-		case strings.Contains(result, "apt") || strings.Contains(result, "e: "):
-			if len(result) > 100 {
-				return result[:100] + "..."
-			}
-			return result
-		case strings.Contains(result, "no space left"):
-			return "disk full"
-		case strings.Contains(result, "connection refused"):
-			return "connection refused"
-		default:
-			if len(result) > 100 {
-				return result[:100] + "..."
-			}
-			return result
-		}
-	}
-
-	// Fallback: take the last non-empty meaningful line
-	for i := len(lines) - 1; i >= 0; i-- {
-		trimmed := strings.TrimSpace(lines[i])
-		if trimmed != "" && len(trimmed) > 5 {
-			result := strings.ToLower(trimmed)
-			if len(result) > 80 {
-				return result[:80] + "..."
-			}
-			return result
-		}
-	}
-
-	// Last resort
-	result := strings.ToLower(strings.TrimSpace(err))
-	if len(result) > 80 {
-		return result[:80] + "..."
-	}
-	return result
+	return err
 }
 
-func buildErrorAnalysis(apps map[string]map[string]int, counts map[string]int, n int) []ErrorGroup {
+func buildErrorAnalysis(apps map[string]map[string]bool, counts map[string]int, n int) []ErrorGroup {
 	result := make([]ErrorGroup, 0, len(apps))
 
-	for pattern, appCounts := range apps {
-		appList := make([]string, 0, len(appCounts))
-		breakdown := make([]ErrorAppDetail, 0, len(appCounts))
-		for app, count := range appCounts {
+	for pattern, appSet := range apps {
+		appList := make([]string, 0, len(appSet))
+		for app := range appSet {
 			appList = append(appList, app)
-			breakdown = append(breakdown, ErrorAppDetail{App: app, Count: count})
-		}
-
-		// Sort breakdown by count descending
-		for i := 0; i < len(breakdown)-1; i++ {
-			for j := i + 1; j < len(breakdown); j++ {
-				if breakdown[j].Count > breakdown[i].Count {
-					breakdown[i], breakdown[j] = breakdown[j], breakdown[i]
-				}
-			}
-		}
-		// Keep top 10 apps per pattern
-		if len(breakdown) > 10 {
-			breakdown = breakdown[:10]
 		}
 
 		// Limit app list display
@@ -753,11 +577,10 @@ func buildErrorAnalysis(apps map[string]map[string]int, counts map[string]int, n
 		}
 
 		result = append(result, ErrorGroup{
-			Pattern:      pattern,
-			Count:        counts[pattern],
-			UniqueApps:   len(appCounts),
-			Apps:         appsStr,
-			AppBreakdown: breakdown,
+			Pattern:    pattern,
+			Count:      counts[pattern],
+			UniqueApps: len(appSet),
+			Apps:       appsStr,
 		})
 	}
 
@@ -776,7 +599,7 @@ func buildErrorAnalysis(apps map[string]map[string]int, counts map[string]int, n
 	return result
 }
 
-func buildFailedApps(total, failed map[string]int, appErrors map[string]map[string]int, n int, minInstalls int) []AppFailure {
+func buildFailedApps(total, failed map[string]int, n int, minInstalls int) []AppFailure {
 	lxcApps := make([]AppFailure, 0)
 	vmApps := make([]AppFailure, 0)
 
@@ -801,27 +624,6 @@ func buildFailedApps(total, failed map[string]int, appErrors map[string]map[stri
 			TotalCount:  totalCount,
 			FailedCount: failCount,
 			FailureRate: rate,
-		}
-
-		// Add top errors for this app
-		if errMap, ok := appErrors[key]; ok {
-			topErrors := make([]AppErrorDetail, 0, len(errMap))
-			for pattern, count := range errMap {
-				pct := float64(count) / float64(failCount) * 100
-				topErrors = append(topErrors, AppErrorDetail{Pattern: pattern, Count: count, Percent: pct})
-			}
-			// Sort by count descending
-			for i := 0; i < len(topErrors)-1; i++ {
-				for j := i + 1; j < len(topErrors); j++ {
-					if topErrors[j].Count > topErrors[i].Count {
-						topErrors[i], topErrors[j] = topErrors[j], topErrors[i]
-					}
-				}
-			}
-			if len(topErrors) > 8 {
-				topErrors = topErrors[:8]
-			}
-			failure.TopErrors = topErrors
 		}
 
 		// Separate LXC and VM apps (LXC has higher priority)
@@ -901,19 +703,6 @@ func buildDailyStats(success, failed map[string]int, days int) []DailyStat {
 			Date:    date,
 			Success: success[date],
 			Failed:  failed[date],
-		})
-	}
-	return result
-}
-
-func buildHourlyStats(success, failed map[string]int) []HourlyStat {
-	result := make([]HourlyStat, 0, 24)
-	for h := 0; h < 24; h++ {
-		hour := fmt.Sprintf("%02d", h)
-		result = append(result, HourlyStat{
-			Hour:    hour,
-			Success: success[hour],
-			Failed:  failed[hour],
 		})
 	}
 	return result
@@ -1229,12 +1018,18 @@ func DashboardHTML() string {
         /* Stat Cards Grid */
         .stats-grid {
             display: grid;
-            grid-template-columns: repeat(4, 1fr);
+            grid-template-columns: repeat(5, 1fr);
             gap: 20px;
             margin-bottom: 32px;
         }
         
-        @media (max-width: 1400px) {
+        @media (max-width: 1600px) {
+            .stats-grid {
+                grid-template-columns: repeat(3, 1fr);
+            }
+        }
+        
+        @media (max-width: 1200px) {
             .stats-grid {
                 grid-template-columns: repeat(2, 1fr);
             }
@@ -1974,13 +1769,6 @@ func DashboardHTML() string {
             background: var(--bg-tertiary);
             border-radius: 6px;
             padding: 12px;
-            cursor: pointer;
-            transition: transform 0.15s, box-shadow 0.15s;
-        }
-        
-        .failed-app-card:hover {
-            transform: translateY(-2px);
-            box-shadow: 0 4px 12px rgba(0,0,0,0.3);
         }
         
         .failed-app-card .app-name {
@@ -2019,13 +1807,6 @@ func DashboardHTML() string {
             background: var(--bg-tertiary);
             border-radius: 8px;
             margin-bottom: 8px;
-            cursor: pointer;
-            transition: transform 0.15s, box-shadow 0.15s;
-        }
-        
-        .error-item:hover {
-            transform: translateY(-1px);
-            box-shadow: 0 4px 12px rgba(0,0,0,0.3);
         }
         
         .error-item:last-child {
@@ -2126,99 +1907,6 @@ func DashboardHTML() string {
         .pagination span {
             color: var(--text-secondary);
             font-size: 14px;
-        }
-
-        /* ── Mobile Optimizations ── */
-        @media (max-width: 768px) {
-            .filters-bar {
-                flex-direction: column;
-                align-items: stretch;
-                gap: 12px;
-                padding: 14px 16px;
-            }
-
-            .filter-group {
-                flex-direction: column;
-                align-items: flex-start;
-                gap: 6px;
-            }
-
-            .quickfilter {
-                flex-wrap: wrap;
-                width: 100%;
-            }
-
-            .filter-btn, .source-btn {
-                padding: 6px 10px;
-                font-size: 12px;
-                flex: 1 1 auto;
-                text-align: center;
-            }
-
-            .filter-divider {
-                width: 100%;
-                height: 1px;
-                margin: 0;
-            }
-
-            .auto-refresh-toggle {
-                justify-content: flex-start;
-            }
-
-            .filters-bar > div[style*="margin-left: auto"] {
-                margin-left: 0 !important;
-                width: 100%;
-                justify-content: space-between;
-            }
-
-            /* OS / Status chart grid */
-            .chart-pair-grid {
-                grid-template-columns: 1fr !important;
-            }
-
-            /* Modal: full-screen on mobile */
-            .modal-content {
-                width: 100% !important;
-                max-width: 100% !important;
-                max-height: 100vh !important;
-                height: 100vh;
-                border-radius: 0 !important;
-                margin: 0;
-            }
-
-            .modal-overlay {
-                align-items: stretch !important;
-            }
-
-            .modal-header {
-                padding: 16px !important;
-            }
-
-            .modal-header h2 {
-                font-size: 16px !important;
-            }
-
-            .modal-body {
-                padding: 16px !important;
-            }
-
-            .detail-grid {
-                grid-template-columns: 1fr 1fr !important;
-            }
-
-            .error-box {
-                font-size: 11px !important;
-                max-height: 200px;
-                overflow-y: auto;
-            }
-
-            .page-header h1 {
-                font-size: 22px;
-            }
-
-            .main-content {
-                padding: 16px 12px;
-            }
         }
         
         /* Auto-Refresh Toggle */
@@ -2490,7 +2178,7 @@ func DashboardHTML() string {
                     <path d="M12 0c-6.626 0-12 5.373-12 12 0 5.302 3.438 9.8 8.207 11.387.599.111.793-.261.793-.577v-2.234c-3.338.726-4.033-1.416-4.033-1.416-.546-1.387-1.333-1.756-1.333-1.756-1.089-.745.083-.729.083-.729 1.205.084 1.839 1.237 1.839 1.237 1.07 1.834 2.807 1.304 3.492.997.107-.775.418-1.305.762-1.604-2.665-.305-5.467-1.334-5.467-5.931 0-1.311.469-2.381 1.236-3.221-.124-.303-.535-1.524.117-3.176 0 0 1.008-.322 3.301 1.23.957-.266 1.983-.399 3.003-.404 1.02.005 2.047.138 3.006.404 2.291-1.552 3.297-1.23 3.297-1.23.653 1.653.242 2.874.118 3.176.77.84 1.235 1.911 1.235 3.221 0 4.609-2.807 5.624-5.479 5.921.43.372.823 1.102.823 2.222v3.293c0 .319.192.694.801.576 4.765-1.589 8.199-6.086 8.199-11.386 0-6.627-5.373-12-12-12z"/>
                 </svg>
             </a>
-            <a href="https://discord.gg/3AnUqsXnmK" target="_blank" class="nav-icon" title="Discord">
+            <a href="https://discord.gg/2wvnMDgeFz" target="_blank" class="nav-icon" title="Discord">
                 <svg width="20" height="20" viewBox="0 0 24 24" fill="currentColor">
                     <path d="M20.317 4.37a19.79 19.79 0 00-4.885-1.515.074.074 0 00-.079.037c-.21.375-.444.865-.608 1.25a18.27 18.27 0 00-5.487 0 12.64 12.64 0 00-.617-1.25.077.077 0 00-.079-.037A19.74 19.74 0 003.677 4.37a.07.07 0 00-.032.028C.533 9.046-.32 13.58.099 18.057a.082.082 0 00.031.057 19.9 19.9 0 005.993 3.03.078.078 0 00.084-.028c.462-.63.873-1.295 1.226-1.994a.076.076 0 00-.041-.106 13.11 13.11 0 01-1.872-.892.077.077 0 01-.008-.128c.126-.094.252-.192.372-.291a.074.074 0 01.078-.01c3.928 1.793 8.18 1.793 12.062 0a.074.074 0 01.078.009c.12.1.246.198.373.292a.077.077 0 01-.006.127 12.3 12.3 0 01-1.873.892.076.076 0 00-.041.107c.36.698.772 1.363 1.225 1.993a.076.076 0 00.084.029 19.84 19.84 0 006.002-3.03.077.077 0 00.032-.054c.5-5.177-.838-9.674-3.549-13.66a.06.06 0 00-.031-.03zM8.02 15.33c-1.183 0-2.157-1.086-2.157-2.419s.955-2.419 2.157-2.419c1.21 0 2.176 1.096 2.157 2.42 0 1.332-.956 2.418-2.157 2.418zm7.975 0c-1.183 0-2.157-1.086-2.157-2.419s.955-2.419 2.157-2.419c1.21 0 2.176 1.096 2.157 2.42 0 1.332-.946 2.418-2.157 2.418z"/>
                 </svg>
@@ -2596,7 +2284,7 @@ func DashboardHTML() string {
             
             <div class="stat-card failed">
                 <div class="stat-card-header">
-                    <span class="stat-card-label">Failures & Aborted</span>
+                    <span class="stat-card-label">Failed</span>
                     <div class="stat-card-icon">
                         <svg width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
                             <circle cx="12" cy="12" r="10"/>
@@ -2606,7 +2294,22 @@ func DashboardHTML() string {
                     </div>
                 </div>
                 <div class="stat-card-value" id="failedCount">-</div>
-                <div class="stat-card-subtitle" id="failedSubtitle">Loading...</div>
+                <div class="stat-card-subtitle" id="failedSubtitle">installation failures</div>
+            </div>
+            
+            <div class="stat-card aborted">
+                <div class="stat-card-header">
+                    <span class="stat-card-label">Aborted</span>
+                    <div class="stat-card-icon">
+                        <svg width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
+                            <circle cx="12" cy="12" r="10"/>
+                            <line x1="12" y1="8" x2="12" y2="12"/>
+                            <line x1="12" y1="16" x2="12.01" y2="16"/>
+                        </svg>
+                    </div>
+                </div>
+                <div class="stat-card-value" id="abortedCount">-</div>
+                <div class="stat-card-subtitle">user cancelled (Ctrl+C)</div>
             </div>
             
             <!-- Most Popular Card -->
@@ -2665,8 +2368,8 @@ func DashboardHTML() string {
         <div class="section-card" style="margin-bottom: 24px;">
             <div class="section-header">
                 <div>
-                    <h2 id="timeChartTitle">Installations Over Time</h2>
-                    <p id="timeChartSubtitle">Daily success and failure trends.</p>
+                    <h2>Installations Over Time</h2>
+                    <p>Daily success and failure trends.</p>
                 </div>
             </div>
             <div style="padding: 24px; height: 320px;">
@@ -2674,7 +2377,7 @@ func DashboardHTML() string {
             </div>
         </div>
         
-        <div class="chart-pair-grid" style="display: grid; grid-template-columns: 1fr 1fr; gap: 20px; margin-bottom: 24px;">
+        <div style="display: grid; grid-template-columns: 1fr 1fr; gap: 20px; margin-bottom: 24px;">
             <div class="chart-card">
                 <h3>OS Distribution</h3>
                 <div class="chart-wrapper" style="height: 260px;">
@@ -2932,14 +2635,9 @@ func DashboardHTML() string {
             document.getElementById('cacheStatus').textContent = '';
             
             try {
-                // Timeout: 5 minutes for large datasets (1 Year)
-                const controller = new AbortController();
-                const timeoutId = setTimeout(() => controller.abort(), 300000);
-                
                 // Add cache-busting timestamp for filter changes to ensure fresh data
                 const cacheBuster = '&_t=' + Date.now();
-                const response = await fetch('/api/dashboard?days=' + days + '&repo=' + repo + cacheBuster, { signal: controller.signal });
-                clearTimeout(timeoutId);
+                const response = await fetch('/api/dashboard?days=' + days + '&repo=' + repo + cacheBuster);
                 if (!response.ok) throw new Error('Failed to fetch data');
                 
                 // Check cache status from header
@@ -2948,9 +2646,6 @@ func DashboardHTML() string {
                 
                 return await response.json();
             } catch (error) {
-                if (error.name === 'AbortError') {
-                    error.message = 'Request timed out - try a shorter time period';
-                }
                 document.getElementById('error').style.display = 'flex';
                 document.getElementById('errorText').textContent = error.message;
                 throw error;
@@ -2964,18 +2659,15 @@ func DashboardHTML() string {
             const displayTotal = data.total_all_time || data.total_installs;
             document.getElementById('totalInstalls').textContent = displayTotal.toLocaleString();
             
-            const totalFailures = (data.failed_count || 0) + (data.aborted_count || 0);
-            document.getElementById('failedCount').textContent = totalFailures.toLocaleString();
+            // Failed count (separate card)
+            document.getElementById('failedCount').textContent = (data.failed_count || 0).toLocaleString();
+            document.getElementById('failedSubtitle').textContent = data.failed_count > 0 ? 'installation failures' : 'no failures';
             
-            // Show breakdown in subtitle
-            const failedText = data.failed_count > 0 ? data.failed_count.toLocaleString() + ' errors' : '';
-            const abortedText = data.aborted_count > 0 ? data.aborted_count.toLocaleString() + ' aborted (Ctrl+C)' : '';
-            const subtitleParts = [failedText, abortedText].filter(x => x);
-            document.getElementById('failedSubtitle').textContent = subtitleParts.length > 0 ? subtitleParts.join(' • ') : 'No failures recorded';
+            // Aborted count (separate card)
+            document.getElementById('abortedCount').textContent = (data.aborted_count || 0).toLocaleString();
             
             document.getElementById('successRate').textContent = data.success_rate.toFixed(1) + '%';
-            const avgText = data.avg_install_duration > 0 ? ' • ⌀ ' + formatDuration(Math.round(data.avg_install_duration)) : '';
-            document.getElementById('successSubtitle').textContent = data.success_count.toLocaleString() + ' successful' + avgText;
+            document.getElementById('successSubtitle').textContent = data.success_count.toLocaleString() + ' successful installations';
             document.getElementById('lastUpdated').textContent = 'Updated ' + new Date().toLocaleTimeString();
             document.getElementById('error').style.display = 'none';
             
@@ -3014,56 +2706,15 @@ func DashboardHTML() string {
                 return;
             }
             
-            window._errorAnalysisData = errors;
-            
-            container.innerHTML = errors.slice(0, 8).map(function(e, idx) {
-                return '<div class="error-item" style="cursor: pointer;" onclick="showErrorBreakdown(' + idx + ')">' +
+            container.innerHTML = errors.slice(0, 8).map(e => 
+                '<div class="error-item">' +
                     '<div>' +
                         '<div class="pattern">' + escapeHtml(e.pattern) + '</div>' +
                         '<div class="meta">' + e.unique_apps + ' apps affected: ' + escapeHtml(e.apps) + '</div>' +
                     '</div>' +
                     '<span class="count-badge">' + e.count.toLocaleString() + ' occurrences</span>' +
-                '</div>';
-            }).join('');
-        }
-        
-        function showErrorBreakdown(idx) {
-            const err = window._errorAnalysisData[idx];
-            if (!err) return;
-            
-            const modal = document.getElementById('detailModal');
-            const modalBody = document.getElementById('modalBody');
-            
-            let html = '<div class="detail-section">';
-            html += '<div class="detail-section-header"><svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><circle cx="12" cy="12" r="10"/><line x1="15" y1="9" x2="9" y2="15"/><line x1="9" y1="9" x2="15" y2="15"/></svg> Error Pattern Details</div>';
-            html += '<div class="error-box" style="margin-bottom: 16px;">' + escapeHtml(err.pattern) + '</div>';
-            html += '<div class="detail-grid">';
-            html += '<div class="detail-item"><div class="label">Total Occurrences</div><div class="value status-failed">' + err.count.toLocaleString() + '</div></div>';
-            html += '<div class="detail-item"><div class="label">Apps Affected</div><div class="value">' + err.unique_apps + '</div></div>';
-            html += '</div></div>';
-            
-            if (err.app_breakdown && err.app_breakdown.length > 0) {
-                html += '<div class="detail-section">';
-                html += '<div class="detail-section-header"><svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><rect x="3" y="3" width="7" height="7"/><rect x="14" y="3" width="7" height="7"/><rect x="14" y="14" width="7" height="7"/><rect x="3" y="14" width="7" height="7"/></svg> Affected Scripts</div>';
-                err.app_breakdown.forEach(function(a) {
-                    const pct = (a.count / err.count * 100).toFixed(1);
-                    html += '<div style="display: flex; justify-content: space-between; align-items: center; padding: 10px 16px; background: var(--bg-tertiary); border-radius: 6px; margin-bottom: 6px;">';
-                    html += '<div style="flex: 1; min-width: 0;">';
-                    html += '<div style="font-weight: 600; font-size: 13px;">' + escapeHtml(a.app) + '</div>';
-                    html += '<div style="margin-top: 4px; height: 4px; background: var(--bg-secondary); border-radius: 2px; overflow: hidden;">';
-                    html += '<div style="height: 100%; width: ' + pct + '%; background: var(--accent-red); border-radius: 2px;"></div></div>';
-                    html += '</div>';
-                    html += '<div style="display: flex; gap: 8px; align-items: center; margin-left: 12px;">';
-                    html += '<span style="font-size: 12px; color: var(--text-secondary);">' + a.count + 'x</span>';
-                    html += '<div style="background: rgba(239,68,68,0.15); color: var(--accent-red); padding: 4px 10px; border-radius: 12px; font-size: 12px; font-weight: 600;">' + pct + '%</div>';
-                    html += '</div></div>';
-                });
-                html += '</div>';
-            }
-            
-            modalBody.innerHTML = html;
-            modal.classList.add('active');
-            document.body.style.overflow = 'hidden';
+                '</div>'
+            ).join('');
         }
         
         function updateFailedApps(apps) {
@@ -3086,54 +2737,15 @@ func DashboardHTML() string {
             }
             
             // Show all apps (balanced: LXC first, then VMs)
-            container.innerHTML = apps.map(function(a, idx) {
+            container.innerHTML = apps.map(a => {
                 const typeClass = (a.type || '').toLowerCase();
                 const typeBadge = a.type && a.type !== 'unknown' ? '<span class="type-badge ' + typeClass + '">' + a.type.toUpperCase() + '</span> ' : '';
-                return '<div class="failed-app-card" onclick="showAppErrors(' + idx + ')">' +
+                return '<div class="failed-app-card">' +
                     '<div class="app-name">' + typeBadge + escapeHtml(a.app) + '</div>' +
                     '<div class="failure-rate">' + a.failure_rate.toFixed(1) + '%</div>' +
                     '<div class="details">' + a.failed_count + ' / ' + a.total_count + ' failed</div>' +
                 '</div>';
             }).join('');
-            
-            // Store for modal access
-            window._failedAppsData = apps;
-        }
-        
-        function showAppErrors(idx) {
-            const app = window._failedAppsData[idx];
-            if (!app) return;
-            
-            const modal = document.getElementById('detailModal');
-            const modalBody = document.getElementById('modalBody');
-            
-            let html = '<div class="detail-section">';
-            html += '<div class="detail-section-header"><svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><circle cx="12" cy="12" r="10"/><line x1="15" y1="9" x2="9" y2="15"/><line x1="9" y1="9" x2="15" y2="15"/></svg> ' + escapeHtml(app.app) + ' — Error Breakdown</div>';
-            html += '<div class="detail-grid">';
-            html += '<div class="detail-item"><div class="label">Total Installs</div><div class="value">' + app.total_count.toLocaleString() + '</div></div>';
-            html += '<div class="detail-item"><div class="label">Failed</div><div class="value status-failed">' + app.failed_count.toLocaleString() + '</div></div>';
-            html += '<div class="detail-item"><div class="label">Failure Rate</div><div class="value status-failed">' + app.failure_rate.toFixed(1) + '%</div></div>';
-            html += '<div class="detail-item"><div class="label">Type</div><div class="value">' + (app.type || 'unknown').toUpperCase() + '</div></div>';
-            html += '</div></div>';
-            
-            if (app.top_errors && app.top_errors.length > 0) {
-                html += '<div class="detail-section">';
-                html += '<div class="detail-section-header"><svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M10.29 3.86L1.82 18a2 2 0 001.71 3h16.94a2 2 0 001.71-3L13.71 3.86a2 2 0 00-3.42 0z"/><line x1="12" y1="9" x2="12" y2="13"/><line x1="12" y1="17" x2="12.01" y2="17"/></svg> Top Errors</div>';
-                app.top_errors.forEach(function(e) {
-                    html += '<div style="display: flex; justify-content: space-between; align-items: center; padding: 10px 16px; background: var(--bg-tertiary); border-radius: 6px; margin-bottom: 6px;">';
-                    html += '<div style="flex: 1; min-width: 0;"><div style="font-weight: 600; color: var(--accent-red); font-size: 13px; margin-bottom: 2px;">' + escapeHtml(e.pattern) + '</div>';
-                    html += '<div style="font-size: 11px; color: var(--text-secondary);">' + e.count + ' occurrences</div></div>';
-                    html += '<div style="background: rgba(239,68,68,0.15); color: var(--accent-red); padding: 4px 12px; border-radius: 12px; font-size: 12px; font-weight: 600; white-space: nowrap; margin-left: 12px;">' + e.percent.toFixed(1) + '%</div>';
-                    html += '</div>';
-                });
-                html += '</div>';
-            } else {
-                html += '<div class="detail-section"><div style="padding: 16px; color: var(--text-muted); text-align: center;">No error details available</div></div>';
-            }
-            
-            modalBody.innerHTML = html;
-            modal.classList.add('active');
-            document.body.style.overflow = 'hidden';
         }
         
         function escapeHtml(str) {
@@ -3265,89 +2877,38 @@ func DashboardHTML() string {
         }
         
         function updateCharts(data) {
-            // Daily / Hourly chart
+            // Daily chart
             if (charts.daily) charts.daily.destroy();
-            const isToday = data.hourly_stats && data.hourly_stats.length > 0;
-            document.getElementById('timeChartTitle').textContent = isToday ? 'Installations Today (Hourly)' : 'Installations Over Time';
-            document.getElementById('timeChartSubtitle').textContent = isToday ? 'Hourly success and failure breakdown for today.' : 'Daily success and failure trends.';
-            if (isToday) {
-                // Hourly bar chart for "Today"
-                charts.daily = new Chart(document.getElementById('dailyChart'), {
-                    type: 'bar',
-                    data: {
-                        labels: data.hourly_stats.map(h => h.hour + ':00'),
-                        datasets: [
-                            {
-                                label: 'Success',
-                                data: data.hourly_stats.map(h => h.success),
-                                backgroundColor: 'rgba(34, 197, 94, 0.7)',
-                                borderColor: '#22c55e',
-                                borderWidth: 1,
-                                borderRadius: 3,
-                                borderSkipped: false
-                            },
-                            {
-                                label: 'Failed',
-                                data: data.hourly_stats.map(h => h.failed),
-                                backgroundColor: 'rgba(239, 68, 68, 0.7)',
-                                borderColor: '#ef4444',
-                                borderWidth: 1,
-                                borderRadius: 3,
-                                borderSkipped: false
-                            }
-                        ]
-                    },
-                    options: {
-                        ...chartDefaults,
-                        plugins: { legend: { display: true, position: 'top', labels: { color: '#8b949e', usePointStyle: true } } },
-                        scales: {
-                            x: {
-                                ticks: { color: '#8b949e', maxRotation: 45, font: { size: 11 } },
-                                grid: { color: 'rgba(45, 55, 72, 0.5)' },
-                                stacked: true
-                            },
-                            y: {
-                                ticks: { color: '#8b949e', precision: 0 },
-                                grid: { color: 'rgba(45, 55, 72, 0.5)' },
-                                stacked: true,
-                                beginAtZero: true
-                            }
+            charts.daily = new Chart(document.getElementById('dailyChart'), {
+                type: 'line',
+                data: {
+                    labels: data.daily_stats.map(d => d.date.slice(5)),
+                    datasets: [
+                        {
+                            label: 'Success',
+                            data: data.daily_stats.map(d => d.success),
+                            borderColor: '#22c55e',
+                            backgroundColor: 'rgba(34, 197, 94, 0.1)',
+                            fill: true,
+                            tension: 0.4,
+                            borderWidth: 2
+                        },
+                        {
+                            label: 'Failed',
+                            data: data.daily_stats.map(d => d.failed),
+                            borderColor: '#ef4444',
+                            backgroundColor: 'rgba(239, 68, 68, 0.1)',
+                            fill: true,
+                            tension: 0.4,
+                            borderWidth: 2
                         }
-                    }
-                });
-            } else {
-                // Daily line chart for multi-day periods
-                charts.daily = new Chart(document.getElementById('dailyChart'), {
-                    type: 'line',
-                    data: {
-                        labels: data.daily_stats.map(d => d.date.slice(5)),
-                        datasets: [
-                            {
-                                label: 'Success',
-                                data: data.daily_stats.map(d => d.success),
-                                borderColor: '#22c55e',
-                                backgroundColor: 'rgba(34, 197, 94, 0.1)',
-                                fill: true,
-                                tension: 0.4,
-                                borderWidth: 2
-                            },
-                            {
-                                label: 'Failed',
-                                data: data.daily_stats.map(d => d.failed),
-                                borderColor: '#ef4444',
-                                backgroundColor: 'rgba(239, 68, 68, 0.1)',
-                                fill: true,
-                                tension: 0.4,
-                                borderWidth: 2
-                            }
-                        ]
-                    },
-                    options: {
-                        ...chartDefaults,
-                        plugins: { legend: { display: true, position: 'top', labels: { color: '#8b949e', usePointStyle: true } } }
-                    }
-                });
-            }
+                    ]
+                },
+                options: {
+                    ...chartDefaults,
+                    plugins: { legend: { display: true, position: 'top', labels: { color: '#8b949e', usePointStyle: true } } }
+                }
+            });
             
             // OS distribution - horizontal bar chart
             if (charts.os) charts.os.destroy();
