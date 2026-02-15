@@ -475,6 +475,86 @@ func (p *PBClient) CreateTelemetry(ctx context.Context, payload TelemetryOut) er
 	return nil
 }
 
+// MigrateRepoSource updates all records with empty repo_source to the specified value.
+// Returns the number of records updated.
+func (p *PBClient) MigrateRepoSource(ctx context.Context, targetRepo string) (int, error) {
+	if err := p.ensureAuth(ctx); err != nil {
+		return 0, err
+	}
+
+	updated := 0
+	page := 1
+	perPage := 100
+
+	for {
+		// Fetch records with empty repo_source
+		reqURL := fmt.Sprintf("%s/api/collections/%s/records?filter=%s&page=%d&perPage=%d",
+			p.baseURL, p.targetColl,
+			url.QueryEscape("repo_source=''"),
+			page, perPage)
+
+		req, err := http.NewRequestWithContext(ctx, http.MethodGet, reqURL, nil)
+		if err != nil {
+			return updated, err
+		}
+		req.Header.Set("Authorization", "Bearer "+p.token)
+
+		resp, err := p.http.Do(req)
+		if err != nil {
+			return updated, err
+		}
+
+		var result struct {
+			Items []struct {
+				ID string `json:"id"`
+			} `json:"items"`
+			TotalItems int `json:"totalItems"`
+		}
+		if err := json.NewDecoder(resp.Body).Decode(&result); err != nil {
+			resp.Body.Close()
+			return updated, err
+		}
+		resp.Body.Close()
+
+		if len(result.Items) == 0 {
+			break
+		}
+
+		// Update each record
+		for _, item := range result.Items {
+			updatePayload := map[string]string{"repo_source": targetRepo}
+			b, _ := json.Marshal(updatePayload)
+
+			patchReq, err := http.NewRequestWithContext(ctx, http.MethodPatch,
+				fmt.Sprintf("%s/api/collections/%s/records/%s", p.baseURL, p.targetColl, item.ID),
+				bytes.NewReader(b),
+			)
+			if err != nil {
+				continue
+			}
+			patchReq.Header.Set("Content-Type", "application/json")
+			patchReq.Header.Set("Authorization", "Bearer "+p.token)
+
+			patchResp, err := p.http.Do(patchReq)
+			if err != nil {
+				continue
+			}
+			patchResp.Body.Close()
+
+			if patchResp.StatusCode >= 200 && patchResp.StatusCode < 300 {
+				updated++
+			}
+		}
+
+		// Continue to next page (records shift as we update, so stay on page 1)
+		if result.TotalItems <= perPage {
+			break
+		}
+	}
+
+	return updated, nil
+}
+
 // -------- Rate limiter (token bucket / minute window, simple) --------
 
 type bucket struct {
@@ -1145,6 +1225,45 @@ func main() {
 
 		w.WriteHeader(http.StatusOK)
 		w.Write([]byte("test alert sent"))
+	})
+
+	// Migration endpoint to fix empty repo_source records
+	// Protected by PocketBase credentials (same as backend authentication)
+	mux.HandleFunc("/api/migrate-repo-source", func(w http.ResponseWriter, r *http.Request) {
+		if r.Method != http.MethodPost {
+			http.Error(w, "method not allowed", http.StatusMethodNotAllowed)
+			return
+		}
+
+		// Require admin key from query parameter (use PB_PASSWORD as simple protection)
+		adminKey := r.URL.Query().Get("key")
+		if adminKey == "" || adminKey != cfg.PBPassword {
+			http.Error(w, "unauthorized", http.StatusUnauthorized)
+			return
+		}
+
+		targetRepo := r.URL.Query().Get("repo")
+		if targetRepo == "" {
+			targetRepo = "ProxmoxVE" // Default
+		}
+
+		ctx, cancel := context.WithTimeout(r.Context(), 5*time.Minute)
+		defer cancel()
+
+		count, err := pb.MigrateRepoSource(ctx, targetRepo)
+		if err != nil {
+			log.Printf("migration error: %v", err)
+			http.Error(w, fmt.Sprintf("migration error: %v (updated %d records before error)", err, count), http.StatusInternalServerError)
+			return
+		}
+
+		w.Header().Set("Content-Type", "application/json")
+		json.NewEncoder(w).Encode(map[string]interface{}{
+			"success":         true,
+			"records_updated": count,
+			"target_repo":     targetRepo,
+		})
+		log.Printf("migration completed: %d records updated to repo_source=%s", count, targetRepo)
 	})
 
 	mux.HandleFunc("/telemetry", func(w http.ResponseWriter, r *http.Request) {
