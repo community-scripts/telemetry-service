@@ -2439,7 +2439,22 @@ func DashboardHTML() string {
                     <h2>Installation Log</h2>
                     <p>Detailed records of all container creation attempts.</p>
                 </div>
-                <div class="section-actions">
+                <div class="section-actions" style="display: flex; align-items: center; gap: 16px;">
+                    <div class="auto-refresh-toggle">
+                        <label class="toggle-switch">
+                            <input type="checkbox" id="logAutoRefreshToggle" onchange="toggleLogAutoRefresh()">
+                            <span class="toggle-slider"></span>
+                        </label>
+                        <span>Auto-refresh</span>
+                        <span class="auto-refresh-interval" id="logRefreshInterval">15s</span>
+                    </div>
+                    <button class="btn" onclick="fetchPaginatedRecords()">
+                        <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
+                            <path d="M23 4v6h-6"/><path d="M1 20v-6h6"/>
+                            <path d="M3.51 9a9 9 0 0114.85-3.36L23 10M1 14l4.64 4.36A9 9 0 0020.49 15"/>
+                        </svg>
+                        Refresh
+                    </button>
                     <button class="btn" onclick="exportCSV()">
                         <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
                             <path d="M21 15v4a2 2 0 01-2 2H5a2 2 0 01-2-2v-4"/>
@@ -2555,6 +2570,11 @@ func DashboardHTML() string {
         let autoRefreshEnabled = localStorage.getItem('autoRefresh') === 'true';
         let autoRefreshInterval = 15000; // 15 seconds
         let autoRefreshTimer = null;
+        
+        // Log auto-refresh state (separate from main dashboard)
+        let logAutoRefreshEnabled = localStorage.getItem('logAutoRefresh') === 'true';
+        let logAutoRefreshInterval = 15000; // 15 seconds
+        let logAutoRefreshTimer = null;
         
         // Colorful palette for Top Applications chart
         const appBarColors = [
@@ -3428,11 +3448,70 @@ func DashboardHTML() string {
             document.getElementById('refreshInterval').textContent = '15s';
         }
         
+        // Log auto-refresh functionality (for Installation Log section)
+        function toggleLogAutoRefresh() {
+            logAutoRefreshEnabled = document.getElementById('logAutoRefreshToggle').checked;
+            localStorage.setItem('logAutoRefresh', logAutoRefreshEnabled);
+            
+            const intervalDisplay = document.getElementById('logRefreshInterval');
+            
+            if (logAutoRefreshEnabled) {
+                intervalDisplay.classList.add('active');
+                startLogAutoRefresh();
+            } else {
+                intervalDisplay.classList.remove('active');
+                stopLogAutoRefresh();
+            }
+        }
+        
+        function startLogAutoRefresh() {
+            stopLogAutoRefresh(); // Clear any existing timer
+            
+            let countdown = logAutoRefreshInterval / 1000;
+            const intervalDisplay = document.getElementById('logRefreshInterval');
+            
+            // Update countdown display
+            const countdownTimer = setInterval(() => {
+                countdown--;
+                if (countdown <= 0) {
+                    countdown = logAutoRefreshInterval / 1000;
+                }
+                intervalDisplay.textContent = countdown + 's';
+            }, 1000);
+            
+            // Actual refresh (only fetch paginated records, not full dashboard)
+            logAutoRefreshTimer = setInterval(() => {
+                fetchPaginatedRecords();
+                countdown = logAutoRefreshInterval / 1000;
+            }, logAutoRefreshInterval);
+            
+            // Store countdown timer for cleanup
+            logAutoRefreshTimer.countdownTimer = countdownTimer;
+        }
+        
+        function stopLogAutoRefresh() {
+            if (logAutoRefreshTimer) {
+                clearInterval(logAutoRefreshTimer);
+                if (logAutoRefreshTimer.countdownTimer) {
+                    clearInterval(logAutoRefreshTimer.countdownTimer);
+                }
+                logAutoRefreshTimer = null;
+            }
+            document.getElementById('logRefreshInterval').textContent = '15s';
+        }
+        
         // Initialize auto-refresh state on load
         document.getElementById('autoRefreshToggle').checked = autoRefreshEnabled;
         if (autoRefreshEnabled) {
             document.getElementById('refreshInterval').classList.add('active');
             startAutoRefresh();
+        }
+        
+        // Initialize log auto-refresh state on load
+        document.getElementById('logAutoRefreshToggle').checked = logAutoRefreshEnabled;
+        if (logAutoRefreshEnabled) {
+            document.getElementById('logRefreshInterval').classList.add('active');
+            startLogAutoRefresh();
         }
     </script>
 </body>

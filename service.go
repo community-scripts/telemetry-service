@@ -1064,10 +1064,10 @@ func main() {
 		ctx, cancel := context.WithTimeout(r.Context(), 120*time.Second)
 		defer cancel()
 
-		// Try cache first (stale-while-revalidate)
+		// Try cache first (stale-while-revalidate) - but skip cache for Today and 7 Days
 		cacheKey := fmt.Sprintf("dashboard:%d:%s", days, repoSource)
 		var data *DashboardData
-		if cfg.CacheEnabled && cache.Get(ctx, cacheKey, &data) {
+		if cfg.CacheEnabled && days > 7 && cache.Get(ctx, cacheKey, &data) {
 			// Serve cached data immediately
 			w.Header().Set("Content-Type", "application/json")
 			w.Header().Set("X-Cache", "HIT")
@@ -1103,14 +1103,11 @@ func main() {
 		}
 
 		// Cache the result with dynamic TTL based on period
-		if cfg.CacheEnabled {
-			// Short periods change faster → shorter cache TTL
+		// Today and 7 Days: NO CACHE (live data)
+		// Longer periods: cache to reduce DB load
+		if cfg.CacheEnabled && days > 7 {
 			cacheTTL := cfg.CacheTTL
 			switch {
-			case days <= 1:
-				cacheTTL = 30 * time.Second // Today: 30s cache
-			case days <= 7:
-				cacheTTL = 2 * time.Minute // 7 Days: 2min cache
 			case days <= 30:
 				cacheTTL = 5 * time.Minute // 30 Days: 5min cache
 			case days <= 90:
