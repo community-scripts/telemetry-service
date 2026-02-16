@@ -4,6 +4,7 @@ import (
 	"context"
 	"encoding/json"
 	"fmt"
+	"log"
 	"net/http"
 	"net/url"
 	"strings"
@@ -174,6 +175,56 @@ type ErrorTimelinePoint struct {
 // Script Analysis Data Types
 // ========================================================
 
+// FetchKnownScriptSlugs fetches all slugs from script_scripts collection
+func (p *PBClient) FetchKnownScriptSlugs(ctx context.Context) (map[string]bool, error) {
+	if err := p.ensureAuth(ctx); err != nil {
+		return nil, err
+	}
+
+	slugs := make(map[string]bool)
+	page := 1
+	perPage := 500
+
+	for {
+		reqURL := fmt.Sprintf("%s/api/collections/script_scripts/records?fields=slug&page=%d&perPage=%d",
+			p.baseURL, page, perPage)
+
+		req, err := http.NewRequestWithContext(ctx, http.MethodGet, reqURL, nil)
+		if err != nil {
+			return nil, err
+		}
+		req.Header.Set("Authorization", "Bearer "+p.token)
+
+		resp, err := p.http.Do(req)
+		if err != nil {
+			return nil, err
+		}
+
+		var result struct {
+			Items      []struct{ Slug string `json:"slug"` } `json:"items"`
+			TotalItems int                                    `json:"totalItems"`
+		}
+		if err := json.NewDecoder(resp.Body).Decode(&result); err != nil {
+			resp.Body.Close()
+			return nil, err
+		}
+		resp.Body.Close()
+
+		for _, item := range result.Items {
+			if item.Slug != "" {
+				slugs[item.Slug] = true
+			}
+		}
+
+		if len(slugs) >= result.TotalItems || len(result.Items) == 0 {
+			break
+		}
+		page++
+	}
+
+	return slugs, nil
+}
+
 type ScriptAnalysisData struct {
 	TotalScripts   int              `json:"total_scripts"`
 	TotalInstalls  int              `json:"total_installs"`
@@ -210,6 +261,13 @@ func (p *PBClient) FetchScriptAnalysisData(ctx context.Context, days int, repoSo
 		return nil, err
 	}
 
+	// Fetch known scripts from script_scripts to filter against
+	knownSlugs, err := p.FetchKnownScriptSlugs(ctx)
+	if err != nil {
+		log.Printf("[WARN] could not fetch known script slugs, showing all: %v", err)
+		knownSlugs = nil // graceful degradation: show all if DB unavailable
+	}
+
 	var filterParts []string
 	if days > 0 {
 		var since string
@@ -233,7 +291,18 @@ func (p *PBClient) FetchScriptAnalysisData(ctx context.Context, days int, repoSo
 	if err != nil {
 		return nil, err
 	}
-	records := result.Records
+
+	// Filter records to only known scripts (if slug list available)
+	var records []TelemetryRecord
+	if knownSlugs != nil && len(knownSlugs) > 0 {
+		for _, r := range result.Records {
+			if knownSlugs[r.NSAPP] {
+				records = append(records, r)
+			}
+		}
+	} else {
+		records = result.Records
+	}
 
 	data := &ScriptAnalysisData{
 		TotalInstalls: len(records),
