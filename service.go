@@ -1383,7 +1383,12 @@ func main() {
 			repoSource = ""
 		}
 
-		ctx, cancel := context.WithTimeout(r.Context(), 120*time.Second)
+		// Scale timeout by data volume
+		timeout := 120 * time.Second
+		if days >= 90 { timeout = 300 * time.Second }
+		if days >= 365 { timeout = 600 * time.Second }
+
+		ctx, cancel := context.WithTimeout(r.Context(), timeout)
 		defer cancel()
 
 		cacheKey := fmt.Sprintf("errors:%d:%s", days, repoSource)
@@ -1396,17 +1401,19 @@ func main() {
 				if cache.TryStartRefresh(cacheKey) {
 					go func() {
 						defer cache.FinishRefresh(cacheKey)
-						refreshCtx, cancel := context.WithTimeout(context.Background(), 120*time.Second)
+						refreshTimeout := 120 * time.Second
+						if days >= 90 { refreshTimeout = 300 * time.Second }
+						if days >= 365 { refreshTimeout = 600 * time.Second }
+						refreshCtx, cancel := context.WithTimeout(context.Background(), refreshTimeout)
 						defer cancel()
 						freshData, err := pb.FetchErrorAnalysisData(refreshCtx, days, repoSource)
 						if err != nil {
 							log.Printf("[CACHE] background refresh failed for %s: %v", cacheKey, err)
 							return
 						}
-						cacheTTL := 2 * time.Minute
-						if days > 7 { cacheTTL = 5 * time.Minute }
-						if days > 30 || days == 0 { cacheTTL = 15 * time.Minute }
-						_ = cache.Set(context.Background(), cacheKey, freshData, cacheTTL)
+						refreshTTL := 2 * time.Minute
+						if days > 7 { refreshTTL = 23 * time.Hour }
+						_ = cache.Set(context.Background(), cacheKey, freshData, refreshTTL)
 					}()
 				}
 			}
@@ -1423,8 +1430,7 @@ func main() {
 
 		if cfg.CacheEnabled {
 			cacheTTL := 2 * time.Minute
-			if days > 7 { cacheTTL = 5 * time.Minute }
-			if days > 30 || days == 0 { cacheTTL = 15 * time.Minute }
+			if days > 7 { cacheTTL = 23 * time.Hour }
 			_ = cache.Set(ctx, cacheKey, data, cacheTTL)
 		}
 
