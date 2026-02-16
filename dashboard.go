@@ -3034,6 +3034,8 @@ func DashboardHTML() string {
         </div>
         
         <div class="navbar-actions">
+            <a href="/error-analysis" class="nav-icon" title="Error Analysis" style="font-size:14px;text-decoration:none;">🔍 Errors</a>
+            <a href="/script-analysis" class="nav-icon" title="Script Analysis" style="font-size:14px;text-decoration:none;">📜 Scripts</a>
             <a href="https://github.com/community-scripts/ProxmoxVE" target="_blank" class="github-stars" id="githubStars">
                 <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
                     <polygon points="12 2 15.09 8.26 22 9.27 17 14.14 18.18 21.02 12 17.77 5.82 21.02 7 14.14 2 9.27 8.91 8.26 12 2"/>
@@ -5213,6 +5215,36 @@ func ScriptAnalysisHTML() string {
             </div>
         </div>
 
+        <!-- Least Used Scripts -->
+        <div class="section-card">
+            <h2>
+                📉 Least Used Scripts
+                <div style="display:flex;gap:8px;align-items:center;">
+                    <input type="text" class="search-input" id="searchBottom" placeholder="Search scripts..." oninput="renderBottomTable()">
+                    <button class="btn btn-sm" id="expandBottomBtn" onclick="toggleExpand('bottom')">Show All</button>
+                </div>
+            </h2>
+            <div class="table-wrap" id="bottomTableWrap">
+                <table>
+                    <thead>
+                        <tr>
+                            <th>#</th>
+                            <th>Script</th>
+                            <th>Type</th>
+                            <th>Total</th>
+                            <th>Success</th>
+                            <th>Failed</th>
+                            <th>Aborted</th>
+                            <th>Installing</th>
+                            <th>Success Rate</th>
+                            <th style="min-width:100px;">Distribution</th>
+                        </tr>
+                    </thead>
+                    <tbody id="bottomTableBody"></tbody>
+                </table>
+            </div>
+        </div>
+
         <!-- Recent Scripts -->
         <div class="section-card">
             <h2>
@@ -5245,6 +5277,7 @@ func ScriptAnalysisHTML() string {
     <script>
         let currentData = null;
         let expandTop = false;
+        let expandBottom = false;
         let expandRecent = false;
         const LIMIT = 10;
 
@@ -5322,6 +5355,52 @@ func ScriptAnalysisHTML() string {
             document.getElementById('expandTopBtn').textContent = expandTop ? 'Show Top 10' : 'Show All (' + scripts.length + ')';
         }
 
+        function renderBottomTable() {
+            const tbody = document.getElementById('bottomTableBody');
+            if (!currentData || !currentData.top_scripts) {
+                tbody.innerHTML = '<tr><td colspan="10" style="text-align:center;color:var(--text-muted);padding:24px;">No data</td></tr>';
+                return;
+            }
+            const search = (document.getElementById('searchBottom').value || '').toLowerCase();
+            // Reverse: least used first
+            let scripts = [...currentData.top_scripts].reverse();
+            if (search) {
+                scripts = scripts.filter(s => s.app.toLowerCase().includes(search) || (s.type||'').toLowerCase().includes(search));
+            }
+            const limit = expandBottom ? scripts.length : Math.min(LIMIT, scripts.length);
+            const shown = scripts.slice(0, limit);
+            const totalScripts = currentData.top_scripts.length;
+
+            tbody.innerHTML = shown.map((s, idx) => {
+                const typeClass = (s.type || '').toLowerCase();
+                const rateColor = s.success_rate >= 90 ? 'var(--accent-green)' : s.success_rate >= 70 ? 'var(--accent-yellow)' : 'var(--accent-red)';
+                const total = s.success + s.failed + s.aborted + s.installing;
+                const pctSuccess = total > 0 ? (s.success / total * 100) : 0;
+                const pctFailed = total > 0 ? (s.failed / total * 100) : 0;
+                const pctAborted = total > 0 ? (s.aborted / total * 100) : 0;
+                const pctInstalling = total > 0 ? (s.installing / total * 100) : 0;
+                return '<tr>' +
+                    '<td style="color:var(--text-muted);font-weight:600;">' + (totalScripts - idx) + '</td>' +
+                    '<td><strong>' + escapeHtml(s.app) + '</strong></td>' +
+                    '<td><span class="type-badge ' + typeClass + '">' + (s.type || '-').toUpperCase() + '</span></td>' +
+                    '<td style="font-weight:600;">' + s.total.toLocaleString() + '</td>' +
+                    '<td style="color:var(--accent-green);">' + s.success.toLocaleString() + '</td>' +
+                    '<td style="color:var(--accent-red);">' + s.failed.toLocaleString() + '</td>' +
+                    '<td style="color:var(--accent-purple);">' + s.aborted.toLocaleString() + '</td>' +
+                    '<td style="color:var(--accent-yellow);">' + s.installing.toLocaleString() + '</td>' +
+                    '<td style="color:' + rateColor + ';font-weight:600;">' + s.success_rate.toFixed(1) + '%</td>' +
+                    '<td><div class="success-bar">' +
+                        '<div class="seg-success" style="width:' + pctSuccess + '%"></div>' +
+                        '<div class="seg-failed" style="width:' + pctFailed + '%"></div>' +
+                        '<div class="seg-aborted" style="width:' + pctAborted + '%"></div>' +
+                        '<div class="seg-installing" style="width:' + pctInstalling + '%"></div>' +
+                    '</div></td>' +
+                '</tr>';
+            }).join('');
+
+            document.getElementById('expandBottomBtn').textContent = expandBottom ? 'Show Bottom 10' : 'Show All (' + scripts.length + ')';
+        }
+
         function renderRecentTable() {
             const tbody = document.getElementById('recentTableBody');
             if (!currentData || !currentData.recent_scripts) {
@@ -5360,6 +5439,9 @@ func ScriptAnalysisHTML() string {
             if (which === 'top') {
                 expandTop = !expandTop;
                 renderTopTable();
+            } else if (which === 'bottom') {
+                expandBottom = !expandBottom;
+                renderBottomTable();
             } else {
                 expandRecent = !expandRecent;
                 renderRecentTable();
@@ -5372,6 +5454,7 @@ func ScriptAnalysisHTML() string {
             currentData = data;
             updateStats(data);
             renderTopTable();
+            renderBottomTable();
             renderRecentTable();
         }
 

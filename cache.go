@@ -194,21 +194,26 @@ func (c *Cache) Delete(ctx context.Context, key string) error {
 	return nil
 }
 
-// InvalidateDashboard clears all dashboard cache keys
+// InvalidateDashboard clears all dashboard, scripts and errors cache keys
 func (c *Cache) InvalidateDashboard(ctx context.Context) {
+	prefixes := []string{"dashboard:", "scripts:", "errors:"}
 	if c.useRedis {
-		// Scan and delete dashboard keys
-		iter := c.redis.Scan(ctx, 0, "dashboard:*", 100).Iterator()
-		for iter.Next(ctx) {
-			c.redis.Del(ctx, iter.Val())
+		for _, prefix := range prefixes {
+			iter := c.redis.Scan(ctx, 0, prefix+"*", 100).Iterator()
+			for iter.Next(ctx) {
+				c.redis.Del(ctx, iter.Val())
+			}
 		}
 		return
 	}
 
 	c.mu.Lock()
 	for k := range c.memData {
-		if len(k) > 10 && k[:10] == "dashboard:" {
-			delete(c.memData, k)
+		for _, prefix := range prefixes {
+			if len(k) >= len(prefix) && k[:len(prefix)] == prefix {
+				delete(c.memData, k)
+				break
+			}
 		}
 	}
 	c.mu.Unlock()

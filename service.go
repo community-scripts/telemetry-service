@@ -1289,7 +1289,10 @@ func main() {
 							log.Printf("[CACHE] background refresh failed for %s: %v", cacheKey, err)
 							return
 						}
-						_ = cache.Set(context.Background(), cacheKey, freshData, cfg.CacheTTL)
+						refreshTTL := 2 * time.Minute
+						if days > 7 { refreshTTL = 5 * time.Minute }
+						if days > 30 || days == 0 { refreshTTL = 15 * time.Minute }
+						_ = cache.Set(context.Background(), cacheKey, freshData, refreshTTL)
 					}()
 				}
 			}
@@ -1346,6 +1349,34 @@ func main() {
 		ctx, cancel := context.WithTimeout(r.Context(), 120*time.Second)
 		defer cancel()
 
+		cacheKey := fmt.Sprintf("errors:%d:%s", days, repoSource)
+		var data *ErrorAnalysisData
+		if cfg.CacheEnabled && cache.Get(ctx, cacheKey, &data) {
+			w.Header().Set("Content-Type", "application/json")
+			w.Header().Set("X-Cache", "HIT")
+			if cache.IsStale(ctx, cacheKey) {
+				w.Header().Set("X-Cache", "STALE")
+				if cache.TryStartRefresh(cacheKey) {
+					go func() {
+						defer cache.FinishRefresh(cacheKey)
+						refreshCtx, cancel := context.WithTimeout(context.Background(), 120*time.Second)
+						defer cancel()
+						freshData, err := pb.FetchErrorAnalysisData(refreshCtx, days, repoSource)
+						if err != nil {
+							log.Printf("[CACHE] background refresh failed for %s: %v", cacheKey, err)
+							return
+						}
+						cacheTTL := 2 * time.Minute
+						if days > 7 { cacheTTL = 5 * time.Minute }
+						if days > 30 || days == 0 { cacheTTL = 15 * time.Minute }
+						_ = cache.Set(context.Background(), cacheKey, freshData, cacheTTL)
+					}()
+				}
+			}
+			json.NewEncoder(w).Encode(data)
+			return
+		}
+
 		data, err := pb.FetchErrorAnalysisData(ctx, days, repoSource)
 		if err != nil {
 			log.Printf("error analysis fetch failed: %v", err)
@@ -1353,7 +1384,15 @@ func main() {
 			return
 		}
 
+		if cfg.CacheEnabled {
+			cacheTTL := 2 * time.Minute
+			if days > 7 { cacheTTL = 5 * time.Minute }
+			if days > 30 || days == 0 { cacheTTL = 15 * time.Minute }
+			_ = cache.Set(ctx, cacheKey, data, cacheTTL)
+		}
+
 		w.Header().Set("Content-Type", "application/json")
+		w.Header().Set("X-Cache", "MISS")
 		json.NewEncoder(w).Encode(data)
 	})
 
