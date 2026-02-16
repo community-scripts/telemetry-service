@@ -349,8 +349,8 @@ func (p *PBClient) FetchErrorAnalysisData(ctx context.Context, days int, repoSou
 			desc = "curl: Network/protocol error"
 			cat = "network"
 		case 5:
-			desc = "I/O error"
-			cat = "storage"
+			desc = "curl: Could not resolve proxy"
+			cat = "network"
 		case 6:
 			desc = "curl: Could not resolve host"
 			cat = "network"
@@ -358,11 +358,11 @@ func (p *PBClient) FetchErrorAnalysisData(ctx context.Context, days int, repoSou
 			desc = "curl: Connection refused"
 			cat = "network"
 		case 8:
-			desc = "Runtime error (function/exec failure)"
-			cat = "unknown"
+			desc = "curl: FTP server reply error"
+			cat = "network"
 		case 10:
-			desc = "Script aborted (custom exit)"
-			cat = "unknown"
+			desc = "Docker / privileged mode required"
+			cat = "config"
 		case 22:
 			desc = "curl: HTTP error (404/500 etc.)"
 			cat = "network"
@@ -370,13 +370,13 @@ func (p *PBClient) FetchErrorAnalysisData(ctx context.Context, days int, repoSou
 			desc = "curl: Write error (disk full?)"
 			cat = "storage"
 		case 25:
-			desc = "curl: SSL/TLS error"
+			desc = "curl: Upload failed"
 			cat = "network"
 		case 28:
 			desc = "curl: Connection timed out"
 			cat = "timeout"
 		case 30:
-			desc = "FTP/network port error"
+			desc = "curl: FTP port command failed"
 			cat = "network"
 		case 35:
 			desc = "SSL connect error"
@@ -384,6 +384,9 @@ func (p *PBClient) FetchErrorAnalysisData(ctx context.Context, days int, repoSou
 		case 56:
 			desc = "curl: Receive error (connection reset)"
 			cat = "network"
+		case 75:
+			desc = "Temporary failure (retry later)"
+			cat = "unknown"
 		case 78:
 			desc = "curl: Remote file not found (404)"
 			cat = "network"
@@ -393,15 +396,27 @@ func (p *PBClient) FetchErrorAnalysisData(ctx context.Context, days int, repoSou
 		case 101:
 			desc = "APT: Unmet dependencies"
 			cat = "apt"
+		case 102:
+			desc = "APT: Lock held by another process"
+			cat = "apt"
+		case 124:
+			desc = "Command timed out (timeout command)"
+			cat = "timeout"
 		case 126:
 			desc = "Command cannot execute (permission problem)"
 			cat = "permission"
 		case 127:
 			desc = "Command not found"
 			cat = "command_not_found"
+		case 128:
+			desc = "Invalid argument to exit"
+			cat = "unknown"
 		case 130:
 			desc = "Script terminated by Ctrl+C (SIGINT)"
 			cat = "user_aborted"
+		case 134:
+			desc = "Process aborted (SIGABRT)"
+			cat = "signal"
 		case 137:
 			desc = "Process killed (SIGKILL) - likely OOM"
 			cat = "resource"
@@ -414,6 +429,166 @@ func (p *PBClient) FetchErrorAnalysisData(ctx context.Context, days int, repoSou
 		case 143:
 			desc = "Process terminated (SIGTERM)"
 			cat = "signal"
+		// Systemd / Service errors
+		case 150:
+			desc = "Systemd: Service failed to start"
+			cat = "service"
+		case 151:
+			desc = "Systemd: Service unit not found"
+			cat = "service"
+		case 152:
+			desc = "Permission denied (EACCES)"
+			cat = "permission"
+		case 153:
+			desc = "Build/compile failed (make/gcc/cmake)"
+			cat = "service"
+		case 154:
+			desc = "Node.js: Native addon build failed (node-gyp)"
+			cat = "service"
+		// Python / pip / uv
+		case 160:
+			desc = "Python: Virtualenv / uv environment missing or broken"
+			cat = "dependency"
+		case 161:
+			desc = "Python: Dependency resolution failed"
+			cat = "dependency"
+		case 162:
+			desc = "Python: Installation aborted (EXTERNALLY-MANAGED)"
+			cat = "dependency"
+		// PostgreSQL
+		case 170:
+			desc = "PostgreSQL: Connection failed"
+			cat = "database"
+		case 171:
+			desc = "PostgreSQL: Authentication failed"
+			cat = "database"
+		case 172:
+			desc = "PostgreSQL: Database does not exist"
+			cat = "database"
+		case 173:
+			desc = "PostgreSQL: Fatal error in query"
+			cat = "database"
+		// MySQL / MariaDB
+		case 180:
+			desc = "MySQL/MariaDB: Connection failed"
+			cat = "database"
+		case 181:
+			desc = "MySQL/MariaDB: Authentication failed"
+			cat = "database"
+		case 182:
+			desc = "MySQL/MariaDB: Database does not exist"
+			cat = "database"
+		case 183:
+			desc = "MySQL/MariaDB: Fatal error in query"
+			cat = "database"
+		// MongoDB
+		case 190:
+			desc = "MongoDB: Connection failed"
+			cat = "database"
+		case 191:
+			desc = "MongoDB: Authentication failed"
+			cat = "database"
+		case 192:
+			desc = "MongoDB: Database not found"
+			cat = "database"
+		case 193:
+			desc = "MongoDB: Fatal query error"
+			cat = "database"
+		// Proxmox Custom Codes
+		case 200:
+			desc = "Proxmox: Failed to create lock file"
+			cat = "proxmox"
+		case 203:
+			desc = "Proxmox: Missing CTID variable"
+			cat = "config"
+		case 204:
+			desc = "Proxmox: Missing PCT_OSTYPE variable"
+			cat = "config"
+		case 205:
+			desc = "Proxmox: Invalid CTID (<100)"
+			cat = "config"
+		case 206:
+			desc = "Proxmox: CTID already in use"
+			cat = "config"
+		case 207:
+			desc = "Proxmox: Password contains unescaped special chars"
+			cat = "config"
+		case 208:
+			desc = "Proxmox: Invalid configuration (DNS/MAC/Network)"
+			cat = "config"
+		case 209:
+			desc = "Proxmox: Container creation failed"
+			cat = "proxmox"
+		case 210:
+			desc = "Proxmox: Cluster not quorate"
+			cat = "proxmox"
+		case 211:
+			desc = "Proxmox: Timeout waiting for template lock"
+			cat = "timeout"
+		case 212:
+			desc = "Proxmox: Storage 'iscsidirect' does not support containers"
+			cat = "proxmox"
+		case 213:
+			desc = "Proxmox: Storage does not support 'rootdir' content"
+			cat = "proxmox"
+		case 214:
+			desc = "Proxmox: Not enough storage space"
+			cat = "storage"
+		case 215:
+			desc = "Proxmox: Container created but not listed (ghost state)"
+			cat = "proxmox"
+		case 216:
+			desc = "Proxmox: RootFS entry missing in config"
+			cat = "proxmox"
+		case 217:
+			desc = "Proxmox: Storage not accessible"
+			cat = "storage"
+		case 218:
+			desc = "Proxmox: Template file corrupted or incomplete"
+			cat = "proxmox"
+		case 219:
+			desc = "Proxmox: CephFS does not support containers"
+			cat = "storage"
+		case 220:
+			desc = "Proxmox: Unable to resolve template path"
+			cat = "proxmox"
+		case 221:
+			desc = "Proxmox: Template file not readable"
+			cat = "proxmox"
+		case 222:
+			desc = "Proxmox: Template download failed"
+			cat = "proxmox"
+		case 223:
+			desc = "Proxmox: Template not available after download"
+			cat = "proxmox"
+		case 224:
+			desc = "Proxmox: PBS storage is for backups only"
+			cat = "storage"
+		case 225:
+			desc = "Proxmox: No template available for OS/Version"
+			cat = "proxmox"
+		case 231:
+			desc = "Proxmox: LXC stack upgrade failed"
+			cat = "proxmox"
+		// Node.js / npm
+		case 243:
+			desc = "Node.js: Out of memory (heap overflow)"
+			cat = "resource"
+		case 245:
+			desc = "Node.js: Invalid command-line option"
+			cat = "config"
+		case 246:
+			desc = "Node.js: Internal JavaScript Parse Error"
+			cat = "unknown"
+		case 247:
+			desc = "Node.js: Fatal internal error"
+			cat = "unknown"
+		case 248:
+			desc = "Node.js: Invalid C++ addon / N-API failure"
+			cat = "unknown"
+		case 249:
+			desc = "npm/pnpm/yarn: Unknown fatal error"
+			cat = "unknown"
 		case 255:
 			desc = "Script error (set -e / errexit triggered or SSH error)"
 			cat = "unknown"
