@@ -229,6 +229,11 @@ func (p *PBClient) FetchErrorAnalysisData(ctx context.Context, days int, repoSou
 			r.Status = "aborted"
 		}
 
+		// Reclassify: status="failed" with exit_code=0 and no error text is actually success
+		if r.Status == "failed" && r.ExitCode == 0 && (r.Error == "" || strings.ToLower(r.Error) == "success") {
+			r.Status = "success"
+		}
+
 		if r.Status == "installing" {
 			stuckCount++
 			continue
@@ -329,17 +334,64 @@ func (p *PBClient) FetchErrorAnalysisData(ctx context.Context, days int, repoSou
 		desc := "Unknown"
 		cat := "unknown"
 		// Use the exit code descriptions and categories from service.go
+		if code == 0 {
+			// exit_code=0 is Success — skip from error stats
+			continue
+		}
 		switch code {
-		case 0:
-			desc = "Success"
 		case 1:
 			desc = "General error"
 			cat = "unknown"
 		case 2:
 			desc = "Misuse of shell builtins"
 			cat = "unknown"
+		case 4:
+			desc = "curl: Network/protocol error"
+			cat = "network"
+		case 5:
+			desc = "I/O error"
+			cat = "storage"
+		case 6:
+			desc = "curl: Could not resolve host"
+			cat = "network"
+		case 7:
+			desc = "curl: Connection refused"
+			cat = "network"
+		case 8:
+			desc = "Runtime error (function/exec failure)"
+			cat = "unknown"
+		case 10:
+			desc = "Script aborted (custom exit)"
+			cat = "unknown"
+		case 22:
+			desc = "curl: HTTP error (404/500 etc.)"
+			cat = "network"
+		case 23:
+			desc = "curl: Write error (disk full?)"
+			cat = "storage"
+		case 25:
+			desc = "curl: SSL/TLS error"
+			cat = "network"
+		case 28:
+			desc = "curl: Connection timed out"
+			cat = "timeout"
+		case 30:
+			desc = "FTP/network port error"
+			cat = "network"
+		case 35:
+			desc = "SSL connect error"
+			cat = "network"
+		case 56:
+			desc = "curl: Receive error (connection reset)"
+			cat = "network"
+		case 78:
+			desc = "curl: Remote file not found (404)"
+			cat = "network"
 		case 100:
 			desc = "APT: Package manager error (broken packages / dependency problems)"
+			cat = "apt"
+		case 101:
+			desc = "APT: Unmet dependencies"
 			cat = "apt"
 		case 126:
 			desc = "Command cannot execute (permission problem)"
@@ -356,13 +408,80 @@ func (p *PBClient) FetchErrorAnalysisData(ctx context.Context, days int, repoSou
 		case 139:
 			desc = "Segmentation fault (SIGSEGV)"
 			cat = "unknown"
+		case 141:
+			desc = "Broken pipe (SIGPIPE)"
+			cat = "signal"
 		case 143:
 			desc = "Process terminated (SIGTERM)"
 			cat = "signal"
+		case 255:
+			desc = "Script error (set -e / errexit triggered or SSH error)"
+			cat = "unknown"
 		default:
 			if code > 128 && code < 192 {
-				desc = fmt.Sprintf("Killed by signal %d", code-128)
+				sigNum := code - 128
+				sigName := ""
+				switch sigNum {
+				case 1:
+					sigName = "SIGHUP (terminal closed)"
+				case 2:
+					sigName = "SIGINT (user interrupt)"
+				case 3:
+					sigName = "SIGQUIT (core dump)"
+				case 6:
+					sigName = "SIGABRT (abort)"
+				case 9:
+					sigName = "SIGKILL (force killed, likely OOM)"
+				case 11:
+					sigName = "SIGSEGV (segmentation fault)"
+				case 13:
+					sigName = "SIGPIPE (broken pipe)"
+				case 15:
+					sigName = "SIGTERM (terminated)"
+				case 24:
+					sigName = "SIGXCPU (CPU time limit exceeded)"
+				case 25:
+					sigName = "SIGXFSZ (file size limit exceeded)"
+				default:
+					sigName = fmt.Sprintf("signal %d", sigNum)
+				}
+				desc = "Killed by " + sigName
 				cat = "signal"
+			} else if code >= 64 && code <= 78 {
+				// BSD sysexits.h codes
+				switch code {
+				case 64:
+					desc = "Usage error (wrong arguments)"
+				case 65:
+					desc = "Data error (bad input data)"
+				case 66:
+					desc = "Input file not found"
+				case 67:
+					desc = "User not found"
+				case 68:
+					desc = "Host not found"
+				case 69:
+					desc = "Service unavailable"
+				case 70:
+					desc = "Internal software error"
+				case 71:
+					desc = "System error (OS error)"
+				case 72:
+					desc = "Critical OS file missing"
+				case 73:
+					desc = "Cannot create output file"
+				case 74:
+					desc = "I/O error"
+				case 75:
+					desc = "Temporary failure (retry later)"
+				case 76:
+					desc = "Remote protocol error"
+				case 77:
+					desc = "Permission denied"
+				case 78:
+					desc = "Configuration error"
+				}
+				cat = "unknown"
 			}
 		}
 		pct := float64(count) / float64(data.TotalErrors) * 100
@@ -3934,8 +4053,7 @@ func ErrorAnalysisHTML() string {
         .exit-code { font-family: 'Consolas', monospace; font-size: 13px; font-weight: 600; padding: 2px 8px; border-radius: 4px; }
         .exit-code.err { background: rgba(239,68,68,0.15); color: var(--accent-red); }
         .exit-code.ok { background: rgba(34,197,94,0.15); color: var(--accent-green); }
-        .error-text { font-family: 'Consolas', monospace; font-size: 12px; color: var(--accent-red); max-width: 400px; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; cursor: pointer; }
-        .error-text:hover { white-space: normal; word-break: break-word; }
+        .error-text { font-family: 'Consolas', monospace; font-size: 12px; color: var(--accent-red); max-width: 400px; word-break: break-word; }
         .category-badge { display: inline-flex; padding: 3px 8px; border-radius: 12px; font-size: 11px; font-weight: 600; }
         .category-badge.apt { background: rgba(239,68,68,0.15); color: var(--accent-red); }
         .category-badge.network { background: rgba(59,130,246,0.15); color: var(--accent-blue); }
@@ -4013,8 +4131,8 @@ func ErrorAnalysisHTML() string {
             <div class="filter-group">
                 <label>Period:</label>
                 <div class="quickfilter">
-                    <button class="filter-btn" data-days="1">Today</button>
-                    <button class="filter-btn active" data-days="7">7 Days</button>
+                    <button class="filter-btn active" data-days="1">Today</button>
+                    <button class="filter-btn" data-days="7">7 Days</button>
                     <button class="filter-btn" data-days="30">30 Days</button>
                     <button class="filter-btn" data-days="90">90 Days</button>
                 </div>
@@ -4262,13 +4380,27 @@ func ErrorAnalysisHTML() string {
             return str.replace(/&/g,'&amp;').replace(/</g,'&lt;').replace(/>/g,'&gt;').replace(/"/g,'&quot;');
         }
 
+        function escapeAttr(str) {
+            if (!str) return '';
+            return str.replace(/&/g,'&amp;').replace(/</g,'&lt;').replace(/>/g,'&gt;').replace(/"/g,'&quot;').replace(/'/g,'&#39;').replace(/\n/g,'&#10;').replace(/\r/g,'&#13;');
+        }
+
+        function toggleError(id) {
+            var s = document.getElementById(id + '-short');
+            var f = document.getElementById(id + '-full');
+            if (f && s) {
+                if (f.style.display === 'none') { f.style.display = 'block'; s.style.display = 'none'; }
+                else { f.style.display = 'none'; s.style.display = 'block'; }
+            }
+        }
+
         function formatTimestamp(ts) {
             if (!ts) return '-';
             return new Date(ts).toLocaleDateString('en-US', { month: 'short', day: 'numeric', year: 'numeric', hour: 'numeric', minute: '2-digit', hour12: true });
         }
 
         async function fetchData() {
-            const days = document.querySelector('.filter-btn.active')?.dataset.days || '7';
+            const days = document.querySelector('.filter-btn.active')?.dataset.days || '1';
             const repo = document.querySelector('.source-btn.active')?.dataset.repo || 'ProxmoxVE';
             try {
                 const resp = await fetch('/api/errors?days=' + days + '&repo=' + repo);
@@ -4348,10 +4480,14 @@ func ErrorAnalysisHTML() string {
                 tbody.innerHTML = '<tr><td colspan="9" style="text-align:center;color:var(--text-muted);padding:24px;">No matching apps</td></tr>';
                 return;
             }
-            tbody.innerHTML = filtered.map(a => {
+            tbody.innerHTML = filtered.map((a, idx) => {
                 const typeClass = (a.type || '').toLowerCase();
                 const failRateColor = a.failure_rate > 50 ? 'var(--accent-red)' : a.failure_rate > 20 ? 'var(--accent-orange)' : 'var(--accent-yellow)';
                 const topCat = a.top_category ? '<span class="category-badge ' + a.top_category + '">' + escapeHtml(a.top_category) + '</span>' : '-';
+                const errorId = 'err-app-' + idx;
+                const shortError = escapeHtml((a.top_error || '-').substring(0, 80));
+                const fullError = escapeHtml(a.top_error || '-');
+                const isLong = (a.top_error || '').length > 80;
                 return '<tr>' +
                     '<td><strong>' + escapeHtml(a.app) + '</strong></td>' +
                     '<td><span class="type-badge ' + typeClass + '">' + (a.type || '-').toUpperCase() + '</span></td>' +
@@ -4360,8 +4496,11 @@ func ErrorAnalysisHTML() string {
                     '<td style="color:var(--accent-purple);">' + (a.aborted_count || 0) + '</td>' +
                     '<td style="color:' + failRateColor + ';font-weight:600;">' + a.failure_rate.toFixed(1) + '%</td>' +
                     '<td>' + (a.top_exit_code ? '<span class="exit-code err">' + a.top_exit_code + '</span>' : '-') + '</td>' +
-                    '<td class="error-text" title="' + escapeHtml(a.top_error) + '">' + escapeHtml(a.top_error || '-') + '</td>' +
-                    '<td><button class="btn" onclick="openIssueModal(\'' + escapeHtml(a.app) + '\',' + (a.top_exit_code||0) + ',\'' + escapeHtml((a.top_error||'').replace(/'/g,'')) + '\',' + a.failure_rate.toFixed(1) + ')">🐛 Issue</button></td>' +
+                    '<td class="error-text">' +
+                        '<div id="' + errorId + '-short">' + shortError + (isLong ? ' <a href="#" onclick="toggleError(\'' + errorId + '\');return false;" style="color:var(--accent-blue);font-size:11px;">show more</a>' : '') + '</div>' +
+                        (isLong ? '<div id="' + errorId + '-full" style="display:none;white-space:pre-wrap;word-break:break-all;max-height:300px;overflow-y:auto;">' + fullError + ' <a href="#" onclick="toggleError(\'' + errorId + '\');return false;" style="color:var(--accent-blue);font-size:11px;">show less</a></div>' : '') +
+                    '</td>' +
+                    '<td><button class="btn issue-btn" data-app="' + escapeAttr(a.app) + '" data-exit="' + (a.top_exit_code||0) + '" data-error="' + escapeAttr(a.top_error||'') + '" data-rate="' + a.failure_rate.toFixed(1) + '">🐛 Issue</button></td>' +
                 '</tr>';
             }).join('');
         }
@@ -4372,22 +4511,29 @@ func ErrorAnalysisHTML() string {
                 tbody.innerHTML = '<tr><td colspan="9" style="text-align:center;color:var(--text-muted);padding:24px;">No recent errors</td></tr>';
                 return;
             }
-            tbody.innerHTML = errors.map(e => {
+            tbody.innerHTML = errors.map((e, idx) => {
                 const statusClass = e.status || 'unknown';
                 const typeClass = (e.type || '').toLowerCase();
                 const codeClass = e.exit_code === 0 ? 'ok' : 'err';
                 const catClass = (e.error_category || 'unknown').replace(/ /g, '_');
                 const os = e.os_type ? e.os_type + (e.os_version ? ' ' + e.os_version : '') : '-';
+                const errorId = 'err-recent-' + idx;
+                const shortError = escapeHtml((e.error || '-').substring(0, 80));
+                const fullError = escapeHtml(e.error || '-');
+                const isLong = (e.error || '').length > 80;
                 return '<tr>' +
                     '<td><span class="status-badge ' + statusClass + '">' + escapeHtml(e.status) + '</span></td>' +
                     '<td><span class="type-badge ' + typeClass + '">' + (e.type || '-').toUpperCase() + '</span></td>' +
                     '<td><strong>' + escapeHtml(e.nsapp) + '</strong></td>' +
                     '<td><span class="exit-code ' + codeClass + '">' + e.exit_code + '</span></td>' +
                     '<td><span class="category-badge ' + catClass + '">' + escapeHtml(e.error_category || 'unknown') + '</span></td>' +
-                    '<td class="error-text" title="' + escapeHtml(e.error) + '">' + escapeHtml(e.error || '-') + '</td>' +
+                    '<td class="error-text">' +
+                        '<div id="' + errorId + '-short">' + shortError + (isLong ? ' <a href="#" onclick="toggleError(\'' + errorId + '\');return false;" style="color:var(--accent-blue);font-size:11px;">show more</a>' : '') + '</div>' +
+                        (isLong ? '<div id="' + errorId + '-full" style="display:none;white-space:pre-wrap;word-break:break-all;max-height:300px;overflow-y:auto;">' + fullError + ' <a href="#" onclick="toggleError(\'' + errorId + '\');return false;" style="color:var(--accent-blue);font-size:11px;">show less</a></div>' : '') +
+                    '</td>' +
                     '<td>' + escapeHtml(os) + '</td>' +
                     '<td style="white-space:nowrap;">' + formatTimestamp(e.created) + '</td>' +
-                    '<td><button class="btn" onclick="openIssueModal(\'' + escapeHtml(e.nsapp) + '\',' + e.exit_code + ',\'' + escapeHtml((e.error||'').replace(/'/g,'').substring(0,200)) + '\',0)">🐛</button></td>' +
+                    '<td><button class="btn issue-btn" data-app="' + escapeAttr(e.nsapp) + '" data-exit="' + e.exit_code + '" data-error="' + escapeAttr(e.error||'') + '" data-rate="0">🐛</button></td>' +
                 '</tr>';
             }).join('');
         }
@@ -4551,6 +4697,17 @@ func ErrorAnalysisHTML() string {
             });
         });
         document.addEventListener('keydown', e => { if (e.key === 'Escape') { closeIssueModal(); closeCleanupModal(); } });
+
+        // Event delegation for Issue buttons (avoids inline onclick escaping issues)
+        document.addEventListener('click', function(e) {
+            var btn = e.target.closest('.issue-btn');
+            if (!btn) return;
+            var app = btn.getAttribute('data-app') || '';
+            var exitCode = parseInt(btn.getAttribute('data-exit') || '0', 10);
+            var errorText = btn.getAttribute('data-error') || '';
+            var rate = parseFloat(btn.getAttribute('data-rate') || '0');
+            openIssueModal(app, exitCode, errorText, rate);
+        });
 
         // Initial load
         refreshData();
