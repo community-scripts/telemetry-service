@@ -175,18 +175,33 @@ type ErrorTimelinePoint struct {
 // Script Analysis Data Types
 // ========================================================
 
-// FetchKnownScriptSlugs fetches all slugs from script_scripts collection
-func (p *PBClient) FetchKnownScriptSlugs(ctx context.Context) (map[string]bool, error) {
+// ScriptInfo holds slug and type for known scripts
+type ScriptInfo struct {
+	Slug string
+	Type string // "ct", "vm", "pve", "addon", "turnkey"
+}
+
+// type relation ID -> display type mapping
+var scriptTypeIDMap = map[string]string{
+	"nm9bra8mzye2scg": "ct",
+	"lte524abgx960bd": "vm",
+	"1uyjfno0fpf5buh": "pve",
+	"88xtxy57q80v38v": "addon",
+	"fbwvn9nhe3lmc9l": "turnkey",
+}
+
+// FetchKnownScripts fetches all slugs and types from script_scripts collection
+func (p *PBClient) FetchKnownScripts(ctx context.Context) (map[string]ScriptInfo, error) {
 	if err := p.ensureAuth(ctx); err != nil {
 		return nil, err
 	}
 
-	slugs := make(map[string]bool)
+	scripts := make(map[string]ScriptInfo)
 	page := 1
 	perPage := 500
 
 	for {
-		reqURL := fmt.Sprintf("%s/api/collections/script_scripts/records?fields=slug&page=%d&perPage=%d",
+		reqURL := fmt.Sprintf("%s/api/collections/script_scripts/records?fields=slug,type&page=%d&perPage=%d",
 			p.baseURL, page, perPage)
 
 		req, err := http.NewRequestWithContext(ctx, http.MethodGet, reqURL, nil)
@@ -208,8 +223,11 @@ func (p *PBClient) FetchKnownScriptSlugs(ctx context.Context) (map[string]bool, 
 		}
 
 		var result struct {
-			Items      []struct{ Slug string `json:"slug"` } `json:"items"`
-			TotalItems int                                    `json:"totalItems"`
+			Items []struct {
+				Slug string `json:"slug"`
+				Type string `json:"type"`
+			} `json:"items"`
+			TotalItems int `json:"totalItems"`
 		}
 		if err := json.NewDecoder(resp.Body).Decode(&result); err != nil {
 			resp.Body.Close()
@@ -219,17 +237,21 @@ func (p *PBClient) FetchKnownScriptSlugs(ctx context.Context) (map[string]bool, 
 
 		for _, item := range result.Items {
 			if item.Slug != "" {
-				slugs[item.Slug] = true
+				displayType := scriptTypeIDMap[item.Type]
+				if displayType == "" {
+					displayType = item.Type
+				}
+				scripts[item.Slug] = ScriptInfo{Slug: item.Slug, Type: displayType}
 			}
 		}
 
-		if len(slugs) >= result.TotalItems || len(result.Items) == 0 {
+		if len(scripts) >= result.TotalItems || len(result.Items) == 0 {
 			break
 		}
 		page++
 	}
 
-	return slugs, nil
+	return scripts, nil
 }
 
 type ScriptAnalysisData struct {
@@ -269,12 +291,12 @@ func (p *PBClient) FetchScriptAnalysisData(ctx context.Context, days int, repoSo
 	}
 
 	// Fetch known scripts from script_scripts to filter against
-	knownSlugs, err := p.FetchKnownScriptSlugs(ctx)
+	knownScripts, err := p.FetchKnownScripts(ctx)
 	if err != nil {
-		log.Printf("[ERROR] could not fetch known script slugs: %v — script filter will not be applied", err)
-		knownSlugs = nil
+		log.Printf("[ERROR] could not fetch known scripts: %v — script filter will not be applied", err)
+		knownScripts = nil
 	} else {
-		log.Printf("[INFO] loaded %d known script slugs for filtering", len(knownSlugs))
+		log.Printf("[INFO] loaded %d known scripts for filtering", len(knownScripts))
 	}
 
 	var filterParts []string
@@ -303,9 +325,9 @@ func (p *PBClient) FetchScriptAnalysisData(ctx context.Context, days int, repoSo
 
 	// Filter records to only known scripts (if slug list available)
 	var records []TelemetryRecord
-	if knownSlugs != nil && len(knownSlugs) > 0 {
+	if knownScripts != nil && len(knownScripts) > 0 {
 		for _, r := range result.Records {
-			if knownSlugs[r.NSAPP] {
+			if _, ok := knownScripts[r.NSAPP]; ok {
 				records = append(records, r)
 			}
 		}
@@ -400,6 +422,26 @@ func (p *PBClient) FetchScriptAnalysisData(ctx context.Context, days int, repoSo
 			SuccessRate: rate,
 		})
 	}
+
+	// Add zero-usage scripts from script_scripts (only for 30d+ and All Time, not 7d)
+	if knownScripts != nil && (days == 0 || days >= 30) {
+		for slug, info := range knownScripts {
+			if !uniqueApps[slug] {
+				data.TopScripts = append(data.TopScripts, ScriptStat{
+					App:         slug,
+					Type:        info.Type,
+					Total:       0,
+					Success:     0,
+					Failed:      0,
+					Aborted:     0,
+					Installing:  0,
+					SuccessRate: 0,
+				})
+				data.TotalScripts++
+			}
+		}
+	}
+
 	// Sort by total desc
 	for i := 0; i < len(data.TopScripts); i++ {
 		for j := i + 1; j < len(data.TopScripts); j++ {
