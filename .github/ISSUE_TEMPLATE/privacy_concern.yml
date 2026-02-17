@@ -1,0 +1,46 @@
+name: "🔒 Privacy Concern"
+description: Report a privacy or data protection concern related to telemetry collection.
+labels: ["privacy"]
+body:
+  - type: markdown
+    attributes:
+      value: |
+        ## Privacy Concern
+        We take your privacy seriously. Please describe your concern and we'll address it promptly.
+
+        Before submitting, you may want to review:
+        - [Privacy & Telemetry Documentation](https://github.com/community-scripts/telemetry-service/blob/main/docs/PRIVACY.md)
+        - [Records of Processing Activities (ROPA)](https://github.com/community-scripts/telemetry-service/blob/main/docs/ROPA.md)
+        - [Technical & Organizational Measures (TOMS)](https://github.com/community-scripts/telemetry-service/blob/main/docs/TOMS.md)
+
+  - type: dropdown
+    id: concern_type
+    attributes:
+      label: 📋 Type of Concern
+      options:
+        - ""
+        - "Data being collected that shouldn't be"
+        - "Opt-out not working as expected"
+        - "Question about data processing / storage"
+        - "Data deletion request"
+        - "GDPR / DSGVO related inquiry"
+        - "Other privacy concern"
+    validations:
+      required: true
+
+  - type: textarea
+    id: description
+    attributes:
+      label: 📝 Description
+      description: Describe your concern in detail. If you believe specific data is being collected that shouldn't be, please explain what you observed.
+      placeholder: "I noticed that the telemetry payload seems to include..."
+    validations:
+      required: true
+
+  - type: textarea
+    id: evidence
+    attributes:
+      label: 📎 Evidence (optional)
+      description: If applicable, provide log output, network captures, or screenshots that show the concern. Redact any sensitive information.
+    validations:
+      required: false

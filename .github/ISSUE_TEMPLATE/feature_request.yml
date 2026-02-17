@@ -1,0 +1,41 @@
+name: "✨ Feature Request"
+description: Suggest an improvement for the telemetry service or dashboard.
+labels: ["enhancement"]
+body:
+  - type: markdown
+    attributes:
+      value: |
+        ## Feature Request
+        Have an idea to improve the telemetry service or dashboard? We'd love to hear it!
+
+  - type: dropdown
+    id: area
+    attributes:
+      label: 📦 Area
+      options:
+        - ""
+        - "Dashboard - new chart / visualization"
+        - "Dashboard - UI / UX improvement"
+        - "API - new endpoint or field"
+        - "Data analysis / error tracking"
+        - "Alerting / notifications"
+        - "Other"
+    validations:
+      required: true
+
+  - type: textarea
+    id: description
+    attributes:
+      label: 📝 Description
+      description: Describe the feature you'd like to see. What problem does it solve?
+      placeholder: "It would be helpful if the dashboard showed..."
+    validations:
+      required: true
+
+  - type: textarea
+    id: alternatives
+    attributes:
+      label: 🔄 Alternatives Considered
+      description: Have you considered any workarounds or alternative approaches?
+    validations:
+      required: false

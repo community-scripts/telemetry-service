@@ -1,0 +1,52 @@
+name: "🐞 Bug Report"
+description: Report an issue with the telemetry service, dashboard, or data collection.
+labels: ["bug"]
+body:
+  - type: markdown
+    attributes:
+      value: |
+        ## Bug Report
+        Please describe the issue you encountered. Check [existing issues](https://github.com/community-scripts/telemetry-service/issues?q=is%3Aissue) first to avoid duplicates.
+
+  - type: dropdown
+    id: component
+    attributes:
+      label: 📦 Affected Component
+      options:
+        - ""
+        - "Dashboard (telemetry.community-scripts.org)"
+        - "Telemetry API (data ingestion)"
+        - "Data accuracy / missing records"
+        - "Opt-in / Opt-out mechanism"
+        - "Other"
+    validations:
+      required: true
+
+  - type: textarea
+    id: description
+    attributes:
+      label: 📝 Description
+      description: Describe the bug clearly. What did you expect, and what happened instead?
+      placeholder: "When I look at the dashboard, the failure rate for script X shows 100% but it installed fine..."
+    validations:
+      required: true
+
+  - type: textarea
+    id: steps
+    attributes:
+      label: 🔄 Steps to Reproduce
+      description: How can we reproduce this issue?
+      placeholder: |
+        1. Go to the dashboard
+        2. Filter by application "xyz"
+        3. Notice incorrect data
+    validations:
+      required: false
+
+  - type: textarea
+    id: context
+    attributes:
+      label: 📋 Additional Context
+      description: Screenshots, log output, PVE version, or anything else that might help.
+    validations:
+      required: false

@@ -1,0 +1,11 @@
+blank_issues_enabled: false
+contact_links:
+    - name: 📊 Telemetry Dashboard
+      url: https://telemetry.community-scripts.org
+      about: View the live telemetry dashboard with aggregated statistics.
+    - name: 🔒 Privacy Documentation
+      url: https://github.com/community-scripts/telemetry-service/blob/main/docs/PRIVACY.md
+      about: Read what data is collected, how it's processed, and how to opt out.
+    - name: 💻 Discord
+      url: https://discord.gg/jsYVk5JBxq
+      about: Join our Discord server to chat with the community.
