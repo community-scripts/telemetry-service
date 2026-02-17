@@ -75,7 +75,7 @@ type TelemetryIn struct {
 	// Required
 	RandomID    string `json:"random_id"`         // Session UUID
 	ExecutionID string `json:"execution_id,omitempty"` // Unique execution ID (unique-indexed in PocketBase)
-	Type        string `json:"type"`              // "lxc", "vm", "tool", "addon"
+	Type        string `json:"type"`              // "lxc", "vm", "pve", "addon"
 	NSAPP       string `json:"nsapp"`             // Application name (e.g., "jellyfin")
 	Status      string `json:"status"`            // "installing", "success", "failed", "aborted", "unknown"
 
@@ -671,7 +671,7 @@ func getClientIP(r *http.Request, pt *ProxyTrust) net.IP {
 
 var (
 	// Allowed values for 'type' field
-	allowedType = map[string]bool{"lxc": true, "vm": true, "tool": true, "addon": true}
+	allowedType = map[string]bool{"lxc": true, "vm": true, "pve": true, "addon": true}
 
 	// Allowed values for 'status' field
 	allowedStatus = map[string]bool{"installing": true, "configuring": true, "success": true, "failed": true, "aborted": true, "unknown": true}

@@ -1731,8 +1731,8 @@ func (p *PBClient) FetchDashboardData(ctx context.Context, days int, repoSource 
 
 		// === Extended metrics tracking ===
 
-		// Track tool executions (type="tool", tool name is in nsapp)
-		if r.Type == "tool" && r.NSAPP != "" {
+		// Track PVE tool executions (type="pve", tool name is in nsapp)
+		if r.Type == "pve" && r.NSAPP != "" {
 			toolCounts[r.NSAPP]++
 			data.TotalTools++
 		}
