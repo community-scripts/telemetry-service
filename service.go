@@ -4,11 +4,13 @@ import (
 	"bytes"
 	"context"
 	"crypto/sha256"
+	"embed"
 	"encoding/hex"
 	"encoding/json"
 	"errors"
 	"fmt"
 	"io"
+	"io/fs"
 	"log"
 	"net"
 	"net/http"
@@ -18,6 +20,9 @@ import (
 	"sync"
 	"time"
 )
+
+//go:embed public
+var publicFS embed.FS
 
 type Config struct {
 	ListenAddr         string
@@ -943,14 +948,14 @@ func categorizeErrorText(errLower string) string {
 // -------- HTTP server --------
 
 func serveHTMLFile(w http.ResponseWriter, r *http.Request, filePath string) {
-	content, err := os.ReadFile(filePath)
+	content, err := publicFS.ReadFile(filePath)
 	if err != nil {
-		if os.IsNotExist(err) {
+		if errors.Is(err, fs.ErrNotExist) {
 			http.NotFound(w, r)
 			return
 		}
 		http.Error(w, "Internal server error", http.StatusInternalServerError)
-		log.Printf("Error reading file %s: %v", filePath, err)
+		log.Printf("Error reading embedded file %s: %v", filePath, err)
 		return
 	}
 	w.Header().Set("Content-Type", "text/html; charset=utf-8")
@@ -1518,7 +1523,12 @@ func main() {
 	})
 
 	// Serve static files from the /public/static directory
-	mux.Handle("/static/", http.StripPrefix("/static/", http.FileServer(http.Dir("public/static"))))
+	// Serve embedded static files
+	staticFS, err := fs.Sub(publicFS, "public/static")
+	if err != nil {
+		log.Fatalf("Failed to create static FS: %v", err)
+	}
+	mux.Handle("/static/", http.StripPrefix("/static/", http.FileServer(http.FS(staticFS))))
 
 	// Cleanup trigger & status API
 	mux.HandleFunc("/api/cleanup/status", func(w http.ResponseWriter, r *http.Request) {
