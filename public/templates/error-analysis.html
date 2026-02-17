@@ -1,0 +1,279 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Error Analysis - Proxmox VE Helper-Scripts</title>
+    <link rel="icon" href="data:image/svg+xml,<svg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 100 100'><text y='.9em' font-size='90'>🔍</text></svg>">
+    <script src="https://cdn.jsdelivr.net/npm/chart.js"></script>
+    <script src="/static/js/svg-inliner.js" defer></script>
+    <link rel="preconnect" href="https://fonts.googleapis.com">
+    <link href="https://fonts.googleapis.com/css2?family=Inter:wght@400;500;600;700&display=swap" rel="stylesheet">
+    <link rel="stylesheet" href="/static/css/error-analysis.css">
+</head>
+<body>
+    <nav class="navbar">
+        <a href="/" class="navbar-brand">
+            <img width="28" src="/static/img/logo.png" alt="">
+            Proxmox VE Helper-Scripts
+        </a>
+        <div class="nav-links">
+            <a href="/" class="nav-link">📊 Dashboard</a>
+            <a href="/error-analysis" class="nav-link active">🔍 Error Analysis</a>
+            <a href="/script-analysis" class="nav-link">📜 Scripts</a>
+        </div>
+    </nav>
+
+    <div class="main-content">
+        <div class="page-header">
+            <h1>🔍 Error Analysis</h1>
+            <p>Detailed error and failure analysis with exit code breakdowns.</p>
+        </div>
+
+        <!-- Filters -->
+        <div class="filters-bar" style="background: var(--bg-card); border: 1px solid var(--border-color); border-radius: 12px; margin-bottom: 24px;">
+            <div class="filter-group">
+                <label>Source:</label>
+                <div class="quickfilter">
+                    <button class="source-btn active" data-repo="ProxmoxVE">ProxmoxVE</button>
+                    <button class="source-btn" data-repo="ProxmoxVED">ProxmoxVED</button>
+                    <button class="source-btn" data-repo="all">All</button>
+                </div>
+            </div>
+            <div class="filter-divider"></div>
+            <div class="filter-group">
+                <label>Period:</label>
+                <div class="quickfilter">
+                    <button class="filter-btn active" data-days="1">Today</button>
+                    <button class="filter-btn" data-days="7">7 Days</button>
+                    <button class="filter-btn" data-days="30">30 Days</button>
+                    <button class="filter-btn" data-days="90">90 Days</button>
+                </div>
+            </div>
+            <div style="margin-left: auto;">
+                <button class="btn" onclick="refreshData()">
+                    <img src="/static/img/refresh.svg" alt="">
+                    Refresh
+                </button>
+            </div>
+        </div>
+
+        <!-- Stuck Installing Banner -->
+        <div id="stuckBanner" class="stuck-banner" style="display: none;">
+            <div>
+                <strong>⚠️ <span id="stuckCount">0</span> installations stuck in "Installing" state</strong>
+                <div style="font-size: 12px; margin-top: 4px;">These records have not received a completion status. Cleanup runs every 15 min for records older than 2h.</div>
+            </div>
+            <button class="btn btn-danger" onclick="triggerCleanup()">🧹 Run Cleanup Now</button>
+        </div>
+
+        <!-- Stats Cards -->
+        <div class="stats-grid">
+            <div class="stat-card red">
+                <div class="label">Total Errors</div>
+                <div class="value" id="totalErrors">-</div>
+                <div class="sub">failed + aborted</div>
+            </div>
+            <div class="stat-card orange">
+                <div class="label">Overall Failure Rate</div>
+                <div class="value" id="failRate">-</div>
+                <div class="sub">of all installations</div>
+            </div>
+            <div class="stat-card yellow">
+                <div class="label">Stuck Installing</div>
+                <div class="value" id="stuckCount2">-</div>
+                <div class="sub">no completion received</div>
+            </div>
+            <div class="stat-card purple">
+                <div class="label">Total Installations</div>
+                <div class="value" id="totalInstalls">-</div>
+                <div class="sub">in selected period</div>
+            </div>
+        </div>
+
+        <!-- Charts -->
+        <div class="charts-grid">
+            <div class="chart-card">
+                <h3>Error Timeline</h3>
+                <div class="chart-wrapper"><canvas id="timelineChart"></canvas></div>
+            </div>
+            <div class="chart-card">
+                <h3>Error Categories</h3>
+                <div class="chart-wrapper"><canvas id="categoryChart"></canvas></div>
+            </div>
+        </div>
+
+        <!-- Exit Code Distribution -->
+        <div class="section-card">
+            <div class="section-header">
+                <div>
+                    <h2>Exit Code Distribution</h2>
+                    <p>Breakdown of all exit codes returned by failed scripts.</p>
+                </div>
+            </div>
+            <div class="table-wrapper">
+                <table>
+                    <thead>
+                        <tr>
+                            <th>Exit Code</th>
+                            <th>Description</th>
+                            <th>Category</th>
+                            <th>Count</th>
+                            <th>Percentage</th>
+                            <th>Distribution</th>
+                        </tr>
+                    </thead>
+                    <tbody id="exitCodeTable">
+                        <tr><td colspan="6"><div class="loading"><div class="loading-spinner"></div>Loading...</div></td></tr>
+                    </tbody>
+                </table>
+            </div>
+        </div>
+
+        <!-- Error Categories -->
+        <div class="section-card">
+            <div class="section-header">
+                <div>
+                    <h2>Error Categories</h2>
+                    <p>Grouped errors by type with affected applications.</p>
+                </div>
+            </div>
+            <div class="table-wrapper">
+                <table>
+                    <thead>
+                        <tr>
+                            <th>Category</th>
+                            <th>Count</th>
+                            <th>Percentage</th>
+                            <th>Affected Apps</th>
+                        </tr>
+                    </thead>
+                    <tbody id="categoryTable">
+                        <tr><td colspan="4"><div class="loading"><div class="loading-spinner"></div>Loading...</div></td></tr>
+                    </tbody>
+                </table>
+            </div>
+        </div>
+
+        <!-- Apps with Errors -->
+        <div class="section-card">
+            <div class="section-header">
+                <div>
+                    <h2>Applications with Errors</h2>
+                    <p>All apps that experienced failures, sorted by error count.</p>
+                </div>
+                <div style="display: flex; gap: 8px;">
+                    <input type="text" id="appFilter" placeholder="Filter by app name..." style="background: var(--bg-secondary); border: 1px solid var(--border-color); color: var(--text-primary); padding: 8px 14px; border-radius: 8px; font-size: 13px; outline: none; width: 200px;" oninput="filterAppTable()">
+                </div>
+            </div>
+            <div class="table-wrapper">
+                <table>
+                    <thead>
+                        <tr>
+                            <th>Application</th>
+                            <th>Type</th>
+                            <th>Total</th>
+                            <th>Failed</th>
+                            <th>Aborted</th>
+                            <th>Fail Rate</th>
+                            <th>Top Exit Code</th>
+                            <th>Top Error</th>
+                            <th>Actions</th>
+                        </tr>
+                    </thead>
+                    <tbody id="appErrorTable">
+                        <tr><td colspan="9"><div class="loading"><div class="loading-spinner"></div>Loading...</div></td></tr>
+                    </tbody>
+                </table>
+            </div>
+        </div>
+
+        <!-- Recent Error Log -->
+        <div class="section-card">
+            <div class="section-header">
+                <div>
+                    <h2>Recent Error Log</h2>
+                    <p>Last 100 failed or aborted installations.</p>
+                </div>
+            </div>
+            <div class="table-wrapper">
+                <table>
+                    <thead>
+                        <tr>
+                            <th>Status</th>
+                            <th>Type</th>
+                            <th>Application</th>
+                            <th>Exit Code</th>
+                            <th>Category</th>
+                            <th>Error</th>
+                            <th>OS</th>
+                            <th>Timestamp</th>
+                            <th>Actions</th>
+                        </tr>
+                    </thead>
+                    <tbody id="recentErrorTable">
+                        <tr><td colspan="9"><div class="loading"><div class="loading-spinner"></div>Loading...</div></td></tr>
+                    </tbody>
+                </table>
+            </div>
+        </div>
+    </div>
+
+    <!-- GitHub Issue Modal -->
+    <div class="modal-overlay" id="issueModal" onclick="if(event.target===this)closeIssueModal()">
+        <div class="modal-content" onclick="event.stopPropagation()">
+            <div class="modal-header">
+                <h2>🐛 Create GitHub Issue</h2>
+                <button class="modal-close" onclick="closeIssueModal()">&times;</button>
+            </div>
+            <div class="modal-body">
+                <div id="issueAlert" class="alert-box" style="display: none;"></div>
+                <div class="form-group">
+                    <label>Admin Password *</label>
+                    <input type="password" id="issuePassword" class="form-input" placeholder="Enter admin password...">
+                </div>
+                <div class="form-group">
+                    <label>Issue Title</label>
+                    <input type="text" id="issueTitle" class="form-input">
+                </div>
+                <div class="form-group">
+                    <label>Issue Body</label>
+                    <textarea id="issueBody" class="form-input"></textarea>
+                </div>
+                <div class="form-group">
+                    <label>Labels (comma-separated)</label>
+                    <input type="text" id="issueLabels" class="form-input" value="bug, telemetry">
+                </div>
+                <div style="display: flex; gap: 8px; justify-content: flex-end; margin-top: 20px;">
+                    <button class="btn" onclick="closeIssueModal()">Cancel</button>
+                    <button class="btn btn-primary" id="submitIssueBtn" onclick="submitIssue()">Create Issue</button>
+                </div>
+            </div>
+        </div>
+    </div>
+
+    <!-- Cleanup Modal -->
+    <div class="modal-overlay" id="cleanupModal" onclick="if(event.target===this)closeCleanupModal()">
+        <div class="modal-content" onclick="event.stopPropagation()">
+            <div class="modal-header">
+                <h2>🧹 Trigger Cleanup</h2>
+                <button class="modal-close" onclick="closeCleanupModal()">&times;</button>
+            </div>
+            <div class="modal-body">
+                <div id="cleanupAlert" class="alert-box" style="display: none;"></div>
+                <p style="margin-bottom: 16px; color: var(--text-secondary);">This will mark all stuck "Installing" records (older than 2h) as "unknown". This action requires the admin password.</p>
+                <div class="form-group">
+                    <label>Admin Password *</label>
+                    <input type="password" id="cleanupPassword" class="form-input" placeholder="Enter admin password...">
+                </div>
+                <div style="display: flex; gap: 8px; justify-content: flex-end; margin-top: 20px;">
+                    <button class="btn" onclick="closeCleanupModal()">Cancel</button>
+                    <button class="btn btn-danger" id="runCleanupBtn" onclick="runCleanup()">Run Cleanup</button>
+                </div>
+            </div>
+        </div>
+    </div>
+
+    <script src="/static/js/error-analysis.js"></script>
+</body>
+</html>

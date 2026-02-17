@@ -942,6 +942,22 @@ func categorizeErrorText(errLower string) string {
 
 // -------- HTTP server --------
 
+func serveHTMLFile(w http.ResponseWriter, r *http.Request, filePath string) {
+	content, err := os.ReadFile(filePath)
+	if err != nil {
+		if os.IsNotExist(err) {
+			http.NotFound(w, r)
+			return
+		}
+		http.Error(w, "Internal server error", http.StatusInternalServerError)
+		log.Printf("Error reading file %s: %v", filePath, err)
+		return
+	}
+	w.Header().Set("Content-Type", "text/html; charset=utf-8")
+	w.Header().Set("Cache-Control", "no-cache, no-store, must-revalidate")
+	_, _ = w.Write(content)
+}
+
 func main() {
 	cfg := Config{
 		ListenAddr:         env("LISTEN_ADDR", ":8080"),
@@ -1074,14 +1090,12 @@ func main() {
 			http.NotFound(w, r)
 			return
 		}
-		w.Header().Set("Content-Type", "text/html; charset=utf-8")
-		w.Header().Set("Cache-Control", "no-cache, no-store, must-revalidate")
-		_, _ = w.Write([]byte(DashboardHTML()))
+		serveHTMLFile(w, r, "public/templates/dashboard.html")
 	})
 
 	// Redirect /dashboard to / for backwards compatibility
 	mux.HandleFunc("/dashboard", func(w http.ResponseWriter, r *http.Request) {
-		http.Redirect(w, r, "/", http.StatusMovedPermanently)
+		serveHTMLFile(w, r, "public/templates/dashboard.html")
 	})
 
 	// Prometheus-style metrics endpoint
@@ -1309,16 +1323,12 @@ func main() {
 
 	// Error Analysis page
 	mux.HandleFunc("/error-analysis", func(w http.ResponseWriter, r *http.Request) {
-		w.Header().Set("Content-Type", "text/html; charset=utf-8")
-		w.Header().Set("Cache-Control", "no-cache, no-store, must-revalidate")
-		_, _ = w.Write([]byte(ErrorAnalysisHTML()))
+		serveHTMLFile(w, r, "public/templates/error-analysis.html")
 	})
 
 	// Script Analysis page
 	mux.HandleFunc("/script-analysis", func(w http.ResponseWriter, r *http.Request) {
-		w.Header().Set("Content-Type", "text/html; charset=utf-8")
-		w.Header().Set("Cache-Control", "no-cache, no-store, must-revalidate")
-		_, _ = w.Write([]byte(ScriptAnalysisHTML()))
+		serveHTMLFile(w, r, "public/templates/script-analysis.html")
 	})
 
 	// Script Analysis API
@@ -1506,6 +1516,9 @@ func main() {
 		w.Header().Set("Content-Type", "application/json")
 		json.NewEncoder(w).Encode(exitCodeDescriptions)
 	})
+
+	// Serve static files from the /public/static directory
+	mux.Handle("/static/", http.StripPrefix("/static/", http.FileServer(http.Dir("public/static"))))
 
 	// Cleanup trigger & status API
 	mux.HandleFunc("/api/cleanup/status", func(w http.ResponseWriter, r *http.Request) {

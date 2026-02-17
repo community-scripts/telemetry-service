@@ -1,0 +1,149 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Script Analysis - Proxmox VE Helper-Scripts</title>
+    <link rel="icon" type="image/png" href="/static/img/logo.png">
+    <link rel="stylesheet" href="/static/css/script-analysis.css">
+</head>
+<body>
+    <nav class="navbar">
+        <a href="/" class="navbar-brand">
+            <img width="28" src="/static/img/logo.png" alt="">
+            Proxmox VE Helper-Scripts
+        </a>
+        <div class="nav-links">
+            <a href="/" class="nav-link">📊 Dashboard</a>
+            <a href="/error-analysis" class="nav-link">🔍 Error Analysis</a>
+            <a href="/script-analysis" class="nav-link active">📜 Script Analysis</a>
+        </div>
+    </nav>
+
+    <div class="main-content">
+        <div class="page-header">
+            <h1>📜 Script Analysis</h1>
+            <p>Script usage statistics, popularity rankings, and recent activity.</p>
+        </div>
+
+        <div class="filters-bar" style="background: var(--bg-card); border: 1px solid var(--border-color); border-radius: 12px; margin-bottom: 24px;">
+            <div class="filter-group">
+                <label>Period:</label>
+                <div class="quickfilter">
+                    <button class="filter-btn" data-days="7">7 Days</button>
+                    <button class="filter-btn active" data-days="30">30 Days</button>
+                    <button class="filter-btn" data-days="0">All Time</button>
+                </div>
+            </div>
+        </div>
+
+        <!-- Stats -->
+        <div class="stats-grid">
+            <div class="stat-card">
+                <div class="label">Total Installs</div>
+                <div class="value" id="totalInstalls" style="color:var(--accent-cyan);">-</div>
+            </div>
+            <div class="stat-card">
+                <div class="label">Unique Scripts</div>
+                <div class="value" id="uniqueScripts" style="color:var(--accent-blue);">-</div>
+            </div>
+            <div class="stat-card">
+                <div class="label">Avg Installs / Script</div>
+                <div class="value" id="avgInstalls" style="color:var(--accent-green);">-</div>
+            </div>
+        </div>
+
+        <!-- Top Scripts -->
+        <div class="section-card">
+            <h2>
+                🏆 Most Used Scripts
+                <div style="display:flex;gap:8px;align-items:center;">
+                    <input type="text" class="search-input" id="searchTop" placeholder="Search scripts..." oninput="renderTopTable()">
+                    <button class="btn btn-sm" id="expandTopBtn" onclick="toggleExpand('top')">Show All</button>
+                </div>
+            </h2>
+            <div class="table-wrap" id="topTableWrap">
+                <table>
+                    <thead>
+                        <tr>
+                            <th>#</th>
+                            <th>Script</th>
+                            <th>Type</th>
+                            <th>Total</th>
+                            <th>Success</th>
+                            <th>Failed</th>
+                            <th>Aborted</th>
+                            <th>Installing</th>
+                            <th>Success Rate</th>
+                            <th>Installs/Day</th>
+                            <th style="min-width:100px;">Distribution</th>
+                        </tr>
+                    </thead>
+                    <tbody id="topTableBody"></tbody>
+                </table>
+            </div>
+        </div>
+
+        <!-- Least Used Scripts -->
+        <div class="section-card">
+            <h2>
+                📉 Least Used Scripts
+                <div style="display:flex;gap:8px;align-items:center;">
+                    <input type="text" class="search-input" id="searchBottom" placeholder="Search scripts..." oninput="renderBottomTable()">
+                    <button class="btn btn-sm" id="expandBottomBtn" onclick="toggleExpand('bottom')">Show All</button>
+                </div>
+            </h2>
+            <div class="table-wrap" id="bottomTableWrap">
+                <table>
+                    <thead>
+                        <tr>
+                            <th>#</th>
+                            <th>Script</th>
+                            <th>Type</th>
+                            <th>Total</th>
+                            <th>Success</th>
+                            <th>Failed</th>
+                            <th>Aborted</th>
+                            <th>Installing</th>
+                            <th>Success Rate</th>
+                            <th>Installs/Day</th>
+                            <th style="min-width:100px;">Distribution</th>
+                        </tr>
+                    </thead>
+                    <tbody id="bottomTableBody"></tbody>
+                </table>
+            </div>
+        </div>
+
+        <!-- Recent Scripts -->
+        <div class="section-card">
+            <h2>
+                🕐 Recent Activity
+                <div style="display:flex;gap:8px;align-items:center;">
+                    <input type="text" class="search-input" id="searchRecent" placeholder="Search..." oninput="renderRecentTable()">
+                    <button class="btn btn-sm" id="expandRecentBtn" onclick="toggleExpand('recent')">Show All</button>
+                </div>
+            </h2>
+            <div class="table-wrap" id="recentTableWrap">
+                <table>
+                    <thead>
+                        <tr>
+                            <th>Script</th>
+                            <th>Type</th>
+                            <th>Status</th>
+                            <th>Exit Code</th>
+                            <th>OS</th>
+                            <th>PVE</th>
+                            <th>Method</th>
+                            <th>Time</th>
+                        </tr>
+                    </thead>
+                    <tbody id="recentTableBody"></tbody>
+                </table>
+            </div>
+        </div>
+    </div>
+
+    <script src="/static/js/script-analysis.js"></script>
+</body>
+</html>
