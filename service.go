@@ -630,12 +630,12 @@ var (
 	// Allowed values for 'cpu_vendor' field
 	allowedCPUVendor = map[string]bool{"intel": true, "amd": true, "arm": true, "apple": true, "qualcomm": true, "unknown": true, "": true}
 
-	// Allowed values for 'error_category' field
+	// Allowed values for 'error_category' field (must match PocketBase schema)
 	allowedErrorCategory = map[string]bool{
 		"network": true, "storage": true, "dependency": true, "permission": true,
 		"timeout": true, "config": true, "resource": true, "unknown": true, "": true,
-		"user_aborted": true, "apt": true, "command_not_found": true, "signal": true,
-		"service": true, "database": true, "proxmox": true,
+		"user_aborted": true, "apt": true, "command_not_found": true,
+		"service": true, "database": true, "signal": true, "proxmox": true,
 	}
 
 	// exitCodeCategories maps well-known exit codes to error categories
@@ -912,7 +912,7 @@ func categorizeErrorText(errLower string) string {
 		strings.Contains(errLower, "sigkill") {
 		return "resource"
 	}
-	// Signal-related
+	// Signal-related errors
 	if strings.Contains(errLower, "sighup") ||
 		strings.Contains(errLower, "sigquit") ||
 		strings.Contains(errLower, "sigterm") ||
