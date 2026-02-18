@@ -4,11 +4,13 @@ import (
 	"bytes"
 	"context"
 	"crypto/sha256"
+	"embed"
 	"encoding/hex"
 	"encoding/json"
 	"errors"
 	"fmt"
 	"io"
+	"io/fs"
 	"log"
 	"net"
 	"net/http"
@@ -18,6 +20,9 @@ import (
 	"sync"
 	"time"
 )
+
+//go:embed public
+var publicFS embed.FS
 
 type Config struct {
 	ListenAddr         string
@@ -65,11 +70,7 @@ type TelemetryIn struct {
 	RandomID string `json:"random_id"`         // Session UUID
 	Type     string `json:"type"`              // "lxc", "vm", "tool", "addon"
 	NSAPP    string `json:"nsapp"`             // Application name (e.g., "jellyfin")
-	Status   string `json:"status"`            // "installing", "configuring", "success", "failed", "aborted", "unknown"
-
-	// Session tracking (ignored by storage, accepted to prevent unknown-field rejection)
-	ExecutionID string `json:"execution_id,omitempty"` // Execution UUID (from bash scripts)
-	SessionID   string `json:"session_id,omitempty"`   // Session UUID (from bash scripts)
+	Status   string `json:"status"`            // "installing", "success", "failed", "aborted", "unknown"
 
 	// Container/VM specs
 	CTType    int `json:"ct_type,omitempty"`    // 1=unprivileged, 2=privileged/VM
@@ -340,9 +341,6 @@ func (p *PBClient) FetchRecordsPaginated(ctx context.Context, page, limit int, s
 		} else if status == "failed" {
 			// Exclude SIGINT records from "failed" (they are reclassified as "aborted")
 			filters = append(filters, "(status='failed' && exit_code!=130 && !(error~'SIGINT') && !(error~'Ctrl+C') && !(error~'Ctrl-C'))")
-		} else if status == "installing" {
-			// Include both "installing" and "configuring" (configuring = install in progress)
-			filters = append(filters, "(status='installing' || status='configuring')")
 		} else {
 			filters = append(filters, fmt.Sprintf("status='%s'", status))
 		}
@@ -417,16 +415,14 @@ func (p *PBClient) FetchRecordsPaginated(ctx context.Context, page, limit int, s
 // All records go to the same collection; repo_source is stored as a field.
 //
 // For status="installing": always creates a new record.
-// For status="configuring": updates existing record status (progress ping from container).
-// For terminal statuses (success/failed/aborted/unknown): updates existing record.
+// For status!="installing": updates existing record (found by random_id).
 func (p *PBClient) UpsertTelemetry(ctx context.Context, payload TelemetryOut) error {
 	// For "installing" status, always create new record
 	if payload.Status == "installing" {
 		return p.CreateTelemetry(ctx, payload)
 	}
 
-	// For all other statuses (configuring, success, failed, aborted, unknown),
-	// find and update the existing record
+	// For status updates (success/failed/unknown), find and update existing record
 	recordID, err := p.FindRecordByRandomID(ctx, payload.RandomID)
 	if err != nil {
 		// Search failed, log and return error
@@ -434,13 +430,8 @@ func (p *PBClient) UpsertTelemetry(ctx context.Context, payload TelemetryOut) er
 	}
 
 	if recordID == "" {
-		// Record not found - for configuring, just silently ignore (the initial
-		// record may not have been created yet). For terminal statuses, create
-		// a full record as fallback.
-		if payload.Status == "configuring" {
-			log.Printf("INFO: configuring update for unknown random_id=%s nsapp=%s - ignored", payload.RandomID, payload.NSAPP)
-			return nil
-		}
+		// Record not found - this shouldn't happen normally
+		// Create a full record as fallback
 		return p.CreateTelemetry(ctx, payload)
 	}
 
@@ -614,7 +605,7 @@ var (
 	allowedType = map[string]bool{"lxc": true, "vm": true, "tool": true, "addon": true}
 
 	// Allowed values for 'status' field
-	allowedStatus = map[string]bool{"installing": true, "configuring": true, "success": true, "failed": true, "aborted": true, "unknown": true}
+	allowedStatus = map[string]bool{"installing": true, "success": true, "failed": true, "aborted": true, "unknown": true}
 
 	// Allowed values for 'os_type' field
 	allowedOsType = map[string]bool{
@@ -778,6 +769,23 @@ func validate(in *TelemetryIn) error {
 	return nil
 }
 
+// serveHTMLFile serves an embedded HTML file
+func serveHTMLFile(w http.ResponseWriter, r *http.Request, filePath string) {
+	content, err := publicFS.ReadFile(filePath)
+	if err != nil {
+		if errors.Is(err, fs.ErrNotExist) {
+			http.NotFound(w, r)
+			return
+		}
+		http.Error(w, "Internal server error", http.StatusInternalServerError)
+		log.Printf("Error reading embedded file %s: %v", filePath, err)
+		return
+	}
+	w.Header().Set("Content-Type", "text/html; charset=utf-8")
+	w.Header().Set("Cache-Control", "no-cache, no-store, must-revalidate")
+	_, _ = w.Write(content)
+}
+
 // computeHash generates a hash for deduplication (GDPR-safe, no IP)
 func computeHash(out TelemetryOut) string {
 	key := fmt.Sprintf("%s|%s|%s|%s|%d",
@@ -800,7 +808,7 @@ func main() {
 		PBPassword:       mustEnv("PB_PASSWORD"),
 		PBTargetColl:     mustEnv("PB_TARGET_COLLECTION"),
 
-		MaxBodyBytes:     envInt64("MAX_BODY_BYTES", 16384),
+		MaxBodyBytes:     envInt64("MAX_BODY_BYTES", 1024),
 		RateLimitRPM:     envInt("RATE_LIMIT_RPM", 60),
 		RateBurst:        envInt("RATE_BURST", 20),
 		RateKeyMode:      env("RATE_KEY_MODE", "ip"), // "ip" or "header"
@@ -866,8 +874,8 @@ func main() {
 	// Initialize cleanup/retention job (GDPR Löschkonzept)
 	cleaner := NewCleaner(CleanupConfig{
 		Enabled:          envBool("CLEANUP_ENABLED", true),
-		CheckInterval:    time.Duration(envInt("CLEANUP_INTERVAL_MIN", 15)) * time.Minute,
-		StuckAfterHours:  envInt("CLEANUP_STUCK_HOURS", 2),
+		CheckInterval:    time.Duration(envInt("CLEANUP_INTERVAL_MIN", 60)) * time.Minute,
+		StuckAfterHours:  envInt("CLEANUP_STUCK_HOURS", 24),
 		RetentionEnabled: envBool("RETENTION_ENABLED", false),
 		RetentionDays:    envInt("RETENTION_DAYS", 365),
 	}, pb)
@@ -912,6 +920,16 @@ func main() {
 	// Redirect /dashboard to / for backwards compatibility
 	mux.HandleFunc("/dashboard", func(w http.ResponseWriter, r *http.Request) {
 		http.Redirect(w, r, "/", http.StatusMovedPermanently)
+	})
+
+	// Error Analysis page
+	mux.HandleFunc("/error-analysis", func(w http.ResponseWriter, r *http.Request) {
+		serveHTMLFile(w, r, "public/templates/error-analysis.html")
+	})
+
+	// Script Analysis page
+	mux.HandleFunc("/script-analysis", func(w http.ResponseWriter, r *http.Request) {
+		serveHTMLFile(w, r, "public/templates/script-analysis.html")
 	})
 
 	// Prometheus-style metrics endpoint
@@ -1252,6 +1270,13 @@ func main() {
 		w.WriteHeader(http.StatusAccepted)
 		_, _ = w.Write([]byte("accepted"))
 	})
+
+	// Serve embedded static files
+	staticFS, err := fs.Sub(publicFS, "public/static")
+	if err != nil {
+		log.Fatalf("Failed to create static FS: %v", err)
+	}
+	mux.Handle("/static/", http.StripPrefix("/static/", http.FileServer(http.FS(staticFS))))
 
 	srv := &http.Server{
 		Addr:              cfg.ListenAddr,

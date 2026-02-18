@@ -206,7 +206,7 @@ func (p *PBClient) FetchDashboardData(ctx context.Context, days int, repoSource 
 			}
 		case "aborted":
 			data.AbortedCount++
-		case "installing", "configuring":
+		case "installing":
 			data.InstallingCount++
 		}
 
