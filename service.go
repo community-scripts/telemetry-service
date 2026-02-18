@@ -4,13 +4,11 @@ import (
 	"bytes"
 	"context"
 	"crypto/sha256"
-	"embed"
 	"encoding/hex"
 	"encoding/json"
 	"errors"
 	"fmt"
 	"io"
-	"io/fs"
 	"log"
 	"net"
 	"net/http"
@@ -20,9 +18,6 @@ import (
 	"sync"
 	"time"
 )
-
-//go:embed public
-var publicFS embed.FS
 
 type Config struct {
 	ListenAddr         string
@@ -62,22 +57,19 @@ type Config struct {
 	AlertFailureThreshold float64
 	AlertCheckInterval    time.Duration
 	AlertCooldown         time.Duration
-
-	// GitHub Integration
-	GitHubToken    string // Personal access token for creating issues
-	GitHubOwner    string // Repository owner (e.g., "community-scripts")
-	GitHubRepo     string // Repository name (e.g., "ProxmoxVE")
-	AdminPassword  string // Password to protect admin actions (issue creation)
 }
 
 // TelemetryIn matches payload from api.func (bash client)
 type TelemetryIn struct {
 	// Required
-	RandomID    string `json:"random_id"`         // Session UUID
-	ExecutionID string `json:"execution_id,omitempty"` // Unique execution ID (unique-indexed in PocketBase)
-	Type        string `json:"type"`              // "lxc", "vm", "pve", "addon"
-	NSAPP       string `json:"nsapp"`             // Application name (e.g., "jellyfin")
-	Status      string `json:"status"`            // "installing", "success", "failed", "aborted", "unknown"
+	RandomID string `json:"random_id"`         // Session UUID
+	Type     string `json:"type"`              // "lxc", "vm", "tool", "addon"
+	NSAPP    string `json:"nsapp"`             // Application name (e.g., "jellyfin")
+	Status   string `json:"status"`            // "installing", "configuring", "success", "failed", "aborted", "unknown"
+
+	// Session tracking (ignored by storage, accepted to prevent unknown-field rejection)
+	ExecutionID string `json:"execution_id,omitempty"` // Execution UUID (from bash scripts)
+	SessionID   string `json:"session_id,omitempty"`   // Session UUID (from bash scripts)
 
 	// Container/VM specs
 	CTType    int `json:"ct_type,omitempty"`    // 1=unprivileged, 2=privileged/VM
@@ -121,12 +113,11 @@ type TelemetryIn struct {
 
 // TelemetryOut is sent to PocketBase (matches telemetry collection)
 type TelemetryOut struct {
-	RandomID    string `json:"random_id"`
-	ExecutionID string `json:"execution_id,omitempty"`
-	Type        string `json:"type"`
-	NSAPP       string `json:"nsapp"`
-	Status      string `json:"status"`
-	CTType      int    `json:"ct_type,omitempty"`
+	RandomID  string `json:"random_id"`
+	Type      string `json:"type"`
+	NSAPP     string `json:"nsapp"`
+	Status    string `json:"status"`
+	CTType    int    `json:"ct_type,omitempty"`
 	DiskSize  int    `json:"disk_size,omitempty"`
 	CoreCount int    `json:"core_count,omitempty"`
 	RAMSize   int    `json:"ram_size,omitempty"`
@@ -154,7 +145,6 @@ type TelemetryOut struct {
 // TelemetryStatusUpdate contains only fields needed for status updates
 type TelemetryStatusUpdate struct {
 	Status          string `json:"status"`
-	ExecutionID     string `json:"execution_id,omitempty"`
 	Error           string `json:"error,omitempty"`
 	ExitCode        int    `json:"exit_code"`
 	InstallDuration int    `json:"install_duration,omitempty"`
@@ -257,11 +247,11 @@ func (p *PBClient) FindRecordByRandomID(ctx context.Context, randomID string) (s
 		return "", err
 	}
 
-	// URL encode the filter to ensure special characters are handled correctly
+	// URL encode the filter
 	filter := fmt.Sprintf("random_id='%s'", randomID)
 	req, err := http.NewRequestWithContext(ctx, http.MethodGet,
 		fmt.Sprintf("%s/api/collections/%s/records?filter=%s&fields=id&perPage=1",
-			p.baseURL, p.targetColl, url.QueryEscape(filter)),
+			p.baseURL, p.targetColl, filter),
 		nil,
 	)
 	if err != nil {
@@ -277,48 +267,6 @@ func (p *PBClient) FindRecordByRandomID(ctx context.Context, randomID string) (s
 
 	if resp.StatusCode < 200 || resp.StatusCode >= 300 {
 		return "", fmt.Errorf("pocketbase search failed: %s", resp.Status)
-	}
-
-	var result struct {
-		Items []struct {
-			ID string `json:"id"`
-		} `json:"items"`
-	}
-	if err := json.NewDecoder(resp.Body).Decode(&result); err != nil {
-		return "", err
-	}
-
-	if len(result.Items) == 0 {
-		return "", nil // Not found
-	}
-	return result.Items[0].ID, nil
-}
-
-// FindRecordByExecutionID searches for an existing record by execution_id (unique-indexed, O(1) lookup)
-func (p *PBClient) FindRecordByExecutionID(ctx context.Context, executionID string) (string, error) {
-	if err := p.ensureAuth(ctx); err != nil {
-		return "", err
-	}
-
-	filter := fmt.Sprintf("execution_id='%s'", executionID)
-	req, err := http.NewRequestWithContext(ctx, http.MethodGet,
-		fmt.Sprintf("%s/api/collections/%s/records?filter=%s&fields=id&perPage=1",
-			p.baseURL, p.targetColl, url.QueryEscape(filter)),
-		nil,
-	)
-	if err != nil {
-		return "", err
-	}
-	req.Header.Set("Authorization", "Bearer "+p.token)
-
-	resp, err := p.http.Do(req)
-	if err != nil {
-		return "", err
-	}
-	defer resp.Body.Close()
-
-	if resp.StatusCode < 200 || resp.StatusCode >= 300 {
-		return "", fmt.Errorf("pocketbase search by execution_id failed: %s", resp.Status)
 	}
 
 	var result struct {
@@ -387,12 +335,14 @@ func (p *PBClient) FetchRecordsPaginated(ctx context.Context, page, limit int, s
 	}
 	if status != "" {
 		if status == "aborted" {
-			// Include both native "aborted" and legacy "failed" records with SIGINT/SIGHUP indicators
-			filters = append(filters, "(status='aborted' || (status='failed' && (exit_code=129 || exit_code=130 || error~'SIGINT' || error~'SIGHUP' || error~'Ctrl+C' || error~'Ctrl-C')))")
+			// Include both native "aborted" and legacy "failed" records with SIGINT indicators
+			filters = append(filters, "(status='aborted' || (status='failed' && (exit_code=130 || error~'SIGINT' || error~'Ctrl+C' || error~'Ctrl-C')))")
 		} else if status == "failed" {
-			// Exclude SIGINT/SIGHUP records from "failed" (they are reclassified as "aborted")
-			// PocketBase negation uses !~ operator, not !(field~value)
-			filters = append(filters, "(status='failed' && exit_code!=129 && exit_code!=130 && error!~'SIGINT' && error!~'SIGHUP' && error!~'Ctrl+C' && error!~'Ctrl-C')")
+			// Exclude SIGINT records from "failed" (they are reclassified as "aborted")
+			filters = append(filters, "(status='failed' && exit_code!=130 && !(error~'SIGINT') && !(error~'Ctrl+C') && !(error~'Ctrl-C'))")
+		} else if status == "installing" {
+			// Include both "installing" and "configuring" (configuring = install in progress)
+			filters = append(filters, "(status='installing' || status='configuring')")
 		} else {
 			filters = append(filters, fmt.Sprintf("status='%s'", status))
 		}
@@ -467,46 +417,36 @@ func (p *PBClient) FetchRecordsPaginated(ctx context.Context, page, limit int, s
 // All records go to the same collection; repo_source is stored as a field.
 //
 // For status="installing": always creates a new record.
-// For status!="installing": updates existing record.
-//   - Prefers execution_id lookup (unique-indexed, O(1)) when available.
-//   - Falls back to random_id lookup (filter query) for old clients.
+// For status="configuring": updates existing record status (progress ping from container).
+// For terminal statuses (success/failed/aborted/unknown): updates existing record.
 func (p *PBClient) UpsertTelemetry(ctx context.Context, payload TelemetryOut) error {
 	// For "installing" status, always create new record
 	if payload.Status == "installing" {
 		return p.CreateTelemetry(ctx, payload)
 	}
 
-	// For status updates (success/failed/unknown), find and update existing record
-	// Prefer execution_id (unique-indexed) over random_id (filter query) for faster lookups
-	var recordID string
-	var err error
-
-	if payload.ExecutionID != "" {
-		recordID, err = p.FindRecordByExecutionID(ctx, payload.ExecutionID)
-		if err != nil {
-			// Execution ID lookup failed, fall back to random_id
-			recordID, err = p.FindRecordByRandomID(ctx, payload.RandomID)
-		}
-	} else {
-		// Old client without execution_id — use random_id lookup
-		recordID, err = p.FindRecordByRandomID(ctx, payload.RandomID)
-	}
-
+	// For all other statuses (configuring, success, failed, aborted, unknown),
+	// find and update the existing record
+	recordID, err := p.FindRecordByRandomID(ctx, payload.RandomID)
 	if err != nil {
 		// Search failed, log and return error
 		return fmt.Errorf("cannot find record to update: %w", err)
 	}
 
 	if recordID == "" {
-		// Record not found - this shouldn't happen normally
-		// Create a full record as fallback
+		// Record not found - for configuring, just silently ignore (the initial
+		// record may not have been created yet). For terminal statuses, create
+		// a full record as fallback.
+		if payload.Status == "configuring" {
+			log.Printf("INFO: configuring update for unknown random_id=%s nsapp=%s - ignored", payload.RandomID, payload.NSAPP)
+			return nil
+		}
 		return p.CreateTelemetry(ctx, payload)
 	}
 
 	// Update only status, error, exit_code, and new metrics fields
 	update := TelemetryStatusUpdate{
 		Status:          payload.Status,
-		ExecutionID:     payload.ExecutionID,
 		Error:           payload.Error,
 		ExitCode:        payload.ExitCode,
 		InstallDuration: payload.InstallDuration,
@@ -671,7 +611,7 @@ func getClientIP(r *http.Request, pt *ProxyTrust) net.IP {
 
 var (
 	// Allowed values for 'type' field
-	allowedType = map[string]bool{"lxc": true, "vm": true, "pve": true, "addon": true}
+	allowedType = map[string]bool{"lxc": true, "vm": true, "tool": true, "addon": true}
 
 	// Allowed values for 'status' field
 	allowedStatus = map[string]bool{"installing": true, "configuring": true, "success": true, "failed": true, "aborted": true, "unknown": true}
@@ -692,86 +632,10 @@ var (
 	// Allowed values for 'cpu_vendor' field
 	allowedCPUVendor = map[string]bool{"intel": true, "amd": true, "arm": true, "apple": true, "qualcomm": true, "unknown": true, "": true}
 
-	// Allowed values for 'error_category' field (must match PocketBase schema)
+	// Allowed values for 'error_category' field
 	allowedErrorCategory = map[string]bool{
 		"network": true, "storage": true, "dependency": true, "permission": true,
 		"timeout": true, "config": true, "resource": true, "unknown": true, "": true,
-		"user_aborted": true, "apt": true, "command_not_found": true,
-		"service": true, "database": true, "signal": true, "proxmox": true,
-	}
-
-	// exitCodeCategories maps well-known exit codes to error categories
-	exitCodeCategories = map[int]string{
-		1:   "unknown",           // General error
-		2:   "unknown",           // Misuse of shell builtins
-		4:   "network",           // curl: Network/protocol error
-		5:   "network",           // curl: Could not resolve proxy
-		6:   "network",           // curl: Could not resolve host
-		7:   "network",           // curl: Connection refused
-		8:   "network",           // curl: FTP server reply error
-		10:  "config",            // Docker / privileged mode required
-		22:  "network",           // curl: HTTP error (404/500 etc.)
-		23:  "storage",           // curl: Write error (disk full?)
-		25:  "network",           // curl: Upload failed
-		28:  "timeout",           // curl: Connection timed out
-		35:  "network",           // SSL connect error
-		56:  "network",           // curl: Receive error (connection reset)
-		100: "apt",               // APT: package manager error
-		101: "apt",               // APT: Unmet dependencies
-		102: "apt",               // APT: Lock held by another process
-		124: "timeout",           // Command timed out
-		125: "config",            // Docker daemon error / container failed to run
-		126: "permission",        // Command invoked cannot execute
-		127: "command_not_found", // Command not found
-		128: "signal",            // Invalid argument to exit
-		129: "user_aborted",      // Killed by SIGHUP (terminal closed) — reclassified as aborted
-		130: "user_aborted",      // Script terminated by Ctrl+C (SIGINT)
-		131: "signal",            // Killed by SIGQUIT (core dump)
-		134: "signal",            // Process aborted (SIGABRT)
-		137: "resource",          // SIGKILL - often OOM killer
-		139: "unknown",           // SIGSEGV - segfault
-		141: "signal",            // SIGPIPE
-		143: "signal",            // SIGTERM
-		255: "apt",               // DPKG: Fatal internal error
-	}
-
-	// exitCodeDescriptions provides human-readable exit code descriptions
-	exitCodeDescriptions = map[int]string{
-		0:   "Success",
-		1:   "General error",
-		2:   "Misuse of shell builtins",
-		4:   "curl: Network/protocol error",
-		5:   "curl: Could not resolve proxy",
-		6:   "curl: DNS resolution failed",
-		7:   "curl: Connection refused",
-		8:   "curl: FTP server reply error",
-		10:  "Docker / privileged mode required (unsupported environment)",
-		22:  "curl: HTTP error (404/500 etc.)",
-		23:  "curl: Write error (disk full?)",
-		25:  "curl: Upload failed",
-		28:  "curl: Connection timed out",
-		30:  "curl: FTP port command failed",
-		35:  "SSL connect error",
-		56:  "curl: Receive error (connection reset)",
-		75:  "Temporary failure (retry later)",
-		78:  "curl: Remote file not found (404)",
-		100: "APT: Package manager error (broken packages / dependency problems)",
-		101: "APT: Unmet dependencies",
-		102: "APT: Lock held by another process",
-		124: "Command timed out",
-		125: "Docker daemon error (container failed to run)",
-		126: "Command cannot execute (permission problem)",
-		127: "Command not found",
-		128: "Invalid argument to exit",
-		129: "Killed by SIGHUP (terminal closed / hangup)",
-		130: "Script terminated by Ctrl+C (SIGINT)",
-		131: "Killed by SIGQUIT (core dump)",
-		134: "Process aborted (SIGABRT)",
-		137: "Process killed (SIGKILL) - likely OOM",
-		139: "Segmentation fault (SIGSEGV)",
-		141: "Broken pipe (SIGPIPE)",
-		143: "Process terminated (SIGTERM)",
-		255: "DPKG: Fatal internal error",
 	}
 )
 
@@ -806,7 +670,6 @@ func sanitizeMultiLine(s string, max int) string {
 func validate(in *TelemetryIn) error {
 	// Sanitize all string fields
 	in.RandomID = sanitizeShort(in.RandomID, 64)
-	in.ExecutionID = sanitizeShort(in.ExecutionID, 64)
 	in.Type = sanitizeShort(in.Type, 8)
 	in.NSAPP = sanitizeShort(in.NSAPP, 64)
 	in.Status = sanitizeShort(in.Status, 16)
@@ -924,107 +787,7 @@ func computeHash(out TelemetryOut) string {
 	return hex.EncodeToString(sum[:])
 }
 
-// categorizeErrorText assigns an error_category based on error text patterns
-func categorizeErrorText(errLower string) string {
-	// Docker / container errors (check early, before generic patterns)
-	if strings.Contains(errLower, "docker") ||
-		strings.Contains(errLower, "privileged mode") ||
-		strings.Contains(errLower, "container runtime") ||
-		strings.Contains(errLower, "daemon") {
-		return "config"
-	}
-	// Network errors
-	if strings.Contains(errLower, "connection refused") ||
-		strings.Contains(errLower, "could not resolve") ||
-		strings.Contains(errLower, "dns") ||
-		strings.Contains(errLower, "failed to download") ||
-		strings.Contains(errLower, "curl") ||
-		strings.Contains(errLower, "wget") ||
-		strings.Contains(errLower, "network unreachable") ||
-		strings.Contains(errLower, "timed out") ||
-		strings.Contains(errLower, "ssl") ||
-		strings.Contains(errLower, "certificate") {
-		return "network"
-	}
-	// APT / package manager (check before generic "dependency")
-	if strings.Contains(errLower, "apt") ||
-		strings.Contains(errLower, "dpkg") ||
-		strings.Contains(errLower, "broken packages") ||
-		strings.Contains(errLower, "unmet dependencies") ||
-		strings.Contains(errLower, "unable to locate package") {
-		return "apt"
-	}
-	// Storage
-	if strings.Contains(errLower, "no space left") ||
-		strings.Contains(errLower, "disk full") ||
-		strings.Contains(errLower, "read-only file system") ||
-		strings.Contains(errLower, "i/o error") {
-		return "storage"
-	}
-	// Permission
-	if strings.Contains(errLower, "permission denied") ||
-		strings.Contains(errLower, "operation not permitted") ||
-		strings.Contains(errLower, "access denied") {
-		return "permission"
-	}
-	// Resource (OOM, memory)
-	if strings.Contains(errLower, "oom") ||
-		strings.Contains(errLower, "out of memory") ||
-		strings.Contains(errLower, "cannot allocate") ||
-		strings.Contains(errLower, "killed") ||
-		strings.Contains(errLower, "sigkill") {
-		return "resource"
-	}
-	// Signal-related errors
-	if strings.Contains(errLower, "sighup") ||
-		strings.Contains(errLower, "sigquit") ||
-		strings.Contains(errLower, "sigterm") ||
-		strings.Contains(errLower, "sigabrt") ||
-		strings.Contains(errLower, "sigpipe") ||
-		strings.Contains(errLower, "core dump") {
-		return "signal"
-	}
-	// Command not found
-	if strings.Contains(errLower, "command not found") ||
-		strings.Contains(errLower, "not found") {
-		return "command_not_found"
-	}
-	// Dependency
-	if strings.Contains(errLower, "dependency") ||
-		strings.Contains(errLower, "requires") ||
-		strings.Contains(errLower, "missing") {
-		return "dependency"
-	}
-	// Config
-	if strings.Contains(errLower, "config") ||
-		strings.Contains(errLower, "syntax error") ||
-		strings.Contains(errLower, "invalid") {
-		return "config"
-	}
-	// Timeout
-	if strings.Contains(errLower, "timeout") {
-		return "timeout"
-	}
-	return "unknown"
-}
-
 // -------- HTTP server --------
-
-func serveHTMLFile(w http.ResponseWriter, r *http.Request, filePath string) {
-	content, err := publicFS.ReadFile(filePath)
-	if err != nil {
-		if errors.Is(err, fs.ErrNotExist) {
-			http.NotFound(w, r)
-			return
-		}
-		http.Error(w, "Internal server error", http.StatusInternalServerError)
-		log.Printf("Error reading embedded file %s: %v", filePath, err)
-		return
-	}
-	w.Header().Set("Content-Type", "text/html; charset=utf-8")
-	w.Header().Set("Cache-Control", "no-cache, no-store, must-revalidate")
-	_, _ = w.Write(content)
-}
 
 func main() {
 	cfg := Config{
@@ -1037,12 +800,12 @@ func main() {
 		PBPassword:       mustEnv("PB_PASSWORD"),
 		PBTargetColl:     mustEnv("PB_TARGET_COLLECTION"),
 
-		MaxBodyBytes:     envInt64("MAX_BODY_BYTES", 8192),
+		MaxBodyBytes:     envInt64("MAX_BODY_BYTES", 16384),
 		RateLimitRPM:     envInt("RATE_LIMIT_RPM", 60),
 		RateBurst:        envInt("RATE_BURST", 20),
 		RateKeyMode:      env("RATE_KEY_MODE", "ip"), // "ip" or "header"
 		RateKeyHeader:    env("RATE_KEY_HEADER", "X-Telemetry-Key"),
-		RequestTimeout:   time.Duration(envInt("UPSTREAM_TIMEOUT_MS", 60000)) * time.Millisecond,
+		RequestTimeout:   time.Duration(envInt("UPSTREAM_TIMEOUT_MS", 4000)) * time.Millisecond,
 		EnableReqLogging: envBool("ENABLE_REQUEST_LOGGING", false),
 
 		// Cache config
@@ -1063,17 +826,7 @@ func main() {
 		AlertFailureThreshold: envFloat("ALERT_FAILURE_THRESHOLD", 20.0),
 		AlertCheckInterval:    time.Duration(envInt("ALERT_CHECK_INTERVAL_MIN", 15)) * time.Minute,
 		AlertCooldown:         time.Duration(envInt("ALERT_COOLDOWN_MIN", 60)) * time.Minute,
-
-		// GitHub integration
-		GitHubToken:   env("GITHUB_TOKEN", ""),
-		GitHubOwner:   env("GITHUB_OWNER", "community-scripts"),
-		GitHubRepo:    env("GITHUB_REPO", "ProxmoxVE"),
-		AdminPassword: env("ADMIN_PASSWORD", ""),
 	}
-
-	// Debug: log whether critical env vars are set (not the values!)
-	log.Printf("CONFIG: ADMIN_PASSWORD set=%v (len=%d), GITHUB_TOKEN set=%v, GITHUB_OWNER=%s, GITHUB_REPO=%s",
-		cfg.AdminPassword != "", len(cfg.AdminPassword), cfg.GitHubToken != "", cfg.GitHubOwner, cfg.GitHubRepo)
 
 	var pt *ProxyTrust
 	if strings.TrimSpace(env("TRUSTED_PROXIES_CIDR", "")) != "" {
@@ -1085,13 +838,6 @@ func main() {
 	}
 
 	pb := NewPBClient(cfg)
-
-	// Persistent script stats stores (7d, 30d, all-time)
-	stats7d := NewScriptStatsStore(pb, "_script_stats_7d", 7)
-	stats30d := NewScriptStatsStore(pb, "_script_stats_30d", 30)
-	statsAllTime := NewScriptStatsStore(pb, "_script_stats_alltime", 0)
-	scriptStores := []*ScriptStatsStore{stats7d, stats30d, statsAllTime}
-
 	rl := NewRateLimiter(cfg.RateLimitRPM, cfg.RateBurst)
 
 	// Initialize cache
@@ -1121,7 +867,7 @@ func main() {
 	cleaner := NewCleaner(CleanupConfig{
 		Enabled:          envBool("CLEANUP_ENABLED", true),
 		CheckInterval:    time.Duration(envInt("CLEANUP_INTERVAL_MIN", 15)) * time.Minute,
-		StuckAfterHours:  envInt("CLEANUP_STUCK_HOURS", 1),
+		StuckAfterHours:  envInt("CLEANUP_STUCK_HOURS", 2),
 		RetentionEnabled: envBool("RETENTION_ENABLED", false),
 		RetentionDays:    envInt("RETENTION_DAYS", 365),
 	}, pb)
@@ -1158,12 +904,14 @@ func main() {
 			http.NotFound(w, r)
 			return
 		}
-		serveHTMLFile(w, r, "public/templates/dashboard.html")
+		w.Header().Set("Content-Type", "text/html; charset=utf-8")
+		w.Header().Set("Cache-Control", "no-cache, no-store, must-revalidate")
+		_, _ = w.Write([]byte(DashboardHTML()))
 	})
 
 	// Redirect /dashboard to / for backwards compatibility
 	mux.HandleFunc("/dashboard", func(w http.ResponseWriter, r *http.Request) {
-		serveHTMLFile(w, r, "public/templates/dashboard.html")
+		http.Redirect(w, r, "/", http.StatusMovedPermanently)
 	})
 
 	// Prometheus-style metrics endpoint
@@ -1389,357 +1137,6 @@ func main() {
 		w.Write([]byte("test alert sent"))
 	})
 
-	// Error Analysis page
-	mux.HandleFunc("/error-analysis", func(w http.ResponseWriter, r *http.Request) {
-		serveHTMLFile(w, r, "public/templates/error-analysis.html")
-	})
-
-	// Script Analysis page
-	mux.HandleFunc("/script-analysis", func(w http.ResponseWriter, r *http.Request) {
-		serveHTMLFile(w, r, "public/templates/script-analysis.html")
-	})
-
-	// Script Analysis API
-	mux.HandleFunc("/api/scripts", func(w http.ResponseWriter, r *http.Request) {
-		days := 30
-		if d := r.URL.Query().Get("days"); d != "" {
-			fmt.Sscanf(d, "%d", &days)
-			if days < 0 {
-				days = 1
-			}
-			// days=0 is allowed → All Time (served from AllTimeStore)
-			if days > 365 && days != 0 {
-				days = 365
-			}
-		}
-
-		repoSource := r.URL.Query().Get("repo")
-		if repoSource == "" {
-			repoSource = "ProxmoxVE"
-		}
-		if repoSource == "all" {
-			repoSource = ""
-		}
-
-		ctx, cancel := context.WithTimeout(r.Context(), 120*time.Second)
-		defer cancel()
-
-		// Persistent stores: 7d, 30d, All Time (days=0)
-		// Only Today (days=1) uses live telemetry fetch
-		var store *ScriptStatsStore
-		switch {
-		case days == 0:
-			store = statsAllTime
-		case days <= 7:
-			store = stats7d
-		case days <= 30:
-			store = stats30d
-		}
-
-		if store != nil {
-			cacheKey := fmt.Sprintf("scripts:%d:%s", days, repoSource)
-			var data *ScriptAnalysisData
-			if cfg.CacheEnabled && cache.Get(ctx, cacheKey, &data) {
-				w.Header().Set("Content-Type", "application/json")
-				w.Header().Set("X-Cache", "HIT")
-				json.NewEncoder(w).Encode(data)
-				return
-			}
-
-			// Build from persistent store (instant, ~466 rows in memory)
-			knownScripts, _ := pb.FetchKnownScripts(ctx)
-			data = store.BuildData(knownScripts)
-
-			if cfg.CacheEnabled {
-				_ = cache.Set(ctx, cacheKey, data, 23*time.Hour)
-			}
-
-			w.Header().Set("Content-Type", "application/json")
-			w.Header().Set("X-Cache", "MISS")
-			json.NewEncoder(w).Encode(data)
-			return
-		}
-
-		// Today (days=1): live fetch from telemetry
-		cacheKey := fmt.Sprintf("scripts:%d:%s", days, repoSource)
-		var data *ScriptAnalysisData
-		if cfg.CacheEnabled && cache.Get(ctx, cacheKey, &data) {
-			w.Header().Set("Content-Type", "application/json")
-			w.Header().Set("X-Cache", "HIT")
-			if cache.IsStale(ctx, cacheKey) {
-				w.Header().Set("X-Cache", "STALE")
-				if cache.TryStartRefresh(cacheKey) {
-					go func() {
-						defer cache.FinishRefresh(cacheKey)
-						refreshCtx, cancel := context.WithTimeout(context.Background(), 120*time.Second)
-						defer cancel()
-						freshData, err := pb.FetchScriptAnalysisData(refreshCtx, days, repoSource)
-						if err != nil {
-							log.Printf("[CACHE] background refresh failed for %s: %v", cacheKey, err)
-							return
-						}
-						_ = cache.Set(context.Background(), cacheKey, freshData, 2*time.Minute)
-					}()
-				}
-			}
-			json.NewEncoder(w).Encode(data)
-			return
-		}
-
-		data, err := pb.FetchScriptAnalysisData(ctx, days, repoSource)
-		if err != nil {
-			log.Printf("script analysis fetch failed: %v", err)
-			http.Error(w, "failed to fetch script data", http.StatusInternalServerError)
-			return
-		}
-
-		if cfg.CacheEnabled {
-			_ = cache.Set(ctx, cacheKey, data, 2*time.Minute)
-		}
-
-		w.Header().Set("Content-Type", "application/json")
-		w.Header().Set("X-Cache", "MISS")
-		json.NewEncoder(w).Encode(data)
-	})
-
-	// Error Analysis API - detailed error data
-	mux.HandleFunc("/api/errors", func(w http.ResponseWriter, r *http.Request) {
-		days := 7
-		if d := r.URL.Query().Get("days"); d != "" {
-			fmt.Sscanf(d, "%d", &days)
-			if days < 1 {
-				days = 1
-			}
-			if days > 365 {
-				days = 365
-			}
-		}
-
-		repoSource := r.URL.Query().Get("repo")
-		if repoSource == "" {
-			repoSource = "ProxmoxVE"
-		}
-		if repoSource == "all" {
-			repoSource = ""
-		}
-
-		// Scale timeout by data volume
-		timeout := 120 * time.Second
-		if days >= 90 { timeout = 300 * time.Second }
-		if days >= 365 { timeout = 600 * time.Second }
-
-		ctx, cancel := context.WithTimeout(r.Context(), timeout)
-		defer cancel()
-
-		cacheKey := fmt.Sprintf("errors:%d:%s", days, repoSource)
-		var data *ErrorAnalysisData
-		if cfg.CacheEnabled && cache.Get(ctx, cacheKey, &data) {
-			w.Header().Set("Content-Type", "application/json")
-			w.Header().Set("X-Cache", "HIT")
-			if cache.IsStale(ctx, cacheKey) {
-				w.Header().Set("X-Cache", "STALE")
-				if cache.TryStartRefresh(cacheKey) {
-					go func() {
-						defer cache.FinishRefresh(cacheKey)
-						refreshTimeout := 120 * time.Second
-						if days >= 90 { refreshTimeout = 300 * time.Second }
-						if days >= 365 { refreshTimeout = 600 * time.Second }
-						refreshCtx, cancel := context.WithTimeout(context.Background(), refreshTimeout)
-						defer cancel()
-						freshData, err := pb.FetchErrorAnalysisData(refreshCtx, days, repoSource)
-						if err != nil {
-							log.Printf("[CACHE] background refresh failed for %s: %v", cacheKey, err)
-							return
-						}
-						refreshTTL := 2 * time.Minute
-						if days > 7 { refreshTTL = 23 * time.Hour }
-						_ = cache.Set(context.Background(), cacheKey, freshData, refreshTTL)
-					}()
-				}
-			}
-			json.NewEncoder(w).Encode(data)
-			return
-		}
-
-		data, err := pb.FetchErrorAnalysisData(ctx, days, repoSource)
-		if err != nil {
-			log.Printf("error analysis fetch failed: %v", err)
-			http.Error(w, "failed to fetch error data", http.StatusInternalServerError)
-			return
-		}
-
-		if cfg.CacheEnabled {
-			cacheTTL := 2 * time.Minute
-			if days > 7 { cacheTTL = 23 * time.Hour }
-			_ = cache.Set(ctx, cacheKey, data, cacheTTL)
-		}
-
-		w.Header().Set("Content-Type", "application/json")
-		w.Header().Set("X-Cache", "MISS")
-		json.NewEncoder(w).Encode(data)
-	})
-
-	// API: Get exit code descriptions (static reference data)
-	mux.HandleFunc("/api/exit-codes", func(w http.ResponseWriter, r *http.Request) {
-		w.Header().Set("Content-Type", "application/json")
-		json.NewEncoder(w).Encode(exitCodeDescriptions)
-	})
-
-	// Serve static files from the /public/static directory
-	// Serve embedded static files
-	staticFS, err := fs.Sub(publicFS, "public/static")
-	if err != nil {
-		log.Fatalf("Failed to create static FS: %v", err)
-	}
-	mux.Handle("/static/", http.StripPrefix("/static/", http.FileServer(http.FS(staticFS))))
-
-	// Cleanup trigger & status API
-	mux.HandleFunc("/api/cleanup/status", func(w http.ResponseWriter, r *http.Request) {
-		ctx, cancel := context.WithTimeout(r.Context(), 10*time.Second)
-		defer cancel()
-
-		count, err := cleaner.GetStuckCount(ctx)
-		if err != nil {
-			http.Error(w, "failed to check stuck count", http.StatusInternalServerError)
-			return
-		}
-
-		w.Header().Set("Content-Type", "application/json")
-		json.NewEncoder(w).Encode(map[string]interface{}{
-			"stuck_count":      count,
-			"stuck_after_hours": cleaner.cfg.StuckAfterHours,
-			"check_interval":   cleaner.cfg.CheckInterval.String(),
-			"enabled":          cleaner.cfg.Enabled,
-		})
-	})
-
-	mux.HandleFunc("/api/cleanup/run", func(w http.ResponseWriter, r *http.Request) {
-		if r.Method != http.MethodPost {
-			http.Error(w, "method not allowed", http.StatusMethodNotAllowed)
-			return
-		}
-
-		// Require admin password
-		if cfg.AdminPassword == "" {
-			http.Error(w, "admin password not configured", http.StatusServiceUnavailable)
-			return
-		}
-		password := r.Header.Get("X-Admin-Password")
-		if password == "" {
-			// Try from JSON body
-			var body struct {
-				Password string `json:"password"`
-			}
-			json.NewDecoder(r.Body).Decode(&body)
-			password = body.Password
-		}
-		if password != cfg.AdminPassword {
-			http.Error(w, "unauthorized", http.StatusUnauthorized)
-			return
-		}
-
-		updated, err := cleaner.RunNow()
-		if err != nil {
-			http.Error(w, err.Error(), http.StatusInternalServerError)
-			return
-		}
-
-		w.Header().Set("Content-Type", "application/json")
-		json.NewEncoder(w).Encode(map[string]interface{}{
-			"updated": updated,
-			"message": fmt.Sprintf("Cleaned up %d stuck installations", updated),
-		})
-	})
-
-	// GitHub Issue creation API
-	mux.HandleFunc("/api/github/create-issue", func(w http.ResponseWriter, r *http.Request) {
-		if r.Method != http.MethodPost {
-			w.Header().Set("Content-Type", "application/json")
-			w.WriteHeader(http.StatusMethodNotAllowed)
-			json.NewEncoder(w).Encode(map[string]string{"error": "method not allowed"})
-			return
-		}
-
-		// Require admin password
-		if cfg.AdminPassword == "" {
-			w.Header().Set("Content-Type", "application/json")
-			w.WriteHeader(http.StatusServiceUnavailable)
-			json.NewEncoder(w).Encode(map[string]string{"error": "admin password not configured"})
-			return
-		}
-
-		var body struct {
-			Password    string `json:"password"`
-			Title       string `json:"title"`
-			Body        string `json:"body"`
-			Labels      []string `json:"labels"`
-			AppName     string `json:"app_name"`
-			ExitCode    int    `json:"exit_code"`
-			ErrorText   string `json:"error_text"`
-			FailureRate float64 `json:"failure_rate"`
-		}
-		if err := json.NewDecoder(r.Body).Decode(&body); err != nil {
-			w.Header().Set("Content-Type", "application/json")
-			w.WriteHeader(http.StatusBadRequest)
-			json.NewEncoder(w).Encode(map[string]string{"error": "invalid request body"})
-			return
-		}
-
-		if body.Password != cfg.AdminPassword {
-			w.Header().Set("Content-Type", "application/json")
-			w.WriteHeader(http.StatusUnauthorized)
-			json.NewEncoder(w).Encode(map[string]string{"error": "incorrect password"})
-			return
-		}
-
-		if cfg.GitHubToken == "" {
-			w.Header().Set("Content-Type", "application/json")
-			w.WriteHeader(http.StatusServiceUnavailable)
-			json.NewEncoder(w).Encode(map[string]string{"error": "GitHub token not configured on server"})
-			return
-		}
-
-		// Build issue body if not provided
-		if body.Body == "" {
-			body.Body = fmt.Sprintf("## Telemetry Error Report\n\n"+
-				"**Application:** %s\n"+
-				"**Exit Code:** %d\n"+
-				"**Error Category:** %s\n"+
-				"**Failure Rate:** %.1f%%\n\n"+
-				"### Error Details\n```\n%s\n```\n\n"+
-				"---\n*This issue was automatically created from the telemetry error analysis dashboard.*",
-				body.AppName, body.ExitCode,
-				categorizeExitCode(body.ExitCode),
-				body.FailureRate, body.ErrorText)
-		}
-
-		if body.Title == "" {
-			body.Title = fmt.Sprintf("[Telemetry] %s: %s (exit code %d)",
-				body.AppName, categorizeExitCode(body.ExitCode), body.ExitCode)
-		}
-
-		// Default labels
-		if len(body.Labels) == 0 {
-			body.Labels = []string{"bug", "telemetry"}
-		}
-
-		// Create GitHub issue via API
-		issueURL, err := createGitHubIssue(cfg.GitHubToken, cfg.GitHubOwner, cfg.GitHubRepo, body.Title, body.Body, body.Labels)
-		if err != nil {
-			log.Printf("ERROR: failed to create GitHub issue: %v", err)
-			w.Header().Set("Content-Type", "application/json")
-			w.WriteHeader(http.StatusInternalServerError)
-			json.NewEncoder(w).Encode(map[string]string{"error": "failed to create issue: " + err.Error()})
-			return
-		}
-
-		w.Header().Set("Content-Type", "application/json")
-		json.NewEncoder(w).Encode(map[string]interface{}{
-			"success":   true,
-			"issue_url": issueURL,
-		})
-	})
-
 	mux.HandleFunc("/telemetry", func(w http.ResponseWriter, r *http.Request) {
 		if r.Method != http.MethodPost {
 			http.Error(w, "method not allowed", http.StatusMethodNotAllowed)
@@ -1791,64 +1188,21 @@ func main() {
 			return
 		}
 
-		// Auto-reclassify: exit_code=0 is NEVER an error — always reclassify as success
-		if in.Status == "failed" && in.ExitCode == 0 {
-			in.Status = "success"
-			in.Error = ""
-			in.ErrorCategory = ""
-			if cfg.EnableReqLogging {
-				log.Printf("auto-reclassified exit_code=0 as success: nsapp=%s", in.NSAPP)
-			}
-		}
-
-		// Auto-reclassify: clients still send status="failed" for SIGINT/Ctrl+C and SIGHUP,
+		// Auto-reclassify: clients still send status="failed" for SIGINT/Ctrl+C,
 		// detect and reclassify as "aborted" server-side.
-		errorLower := strings.ToLower(in.Error)
-		if in.Status == "failed" && (in.ExitCode == 129 || in.ExitCode == 130 ||
-			strings.Contains(errorLower, "sigint") ||
-			strings.Contains(errorLower, "ctrl+c") ||
-			strings.Contains(errorLower, "ctrl-c") ||
-			strings.Contains(errorLower, "sighup") ||
-			strings.Contains(errorLower, "aborted by user") ||
-			strings.Contains(errorLower, "user abort") ||
-			strings.Contains(errorLower, "cancelled by user") ||
-			strings.Contains(errorLower, "no changes have been made")) {
+		if in.Status == "failed" && (in.ExitCode == 130 ||
+			strings.Contains(strings.ToLower(in.Error), "sigint") ||
+			strings.Contains(strings.ToLower(in.Error), "ctrl+c") ||
+			strings.Contains(strings.ToLower(in.Error), "ctrl-c")) {
 			in.Status = "aborted"
-			if in.ErrorCategory == "" || in.ErrorCategory == "unknown" {
-				in.ErrorCategory = "user_aborted"
-			}
 			if cfg.EnableReqLogging {
 				log.Printf("auto-reclassified as aborted: nsapp=%s exit_code=%d", in.NSAPP, in.ExitCode)
-			}
-		}
-
-		// Auto-categorize errors based on exit code when no category provided
-		if in.Status == "failed" && (in.ErrorCategory == "" || in.ErrorCategory == "unknown") {
-			if cat, ok := exitCodeCategories[in.ExitCode]; ok {
-				in.ErrorCategory = cat
-			}
-		}
-
-		// Auto-categorize based on error text patterns when still uncategorized
-		if in.Status == "failed" && (in.ErrorCategory == "" || in.ErrorCategory == "unknown") && in.Error != "" {
-			in.ErrorCategory = categorizeErrorText(errorLower)
-		}
-
-		// Enrich error text with exit code description if error text is empty
-		if in.Status == "failed" && in.Error == "" && in.ExitCode != 0 {
-			if desc, ok := exitCodeDescriptions[in.ExitCode]; ok {
-				in.Error = fmt.Sprintf("Exit code %d: %s", in.ExitCode, desc)
-			} else if in.ExitCode > 128 && in.ExitCode < 192 {
-				in.Error = fmt.Sprintf("Exit code %d: Killed by signal %d", in.ExitCode, in.ExitCode-128)
-			} else {
-				in.Error = fmt.Sprintf("Exit code %d: Unknown error", in.ExitCode)
 			}
 		}
 
 		// Map input to PocketBase schema
 		out := TelemetryOut{
 			RandomID:        in.RandomID,
-			ExecutionID:     in.ExecutionID,
 			Type:            in.Type,
 			NSAPP:           in.NSAPP,
 			Status:          in.Status,
@@ -1905,72 +1259,20 @@ func main() {
 		ReadHeaderTimeout: 3 * time.Second,
 	}
 
-	// Background cache warmup job
-	// - On startup: full warmup (dashboard + scripts + errors, all day ranges)
-	// - Every 15 min: refresh "today" data only (fast, changes frequently)
-	// - Nightly at 02:00 UTC: full warmup with 23h TTL (data barely changes intra-day)
+	// Background cache warmup job - pre-populates cache for common dashboard queries
 	if cfg.CacheEnabled {
 		go func() {
-			// Load all script stats stores from PocketBase on startup
-			for _, store := range scriptStores {
-				ctx, cancel := context.WithTimeout(context.Background(), 60*time.Second)
-				if err := store.LoadFromPB(ctx); err != nil {
-					log.Printf("[STATS:%s] LoadFromPB failed: %v", store.label, err)
-				}
-				cancel()
-			}
-
-			// If alltime store is empty, bootstrap from raw telemetry (first run)
-			if statsAllTime.IsEmpty() {
-				log.Println("[STATS:alltime] Store is empty, bootstrapping...")
-				ctx, cancel := context.WithTimeout(context.Background(), 900*time.Second)
-				if err := statsAllTime.Bootstrap(ctx, "ProxmoxVE"); err != nil {
-					log.Printf("[STATS:alltime] Bootstrap failed: %v", err)
-					log.Println("[STATS:alltime] Continuing with empty store - will build up incrementally")
-					// Initialize with today's date to start incremental updates from now on
-					today := time.Now().Format("2006-01-02")
-					statsAllTime.mu.Lock()
-					statsAllTime.stats = map[string]*CachedScriptStat{
-						"_marker": {LastDate: today}, // Marker to prevent re-bootstrap
-					}
-					statsAllTime.mu.Unlock()
-				}
-				cancel()
-			}
-
-			// If 7d/30d stores are empty, rebuild them
-			for _, store := range []*ScriptStatsStore{stats7d, stats30d} {
-				if store.IsEmpty() {
-					log.Printf("[STATS:%s] Store is empty, rebuilding...", store.label)
-					ctx, cancel := context.WithTimeout(context.Background(), 300*time.Second)
-					if err := store.Rebuild(ctx, "ProxmoxVE"); err != nil {
-						log.Printf("[STATS:%s] Rebuild failed: %v", store.label, err)
-					}
-					cancel()
-				}
-			}
-
-			// Initial full warmup after startup
-			time.Sleep(5 * time.Second)
-			warmupCaches(pb, cache, cfg, false, scriptStores)
-
-			// Periodic "today" refresh every 15 min
-			todayTicker := time.NewTicker(15 * time.Minute)
-			// Nightly full refresh at 02:00 UTC
-			nightlyTimer := time.NewTimer(timeUntilNextUTC(2, 0))
-
-			for {
-				select {
-				case <-todayTicker.C:
-					warmupCaches(pb, cache, cfg, true, scriptStores)
-				case <-nightlyTimer.C:
-					log.Println("[CACHE] Nightly full warmup triggered")
-					warmupCaches(pb, cache, cfg, false, scriptStores)
-					nightlyTimer.Reset(24 * time.Hour)
-				}
+			// Initial warmup after startup
+			time.Sleep(10 * time.Second)
+			warmupDashboardCache(pb, cache, cfg)
+			
+			// Periodic refresh every 30 minutes (well within 1h TTL)
+			ticker := time.NewTicker(30 * time.Minute)
+			for range ticker.C {
+				warmupDashboardCache(pb, cache, cfg)
 			}
 		}()
-		log.Printf("background cache warmup enabled (nightly 02:00 UTC, today refresh every 15m)")
+		log.Printf("background cache warmup enabled (TTL=%v, refresh=30m)", cfg.CacheTTL)
 	}
 
 	log.Printf("telemetry-ingest listening on %s", cfg.ListenAddr)
@@ -1985,60 +1287,6 @@ func securityHeaders(next http.Handler) http.Handler {
 		w.Header().Set("Referrer-Policy", "no-referrer")
 		next.ServeHTTP(w, r)
 	})
-}
-
-// categorizeExitCode returns a short human-readable category for an exit code
-func categorizeExitCode(code int) string {
-	if desc, ok := exitCodeDescriptions[code]; ok {
-		return desc
-	}
-	if code > 128 && code < 192 {
-		return fmt.Sprintf("Killed by signal %d", code-128)
-	}
-	return fmt.Sprintf("Unknown (exit code %d)", code)
-}
-
-// createGitHubIssue creates a new issue in the specified GitHub repository
-func createGitHubIssue(token, owner, repo, title, body string, labels []string) (string, error) {
-	payload := map[string]interface{}{
-		"title":  title,
-		"body":   body,
-		"labels": labels,
-	}
-	b, _ := json.Marshal(payload)
-
-	req, err := http.NewRequest(http.MethodPost,
-		fmt.Sprintf("https://api.github.com/repos/%s/%s/issues", owner, repo),
-		bytes.NewReader(b),
-	)
-	if err != nil {
-		return "", err
-	}
-	req.Header.Set("Accept", "application/vnd.github+json")
-	req.Header.Set("Authorization", "Bearer "+token)
-	req.Header.Set("Content-Type", "application/json")
-	req.Header.Set("X-GitHub-Api-Version", "2022-11-28")
-
-	client := &http.Client{Timeout: 15 * time.Second}
-	resp, err := client.Do(req)
-	if err != nil {
-		return "", err
-	}
-	defer resp.Body.Close()
-
-	if resp.StatusCode != http.StatusCreated {
-		rb, _ := io.ReadAll(io.LimitReader(resp.Body, 4<<10))
-		return "", fmt.Errorf("GitHub API error %d: %s", resp.StatusCode, string(rb))
-	}
-
-	var result struct {
-		HTMLURL string `json:"html_url"`
-	}
-	if err := json.NewDecoder(resp.Body).Decode(&result); err != nil {
-		return "", err
-	}
-
-	return result.HTMLURL, nil
 }
 
 func env(k, def string) string {
@@ -2114,131 +1362,50 @@ func splitCSV(s string) []string {
 	return out
 }
 
-// timeUntilNextUTC calculates the duration until the next occurrence of hour:minute UTC
-func timeUntilNextUTC(hour, minute int) time.Duration {
-	now := time.Now().UTC()
-	next := time.Date(now.Year(), now.Month(), now.Day(), hour, minute, 0, 0, time.UTC)
-	if now.After(next) {
-		next = next.Add(24 * time.Hour)
-	}
-	return time.Until(next)
-}
-
-// warmupCaches pre-populates the cache for dashboard, scripts, AND errors endpoints.
-// If todayOnly=true, only warms days=1 (fast refresh for current-day data).
-// If todayOnly=false, warms all day ranges with long TTLs (nightly/startup).
-func warmupCaches(pb *PBClient, cache *Cache, cfg Config, todayOnly bool, stores []*ScriptStatsStore) {
-	label := "full"
-	if todayOnly {
-		label = "today-only"
-	}
-	log.Printf("[CACHE] Starting %s cache warmup...", label)
+// warmupDashboardCache pre-populates the cache with common dashboard queries
+// Always refreshes all entries regardless of current cache state
+func warmupDashboardCache(pb *PBClient, cache *Cache, cfg Config) {
+	log.Println("[CACHE] Starting dashboard cache warmup...")
 	start := time.Now()
-
-	dayRanges := []int{1}
-	if !todayOnly {
-		dayRanges = []int{1, 90, 365} // Only Today + ranges without persistent store
-	}
-	repos := []string{"ProxmoxVE"}
-
+	
+	// Common day ranges and repos to pre-cache
+	dayRanges := []int{1, 7, 30, 90, 365}
+	repos := []string{"ProxmoxVE", "ProxmoxVED", ""}  // ProxmoxVE, ProxmoxVED, and "all"
+	
 	warmed := 0
 	failed := 0
+	for _, days := range dayRanges {
+		for _, repo := range repos {
+			cacheKey := fmt.Sprintf("dashboard:%d:%s", days, repo)
 
-	// Update all persistent stores + cache their data on full warmup
-	if !todayOnly {
-		ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
-		knownScripts, _ := pb.FetchKnownScripts(ctx)
-		cancel()
+			// Always refresh - don't skip cached entries
+			if !cache.TryStartRefresh(cacheKey) {
+				continue // Another goroutine is already refreshing this key
+			}
 
-		for _, store := range stores {
-			uCtx, uCancel := context.WithTimeout(context.Background(), 600*time.Second)
-			err := store.Update(uCtx, "ProxmoxVE")
-			uCancel()
+			// Scale timeout by data volume: larger ranges need more time
+			timeout := 180 * time.Second
+			if days >= 365 {
+				timeout = 600 * time.Second // 10 minutes for full year
+			} else if days >= 90 {
+				timeout = 300 * time.Second // 5 minutes for 90 days
+			}
+			ctx, cancel := context.WithTimeout(context.Background(), timeout)
+			data, err := pb.FetchDashboardData(ctx, days, repo)
+			cancel()
+			cache.FinishRefresh(cacheKey)
+			
 			if err != nil {
-				log.Printf("[CACHE] store %s update failed: %v", store.label, err)
+				log.Printf("[CACHE] Warmup failed for days=%d repo=%s: %v", days, repo, err)
 				failed++
 				continue
 			}
-
-			// Build + cache the data
-			data := store.BuildData(knownScripts)
-			cacheKey := fmt.Sprintf("scripts:%d:ProxmoxVE", store.windowDays)
-			_ = cache.Set(context.Background(), cacheKey, data, 23*time.Hour)
+			
+			_ = cache.Set(context.Background(), cacheKey, data, cfg.CacheTTL)
 			warmed++
-			log.Printf("[CACHE] scripts:%d cache warmed from persistent store (%s)", store.windowDays, store.label)
+			log.Printf("[CACHE] Warmed days=%d repo=%q (%d records)", days, repo, data.TotalInstalls)
 		}
 	}
-
-	for _, days := range dayRanges {
-		cacheTTL := 2 * time.Minute
-		if days > 1 {
-			cacheTTL = 23 * time.Hour
-		}
-
-		// Scale timeout by data volume
-		timeout := 180 * time.Second
-		if days >= 365 {
-			timeout = 600 * time.Second
-		} else if days >= 90 {
-			timeout = 300 * time.Second
-		}
-
-		for _, repo := range repos {
-			// --- Dashboard ---
-			{
-				cacheKey := fmt.Sprintf("dashboard:%d:%s", days, repo)
-				if cache.TryStartRefresh(cacheKey) {
-					ctx, cancel := context.WithTimeout(context.Background(), timeout)
-					data, err := pb.FetchDashboardData(ctx, days, repo)
-					cancel()
-					cache.FinishRefresh(cacheKey)
-					if err != nil {
-						log.Printf("[CACHE] Warmup dashboard failed days=%d repo=%q: %v", days, repo, err)
-						failed++
-					} else {
-						_ = cache.Set(context.Background(), cacheKey, data, cacheTTL)
-						warmed++
-					}
-				}
-			}
-
-			// --- Scripts ---
-			{
-				cacheKey := fmt.Sprintf("scripts:%d:%s", days, repo)
-				if cache.TryStartRefresh(cacheKey) {
-					ctx, cancel := context.WithTimeout(context.Background(), timeout)
-					data, err := pb.FetchScriptAnalysisData(ctx, days, repo)
-					cancel()
-					cache.FinishRefresh(cacheKey)
-					if err != nil {
-						log.Printf("[CACHE] Warmup scripts failed days=%d repo=%q: %v", days, repo, err)
-						failed++
-					} else {
-						_ = cache.Set(context.Background(), cacheKey, data, cacheTTL)
-						warmed++
-					}
-				}
-			}
-
-			// --- Errors ---
-			{
-				cacheKey := fmt.Sprintf("errors:%d:%s", days, repo)
-				if cache.TryStartRefresh(cacheKey) {
-					ctx, cancel := context.WithTimeout(context.Background(), timeout)
-					data, err := pb.FetchErrorAnalysisData(ctx, days, repo)
-					cancel()
-					cache.FinishRefresh(cacheKey)
-					if err != nil {
-						log.Printf("[CACHE] Warmup errors failed days=%d repo=%q: %v", days, repo, err)
-						failed++
-					} else {
-						_ = cache.Set(context.Background(), cacheKey, data, cacheTTL)
-						warmed++
-					}
-				}
-			}
-		}
-	}
-
-	log.Printf("[CACHE] Warmup %s complete: %d warmed, %d failed (took %v)", label, warmed, failed, time.Since(start).Round(time.Second))
+	
+	log.Printf("[CACHE] Warmup complete: %d refreshed, %d failed (took %v)", warmed, failed, time.Since(start).Round(time.Second))
 }
