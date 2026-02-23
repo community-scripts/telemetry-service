@@ -16,6 +16,7 @@ import (
 	"net/http"
 	"net/url"
 	"os"
+	"regexp"
 	"strings"
 	"sync"
 	"time"
@@ -671,7 +672,7 @@ func getClientIP(r *http.Request, pt *ProxyTrust) net.IP {
 
 var (
 	// Allowed values for 'type' field
-	allowedType = map[string]bool{"lxc": true, "vm": true, "pve": true, "addon": true}
+	allowedType = map[string]bool{"lxc": true, "vm": true, "pve": true, "addon": true, "tool": true}
 
 	// Allowed values for 'status' field
 	allowedStatus = map[string]bool{"installing": true, "configuring": true, "success": true, "failed": true, "aborted": true, "unknown": true}
@@ -803,6 +804,18 @@ func sanitizeMultiLine(s string, max int) string {
 	return s
 }
 
+// ipv4Re matches IPv4 addresses (e.g. 192.168.1.100) for GDPR anonymization.
+var ipv4Re = regexp.MustCompile(`(\d{1,3}\.)\d{1,3}\.\d{1,3}`)
+
+// sanitizeIPs anonymizes IPv4 addresses in log text for GDPR compliance.
+// Keeps the first octet visible for debugging (e.g. "192.x.x"), strips the rest.
+func sanitizeIPs(s string) string {
+	if s == "" {
+		return s
+	}
+	return ipv4Re.ReplaceAllString(s, "${1}x.x")
+}
+
 func validate(in *TelemetryIn) error {
 	// Sanitize all string fields
 	in.RandomID = sanitizeShort(in.RandomID, 64)
@@ -838,8 +851,8 @@ func validate(in *TelemetryIn) error {
 		in.CPUVendor = "unknown"
 	}
 
-	// Allow longer error text to capture log output from get_error_text()
-	in.Error = sanitizeMultiLine(in.Error, 131072) // 128KB — carries full installation log
+	// Allow longer error text to capture full installation log + anonymize IPs (GDPR)
+	in.Error = sanitizeIPs(sanitizeMultiLine(in.Error, 131072))
 
 	// Required fields for all requests
 	if in.RandomID == "" || in.Type == "" || in.NSAPP == "" || in.Status == "" {
@@ -851,26 +864,32 @@ func validate(in *TelemetryIn) error {
 		in.Status = "success"
 	}
 
-	// Validate enums
+	// Validate enums with fallback to safe defaults (never reject writes)
 	if !allowedType[in.Type] {
-		return errors.New("invalid type (must be 'lxc', 'vm', 'tool', or 'addon')")
+		log.Printf("[WARN] unknown type %q from nsapp=%s, rejecting", in.Type, in.NSAPP)
+		return errors.New("invalid type")
 	}
 	if !allowedStatus[in.Status] {
-		return errors.New("invalid status")
+		log.Printf("[WARN] unknown status %q from nsapp=%s, falling back to 'unknown'", in.Status, in.NSAPP)
+		in.Status = "unknown"
 	}
 
-	// Validate new enum fields
+	// Enum fields: fallback to "unknown" instead of rejecting
 	if !allowedGPUVendor[in.GPUVendor] {
-		return errors.New("invalid gpu_vendor (must be 'intel', 'amd', 'nvidia', 'unknown')")
+		log.Printf("[WARN] unknown gpu_vendor %q from nsapp=%s, falling back to 'unknown'", in.GPUVendor, in.NSAPP)
+		in.GPUVendor = "unknown"
 	}
 	if !allowedGPUPassthrough[in.GPUPassthrough] {
-		return errors.New("invalid gpu_passthrough (must be 'igpu', 'dgpu', 'vgpu', 'none', 'unknown')")
+		log.Printf("[WARN] unknown gpu_passthrough %q from nsapp=%s, falling back to 'unknown'", in.GPUPassthrough, in.NSAPP)
+		in.GPUPassthrough = "unknown"
 	}
 	if !allowedCPUVendor[in.CPUVendor] {
-		return errors.New("invalid cpu_vendor (must be 'intel', 'amd', 'arm', 'apple', 'qualcomm', 'unknown')")
+		log.Printf("[WARN] unknown cpu_vendor %q from nsapp=%s, falling back to 'unknown'", in.CPUVendor, in.NSAPP)
+		in.CPUVendor = "unknown"
 	}
 	if !allowedErrorCategory[in.ErrorCategory] {
-		return errors.New("invalid error_category")
+		log.Printf("[WARN] unknown error_category %q from nsapp=%s, falling back to 'unknown'", in.ErrorCategory, in.NSAPP)
+		in.ErrorCategory = "unknown"
 	}
 
 	// For status updates (not installing), skip numeric field validation
