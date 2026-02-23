@@ -699,6 +699,7 @@ var (
 		"timeout": true, "config": true, "resource": true, "unknown": true, "": true,
 		"user_aborted": true, "apt": true, "command_not_found": true,
 		"service": true, "database": true, "signal": true, "proxmox": true,
+		"shell": true,
 	}
 
 	// exitCodeCategories maps well-known exit codes to error categories
