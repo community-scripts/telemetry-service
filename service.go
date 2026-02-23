@@ -45,10 +45,10 @@ type Config struct {
 	EnableReqLogging bool          // default false (GDPR-friendly)
 
 	// Cache
-	RedisURL       string
-	EnableRedis    bool
-	CacheTTL       time.Duration
-	CacheEnabled   bool
+	RedisURL     string
+	EnableRedis  bool
+	CacheTTL     time.Duration
+	CacheEnabled bool
 
 	// Alerts (SMTP)
 	AlertEnabled          bool
@@ -64,20 +64,20 @@ type Config struct {
 	AlertCooldown         time.Duration
 
 	// GitHub Integration
-	GitHubToken    string // Personal access token for creating issues
-	GitHubOwner    string // Repository owner (e.g., "community-scripts")
-	GitHubRepo     string // Repository name (e.g., "ProxmoxVE")
-	AdminPassword  string // Password to protect admin actions (issue creation)
+	GitHubToken   string // Personal access token for creating issues
+	GitHubOwner   string // Repository owner (e.g., "community-scripts")
+	GitHubRepo    string // Repository name (e.g., "ProxmoxVE")
+	AdminPassword string // Password to protect admin actions (issue creation)
 }
 
 // TelemetryIn matches payload from api.func (bash client)
 type TelemetryIn struct {
 	// Required
-	RandomID    string `json:"random_id"`         // Session UUID
+	RandomID    string `json:"random_id"`              // Session UUID
 	ExecutionID string `json:"execution_id,omitempty"` // Unique execution ID (unique-indexed in PocketBase)
-	Type        string `json:"type"`              // "lxc", "vm", "pve", "addon"
-	NSAPP       string `json:"nsapp"`             // Application name (e.g., "jellyfin")
-	Status      string `json:"status"`            // "installing", "success", "failed", "aborted", "unknown"
+	Type        string `json:"type"`                   // "lxc", "vm", "pve", "addon"
+	NSAPP       string `json:"nsapp"`                  // Application name (e.g., "jellyfin")
+	Status      string `json:"status"`                 // "installing", "success", "failed", "aborted", "unknown"
 
 	// Container/VM specs
 	CTType    int `json:"ct_type,omitempty"`    // 1=unprivileged, 2=privileged/VM
@@ -98,9 +98,9 @@ type TelemetryIn struct {
 	// === EXTENDED FIELDS ===
 
 	// GPU Passthrough stats
-	GPUVendor       string `json:"gpu_vendor,omitempty"`       // "intel", "amd", "nvidia"
-	GPUModel        string `json:"gpu_model,omitempty"`        // e.g., "Intel Arc Graphics"
-	GPUPassthrough  string `json:"gpu_passthrough,omitempty"`  // "igpu", "dgpu", "vgpu", "none"
+	GPUVendor      string `json:"gpu_vendor,omitempty"`      // "intel", "amd", "nvidia"
+	GPUModel       string `json:"gpu_model,omitempty"`       // e.g., "Intel Arc Graphics"
+	GPUPassthrough string `json:"gpu_passthrough,omitempty"` // "igpu", "dgpu", "vgpu", "none"
 
 	// CPU stats
 	CPUVendor string `json:"cpu_vendor,omitempty"` // "intel", "amd", "arm"
@@ -127,15 +127,15 @@ type TelemetryOut struct {
 	NSAPP       string `json:"nsapp"`
 	Status      string `json:"status"`
 	CTType      int    `json:"ct_type,omitempty"`
-	DiskSize  int    `json:"disk_size,omitempty"`
-	CoreCount int    `json:"core_count,omitempty"`
-	RAMSize   int    `json:"ram_size,omitempty"`
-	OsType    string `json:"os_type,omitempty"`
-	OsVersion string `json:"os_version,omitempty"`
-	PveVer    string `json:"pve_version,omitempty"`
-	Method    string `json:"method,omitempty"`
-	Error     string `json:"error,omitempty"`
-	ExitCode  int    `json:"exit_code,omitempty"`
+	DiskSize    int    `json:"disk_size,omitempty"`
+	CoreCount   int    `json:"core_count,omitempty"`
+	RAMSize     int    `json:"ram_size,omitempty"`
+	OsType      string `json:"os_type,omitempty"`
+	OsVersion   string `json:"os_version,omitempty"`
+	PveVer      string `json:"pve_version,omitempty"`
+	Method      string `json:"method,omitempty"`
+	Error       string `json:"error,omitempty"`
+	ExitCode    int    `json:"exit_code,omitempty"`
 
 	// Extended fields
 	GPUVendor       string `json:"gpu_vendor,omitempty"`
@@ -381,7 +381,7 @@ func (p *PBClient) FetchRecordsPaginated(ctx context.Context, page, limit int, s
 			since = time.Now().Format("2006-01-02") + " 00:00:00"
 		} else {
 			// N days = today + (N-1) previous days
-			since = time.Now().AddDate(0, 0, -(days - 1)).Format("2006-01-02") + " 00:00:00"
+			since = time.Now().AddDate(0, 0, -(days-1)).Format("2006-01-02") + " 00:00:00"
 		}
 		filters = append(filters, fmt.Sprintf("created >= '%s'", since))
 	}
@@ -839,7 +839,7 @@ func validate(in *TelemetryIn) error {
 	}
 
 	// Allow longer error text to capture log output from get_error_text()
-	in.Error = sanitizeMultiLine(in.Error, 4000)
+	in.Error = sanitizeMultiLine(in.Error, 131072) // 128KB — carries full installation log
 
 	// Required fields for all requests
 	if in.RandomID == "" || in.Type == "" || in.NSAPP == "" || in.Status == "" {
@@ -1037,7 +1037,7 @@ func main() {
 		PBPassword:       mustEnv("PB_PASSWORD"),
 		PBTargetColl:     mustEnv("PB_TARGET_COLLECTION"),
 
-		MaxBodyBytes:     envInt64("MAX_BODY_BYTES", 8192),
+		MaxBodyBytes:     envInt64("MAX_BODY_BYTES", 262144),
 		RateLimitRPM:     envInt("RATE_LIMIT_RPM", 60),
 		RateBurst:        envInt("RATE_BURST", 20),
 		RateKeyMode:      env("RATE_KEY_MODE", "ip"), // "ip" or "header"
@@ -1133,12 +1133,12 @@ func main() {
 		// Check PocketBase connectivity
 		ctx, cancel := context.WithTimeout(r.Context(), 2*time.Second)
 		defer cancel()
-		
+
 		status := map[string]interface{}{
 			"status": "ok",
 			"time":   time.Now().UTC().Format(time.RFC3339),
 		}
-		
+
 		if err := pb.ensureAuth(ctx); err != nil {
 			status["status"] = "degraded"
 			status["pocketbase"] = "disconnected"
@@ -1147,7 +1147,7 @@ func main() {
 			status["pocketbase"] = "connected"
 			w.WriteHeader(200)
 		}
-		
+
 		w.Header().Set("Content-Type", "application/json")
 		json.NewEncoder(w).Encode(status)
 	})
@@ -1170,13 +1170,13 @@ func main() {
 	mux.HandleFunc("/metrics", func(w http.ResponseWriter, r *http.Request) {
 		ctx, cancel := context.WithTimeout(r.Context(), 5*time.Second)
 		defer cancel()
-		
+
 		data, err := pb.FetchDashboardData(ctx, 1, "ProxmoxVE") // Last 24h, production only for metrics
 		if err != nil {
 			http.Error(w, "failed to fetch metrics", http.StatusInternalServerError)
 			return
 		}
-		
+
 		w.Header().Set("Content-Type", "text/plain; version=0.0.4")
 		fmt.Fprintf(w, "# HELP telemetry_installs_total Total number of installations\n")
 		fmt.Fprintf(w, "# TYPE telemetry_installs_total counter\n")
@@ -1525,8 +1525,12 @@ func main() {
 
 		// Scale timeout by data volume
 		timeout := 120 * time.Second
-		if days >= 90 { timeout = 300 * time.Second }
-		if days >= 365 { timeout = 600 * time.Second }
+		if days >= 90 {
+			timeout = 300 * time.Second
+		}
+		if days >= 365 {
+			timeout = 600 * time.Second
+		}
 
 		ctx, cancel := context.WithTimeout(r.Context(), timeout)
 		defer cancel()
@@ -1542,8 +1546,12 @@ func main() {
 					go func() {
 						defer cache.FinishRefresh(cacheKey)
 						refreshTimeout := 120 * time.Second
-						if days >= 90 { refreshTimeout = 300 * time.Second }
-						if days >= 365 { refreshTimeout = 600 * time.Second }
+						if days >= 90 {
+							refreshTimeout = 300 * time.Second
+						}
+						if days >= 365 {
+							refreshTimeout = 600 * time.Second
+						}
 						refreshCtx, cancel := context.WithTimeout(context.Background(), refreshTimeout)
 						defer cancel()
 						freshData, err := pb.FetchErrorAnalysisData(refreshCtx, days, repoSource)
@@ -1552,7 +1560,9 @@ func main() {
 							return
 						}
 						refreshTTL := 2 * time.Minute
-						if days > 7 { refreshTTL = 23 * time.Hour }
+						if days > 7 {
+							refreshTTL = 23 * time.Hour
+						}
 						_ = cache.Set(context.Background(), cacheKey, freshData, refreshTTL)
 					}()
 				}
@@ -1570,7 +1580,9 @@ func main() {
 
 		if cfg.CacheEnabled {
 			cacheTTL := 2 * time.Minute
-			if days > 7 { cacheTTL = 23 * time.Hour }
+			if days > 7 {
+				cacheTTL = 23 * time.Hour
+			}
 			_ = cache.Set(ctx, cacheKey, data, cacheTTL)
 		}
 
@@ -1606,10 +1618,10 @@ func main() {
 
 		w.Header().Set("Content-Type", "application/json")
 		json.NewEncoder(w).Encode(map[string]interface{}{
-			"stuck_count":      count,
+			"stuck_count":       count,
 			"stuck_after_hours": cleaner.cfg.StuckAfterHours,
-			"check_interval":   cleaner.cfg.CheckInterval.String(),
-			"enabled":          cleaner.cfg.Enabled,
+			"check_interval":    cleaner.cfg.CheckInterval.String(),
+			"enabled":           cleaner.cfg.Enabled,
 		})
 	})
 
@@ -1669,14 +1681,14 @@ func main() {
 		}
 
 		var body struct {
-			Password    string `json:"password"`
-			Title       string `json:"title"`
-			Body        string `json:"body"`
+			Password    string   `json:"password"`
+			Title       string   `json:"title"`
+			Body        string   `json:"body"`
 			Labels      []string `json:"labels"`
-			AppName     string `json:"app_name"`
-			ExitCode    int    `json:"exit_code"`
-			ErrorText   string `json:"error_text"`
-			FailureRate float64 `json:"failure_rate"`
+			AppName     string   `json:"app_name"`
+			ExitCode    int      `json:"exit_code"`
+			ErrorText   string   `json:"error_text"`
+			FailureRate float64  `json:"failure_rate"`
 		}
 		if err := json.NewDecoder(r.Body).Decode(&body); err != nil {
 			w.Header().Set("Content-Type", "application/json")

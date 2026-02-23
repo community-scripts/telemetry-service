@@ -15,8 +15,8 @@ import (
 // DashboardData holds aggregated statistics for the dashboard
 type DashboardData struct {
 	TotalInstalls   int               `json:"total_installs"`
-	TotalAllTime    int               `json:"total_all_time"`    // Total records in DB (not limited)
-	SampleSize      int               `json:"sample_size"`       // How many records were sampled
+	TotalAllTime    int               `json:"total_all_time"` // Total records in DB (not limited)
+	SampleSize      int               `json:"sample_size"`    // How many records were sampled
 	SuccessCount    int               `json:"success_count"`
 	FailedCount     int               `json:"failed_count"`
 	AbortedCount    int               `json:"aborted_count"`
@@ -33,13 +33,13 @@ type DashboardData struct {
 	DailyStats      []DailyStat       `json:"daily_stats"`
 
 	// Extended metrics
-	GPUStats           []GPUCount       `json:"gpu_stats"`
-	ErrorCategories    []ErrorCatCount  `json:"error_categories"`
-	TopTools           []ToolCount      `json:"top_tools"`
-	TopAddons          []AddonCount     `json:"top_addons"`
-	AvgInstallDuration float64          `json:"avg_install_duration"` // seconds
-	TotalTools         int              `json:"total_tools"`
-	TotalAddons        int              `json:"total_addons"`
+	GPUStats           []GPUCount      `json:"gpu_stats"`
+	ErrorCategories    []ErrorCatCount `json:"error_categories"`
+	TopTools           []ToolCount     `json:"top_tools"`
+	TopAddons          []AddonCount    `json:"top_addons"`
+	AvgInstallDuration float64         `json:"avg_install_duration"` // seconds
+	TotalTools         int             `json:"total_tools"`
+	TotalAddons        int             `json:"total_addons"`
 }
 
 type AppCount struct {
@@ -90,9 +90,9 @@ type DailyStat struct {
 
 // Extended metric types
 type GPUCount struct {
-	Vendor     string `json:"vendor"`
+	Vendor      string `json:"vendor"`
 	Passthrough string `json:"passthrough"`
-	Count      int    `json:"count"`
+	Count       int    `json:"count"`
 }
 
 type ErrorCatCount struct {
@@ -116,30 +116,30 @@ type AddonCount struct {
 
 // ErrorAnalysisData holds comprehensive error analysis
 type ErrorAnalysisData struct {
-	TotalErrors       int                  `json:"total_errors"`
-	TotalInstalls     int                  `json:"total_installs"`
-	OverallFailRate   float64              `json:"overall_fail_rate"`
-	ExitCodeStats     []ExitCodeStat       `json:"exit_code_stats"`
-	CategoryStats     []CategoryStat       `json:"category_stats"`
-	AppErrors         []AppErrorDetail     `json:"app_errors"`
-	RecentErrors      []ErrorRecord        `json:"recent_errors"`
-	StuckInstalling   int                  `json:"stuck_installing"`
-	ErrorTimeline     []ErrorTimelinePoint `json:"error_timeline"`
+	TotalErrors     int                  `json:"total_errors"`
+	TotalInstalls   int                  `json:"total_installs"`
+	OverallFailRate float64              `json:"overall_fail_rate"`
+	ExitCodeStats   []ExitCodeStat       `json:"exit_code_stats"`
+	CategoryStats   []CategoryStat       `json:"category_stats"`
+	AppErrors       []AppErrorDetail     `json:"app_errors"`
+	RecentErrors    []ErrorRecord        `json:"recent_errors"`
+	StuckInstalling int                  `json:"stuck_installing"`
+	ErrorTimeline   []ErrorTimelinePoint `json:"error_timeline"`
 }
 
 type ExitCodeStat struct {
-	ExitCode    int    `json:"exit_code"`
-	Count       int    `json:"count"`
-	Description string `json:"description"`
-	Category    string `json:"category"`
+	ExitCode    int     `json:"exit_code"`
+	Count       int     `json:"count"`
+	Description string  `json:"description"`
+	Category    string  `json:"category"`
 	Percentage  float64 `json:"percentage"`
 }
 
 type CategoryStat struct {
-	Category    string  `json:"category"`
-	Count       int     `json:"count"`
-	Percentage  float64 `json:"percentage"`
-	TopApps     string  `json:"top_apps"`
+	Category   string  `json:"category"`
+	Count      int     `json:"count"`
+	Percentage float64 `json:"percentage"`
+	TopApps    string  `json:"top_apps"`
 }
 
 type AppErrorDetail struct {
@@ -266,10 +266,10 @@ func (p *PBClient) FetchKnownScripts(ctx context.Context) (map[string]ScriptInfo
 }
 
 type ScriptAnalysisData struct {
-	TotalScripts   int              `json:"total_scripts"`
-	TotalInstalls  int              `json:"total_installs"`
-	TopScripts     []ScriptStat     `json:"top_scripts"`
-	RecentScripts  []RecentScript   `json:"recent_scripts"`
+	TotalScripts  int            `json:"total_scripts"`
+	TotalInstalls int            `json:"total_installs"`
+	TopScripts    []ScriptStat   `json:"top_scripts"`
+	RecentScripts []RecentScript `json:"recent_scripts"`
 }
 
 type ScriptStat struct {
@@ -686,7 +686,9 @@ func (s *ScriptStatsStore) writeAllToPB(ctx context.Context) error {
 
 		if resp.StatusCode == http.StatusOK || resp.StatusCode == http.StatusCreated || resp.StatusCode == 204 {
 			if method == http.MethodPost {
-				var created struct{ ID string `json:"id"` }
+				var created struct {
+					ID string `json:"id"`
+				}
 				json.NewDecoder(resp.Body).Decode(&created)
 				st.ID = created.ID
 			}
@@ -810,7 +812,7 @@ func (p *PBClient) FetchScriptAnalysisData(ctx context.Context, days int, repoSo
 		if days == 1 {
 			since = time.Now().Format("2006-01-02") + " 00:00:00"
 		} else {
-			since = time.Now().AddDate(0, 0, -(days - 1)).Format("2006-01-02") + " 00:00:00"
+			since = time.Now().AddDate(0, 0, -(days-1)).Format("2006-01-02") + " 00:00:00"
 		}
 		filterParts = append(filterParts, fmt.Sprintf("created >= '%s'", since))
 	}
@@ -997,7 +999,7 @@ func (p *PBClient) FetchErrorAnalysisData(ctx context.Context, days int, repoSou
 		if days == 1 {
 			since = time.Now().Format("2006-01-02") + " 00:00:00"
 		} else {
-			since = time.Now().AddDate(0, 0, -(days - 1)).Format("2006-01-02") + " 00:00:00"
+			since = time.Now().AddDate(0, 0, -(days-1)).Format("2006-01-02") + " 00:00:00"
 		}
 		filterParts = append(filterParts, fmt.Sprintf("created >= '%s'", since))
 	}
@@ -1554,15 +1556,15 @@ func (p *PBClient) FetchErrorAnalysisData(ctx context.Context, days int, repoSou
 }
 
 type appStatAccum struct {
-	app             string
-	typ             string
-	total           int
-	failed          int
-	aborted         int
-	topExitCode     int
+	app              string
+	typ              string
+	total            int
+	failed           int
+	aborted          int
+	topExitCode      int
 	topExitCodeCount int
-	topError        string
-	topCategory     string
+	topError         string
+	topCategory      string
 }
 
 func sortExitCodeStats(s []ExitCodeStat) {
@@ -1615,7 +1617,7 @@ func (p *PBClient) FetchDashboardData(ctx context.Context, days int, repoSource 
 			since = time.Now().Format("2006-01-02") + " 00:00:00"
 		} else {
 			// N days = today + (N-1) previous days
-			since = time.Now().AddDate(0, 0, -(days - 1)).Format("2006-01-02") + " 00:00:00"
+			since = time.Now().AddDate(0, 0, -(days-1)).Format("2006-01-02") + " 00:00:00"
 		}
 		filterParts = append(filterParts, fmt.Sprintf("created >= '%s'", since))
 	}
@@ -1636,10 +1638,10 @@ func (p *PBClient) FetchDashboardData(ctx context.Context, days int, repoSource 
 		return nil, err
 	}
 	records := result.Records
-	
+
 	// Set total counts
-	data.TotalAllTime = result.TotalItems    // Actual total in database
-	data.SampleSize = len(records)           // How many we actually processed
+	data.TotalAllTime = result.TotalItems // Actual total in database
+	data.SampleSize = len(records)        // How many we actually processed
 
 	// Aggregate statistics
 	appCounts := make(map[string]int)
@@ -1648,7 +1650,7 @@ func (p *PBClient) FetchDashboardData(ctx context.Context, days int, repoSource 
 	pveCounts := make(map[string]int)
 	typeCounts := make(map[string]int)
 	errorApps := make(map[string]map[string]bool) // pattern -> set of apps
-	errorCounts := make(map[string]int)            // pattern -> total occurrences
+	errorCounts := make(map[string]int)           // pattern -> total occurrences
 	dailySuccess := make(map[string]int)
 	dailyFailed := make(map[string]int)
 
@@ -1657,10 +1659,10 @@ func (p *PBClient) FetchDashboardData(ctx context.Context, days int, repoSource 
 	appTypeFailures := make(map[string]int)
 
 	// Extended metrics maps
-	gpuCounts := make(map[string]int)              // "vendor|passthrough" -> count
-	errorCatCounts := make(map[string]int)          // category -> count
-	toolCounts := make(map[string]int)              // tool_name -> count
-	addonCounts := make(map[string]int)             // addon_name -> count
+	gpuCounts := make(map[string]int)      // "vendor|passthrough" -> count
+	errorCatCounts := make(map[string]int) // category -> count
+	toolCounts := make(map[string]int)     // tool_name -> count
+	addonCounts := make(map[string]int)    // addon_name -> count
 	var totalDuration, durationCount int
 
 	for i := range records {
@@ -2021,19 +2023,19 @@ func normalizeError(err string) string {
 
 	// Common error pattern replacements
 	patterns := map[string]string{
-		"connection refused":  "connection refused",
-		"timeout":             "timeout",
-		"no space left":       "disk full",
-		"permission denied":   "permission denied",
-		"not found":           "not found",
-		"failed to download":  "download failed",
-		"apt":                 "apt error",
-		"dpkg":                "dpkg error",
-		"curl":                "network error",
-		"wget":                "network error",
-		"docker":              "docker error",
-		"systemctl":           "systemd error",
-		"service":             "service error",
+		"connection refused": "connection refused",
+		"timeout":            "timeout",
+		"no space left":      "disk full",
+		"permission denied":  "permission denied",
+		"not found":          "not found",
+		"failed to download": "download failed",
+		"apt":                "apt error",
+		"dpkg":               "dpkg error",
+		"curl":               "network error",
+		"wget":               "network error",
+		"docker":             "docker error",
+		"systemctl":          "systemd error",
+		"service":            "service error",
 	}
 
 	for pattern, label := range patterns {
