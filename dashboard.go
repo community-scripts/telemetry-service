@@ -457,7 +457,7 @@ func aggregateRecords(records []TelemetryRecord, knownScripts map[string]ScriptI
 			st.Failed++
 		case "aborted":
 			st.Aborted++
-		case "installing", "configuring":
+		case "installing", "validation", "configuring":
 			st.Installing++
 		}
 	}
@@ -623,7 +623,7 @@ func (s *ScriptStatsStore) IncrementalUpdate(ctx context.Context, repoSource str
 			st.Failed++
 		case "aborted":
 			st.Aborted++
-		case "installing", "configuring":
+		case "installing", "validation", "configuring":
 			st.Installing++
 		}
 		added++
@@ -890,7 +890,7 @@ func (p *PBClient) FetchScriptAnalysisData(ctx context.Context, days int, repoSo
 			a.failed++
 		case "aborted":
 			a.aborted++
-		case "installing", "configuring":
+		case "installing", "validation", "configuring":
 			a.installing++
 		}
 
@@ -1051,7 +1051,7 @@ func (p *PBClient) FetchErrorAnalysisData(ctx context.Context, days int, repoSou
 			r.Status = "success"
 		}
 
-		if r.Status == "installing" || r.Status == "configuring" {
+		if r.Status == "installing" || r.Status == "validation" || r.Status == "configuring" {
 			stuckCount++
 			continue
 		}
@@ -1696,7 +1696,7 @@ func (p *PBClient) FetchDashboardData(ctx context.Context, days int, repoSource 
 			}
 		case "aborted":
 			data.AbortedCount++
-		case "installing", "configuring":
+		case "installing", "validation", "configuring":
 			data.InstallingCount++
 		}
 

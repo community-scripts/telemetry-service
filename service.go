@@ -500,12 +500,12 @@ func (p *PBClient) UpsertTelemetry(ctx context.Context, payload TelemetryOut) er
 	}
 
 	if recordID == "" {
-		// "configuring" is just a progress ping — never create a new record for it.
+		// Progress pings (validation/configuring) — never create a new record.
 		// This prevents ghost records (ct_type=0, all zeros, repo_source=N/A) when
-		// the container sends "configuring" before the host's "installing" was written.
-		if payload.Status == "configuring" {
-			log.Printf("[WARN] configuring update for %s (exec=%s) but no existing record found, skipping",
-				payload.NSAPP, payload.ExecutionID)
+		// the ping arrives before the host's "installing" record was written.
+		if payload.Status == "configuring" || payload.Status == "validation" {
+			log.Printf("[WARN] %s update for %s (exec=%s) but no existing record found, skipping",
+				payload.Status, payload.NSAPP, payload.ExecutionID)
 			return nil
 		}
 		// For final states (failed/success/aborted) — create as fallback.
@@ -685,7 +685,7 @@ var (
 	allowedType = map[string]bool{"lxc": true, "vm": true, "pve": true, "addon": true, "tool": true}
 
 	// Allowed values for 'status' field
-	allowedStatus = map[string]bool{"installing": true, "configuring": true, "success": true, "failed": true, "aborted": true, "unknown": true}
+	allowedStatus = map[string]bool{"installing": true, "validation": true, "configuring": true, "success": true, "failed": true, "aborted": true, "unknown": true}
 
 	// Allowed values for 'os_type' field
 	allowedOsType = map[string]bool{
