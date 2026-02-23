@@ -166,6 +166,7 @@ type TelemetryStatusUpdate struct {
 	CPUVendor       string `json:"cpu_vendor,omitempty"`
 	CPUModel        string `json:"cpu_model,omitempty"`
 	RAMSpeed        string `json:"ram_speed,omitempty"`
+	RepoSource      string `json:"repo_source,omitempty"`
 }
 
 // Allowed values for 'repo_source' field
@@ -499,8 +500,16 @@ func (p *PBClient) UpsertTelemetry(ctx context.Context, payload TelemetryOut) er
 	}
 
 	if recordID == "" {
-		// Record not found - this shouldn't happen normally
-		// Create a full record as fallback
+		// "configuring" is just a progress ping — never create a new record for it.
+		// This prevents ghost records (ct_type=0, all zeros, repo_source=N/A) when
+		// the container sends "configuring" before the host's "installing" was written.
+		if payload.Status == "configuring" {
+			log.Printf("[WARN] configuring update for %s (exec=%s) but no existing record found, skipping",
+				payload.NSAPP, payload.ExecutionID)
+			return nil
+		}
+		// For final states (failed/success/aborted) — create as fallback.
+		// post_update_to_api sends full payload so the record will have all fields.
 		return p.CreateTelemetry(ctx, payload)
 	}
 
@@ -518,6 +527,7 @@ func (p *PBClient) UpsertTelemetry(ctx context.Context, payload TelemetryOut) er
 		CPUVendor:       payload.CPUVendor,
 		CPUModel:        payload.CPUModel,
 		RAMSpeed:        payload.RAMSpeed,
+		RepoSource:      payload.RepoSource,
 	}
 	return p.UpdateTelemetryStatus(ctx, recordID, update)
 }
