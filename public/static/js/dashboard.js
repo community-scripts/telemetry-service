@@ -520,7 +520,7 @@ function renderTableRows(records) {
   currentRecords = records;
 
   if (records.length === 0) {
-    tbody.innerHTML = '<tr><td colspan="8"><div class="loading" style="padding: 40px;">No records found</div></td></tr>';
+    tbody.innerHTML = '<tr><td colspan="9"><div class="loading" style="padding: 40px;">No records found</div></td></tr>';
     return;
   }
 
@@ -533,8 +533,17 @@ function renderTableRows(records) {
     const created = r.created ? formatTimestamp(r.created) : '-';
     const osDisplay = r.os_type ? (r.os_type + (r.os_version ? ' ' + r.os_version : '')) : '-';
 
+    // Exit code column: show badge for failed, dash for success/running
+    let exitCodeCell = '-';
+    if (r.status === 'failed' && r.exit_code !== undefined && r.exit_code !== null) {
+      exitCodeCell = '<span class="exit-code-badge">' + r.exit_code + '</span>';
+    } else if (r.status === 'aborted' && r.exit_code !== undefined && r.exit_code !== null) {
+      exitCodeCell = '<span class="exit-code-badge aborted">' + r.exit_code + '</span>';
+    }
+
     return '<tr class="clickable-row" onclick="showRecordDetail(' + index + ')">' +
       '<td><span class="status-badge ' + statusClass + '">' + escapeHtml(r.status || 'unknown') + '</span></td>' +
+      '<td>' + exitCodeCell + '</td>' +
       '<td><span class="type-badge ' + typeClass + '">' + escapeHtml((r.type || '-').toUpperCase()) + '</span></td>' +
       '<td><strong>' + escapeHtml(r.nsapp || '-') + '</strong></td>' +
       '<td>' + escapeHtml(osDisplay) + '</td>' +

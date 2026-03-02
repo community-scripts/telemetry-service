@@ -709,83 +709,238 @@ var (
 		"timeout": true, "config": true, "resource": true, "unknown": true, "": true,
 		"user_aborted": true, "apt": true, "command_not_found": true,
 		"service": true, "database": true, "signal": true, "proxmox": true,
-		"shell": true,
+		"shell": true, "build": true,
 	}
 
-	// exitCodeCategories maps well-known exit codes to error categories
-	exitCodeCategories = map[int]string{
-		1:   "unknown",           // General error
-		2:   "unknown",           // Misuse of shell builtins
-		4:   "network",           // curl: Network/protocol error
-		5:   "network",           // curl: Could not resolve proxy
-		6:   "network",           // curl: Could not resolve host
-		7:   "network",           // curl: Connection refused
-		8:   "network",           // curl: FTP server reply error
-		10:  "config",            // Docker / privileged mode required
-		22:  "network",           // curl: HTTP error (404/500 etc.)
-		23:  "storage",           // curl: Write error (disk full?)
-		25:  "network",           // curl: Upload failed
-		28:  "timeout",           // curl: Connection timed out
-		35:  "network",           // SSL connect error
-		56:  "network",           // curl: Receive error (connection reset)
-		100: "apt",               // APT: package manager error
-		101: "apt",               // APT: Unmet dependencies
-		102: "apt",               // APT: Lock held by another process
-		124: "timeout",           // Command timed out
-		125: "config",            // Docker daemon error / container failed to run
-		126: "permission",        // Command invoked cannot execute
-		127: "command_not_found", // Command not found
-		128: "signal",            // Invalid argument to exit
-		129: "user_aborted",      // Killed by SIGHUP (terminal closed) — reclassified as aborted
-		130: "user_aborted",      // Script terminated by Ctrl+C (SIGINT)
-		131: "signal",            // Killed by SIGQUIT (core dump)
-		134: "signal",            // Process aborted (SIGABRT)
-		137: "resource",          // SIGKILL - often OOM killer
-		139: "unknown",           // SIGSEGV - segfault
-		141: "signal",            // SIGPIPE
-		143: "signal",            // SIGTERM
-		255: "apt",               // DPKG: Fatal internal error
-	}
+	// exitCodeInfo consolidates description and category for all known exit codes.
+	// This is the single source of truth — dashboard.go and all other code should
+	// use getExitCodeDescription() / getExitCodeCategory() instead of duplicating.
+	exitCodeInfo = map[int]struct {
+		Desc     string
+		Category string
+	}{
+		// --- Generic / Shell ---
+		0:  {"Success", ""},
+		1:  {"General error", "unknown"},
+		2:  {"Misuse of shell builtins", "unknown"},
+		3:  {"General syntax or argument error", "unknown"},
 
-	// exitCodeDescriptions provides human-readable exit code descriptions
-	exitCodeDescriptions = map[int]string{
-		0:   "Success",
-		1:   "General error",
-		2:   "Misuse of shell builtins",
-		4:   "curl: Network/protocol error",
-		5:   "curl: Could not resolve proxy",
-		6:   "curl: DNS resolution failed",
-		7:   "curl: Connection refused",
-		8:   "curl: FTP server reply error",
-		10:  "Docker / privileged mode required (unsupported environment)",
-		22:  "curl: HTTP error (404/500 etc.)",
-		23:  "curl: Write error (disk full?)",
-		25:  "curl: Upload failed",
-		28:  "curl: Connection timed out",
-		30:  "curl: FTP port command failed",
-		35:  "SSL connect error",
-		56:  "curl: Receive error (connection reset)",
-		75:  "Temporary failure (retry later)",
-		78:  "curl: Remote file not found (404)",
-		100: "APT: Package manager error (broken packages / dependency problems)",
-		101: "APT: Unmet dependencies",
-		102: "APT: Lock held by another process",
-		124: "Command timed out",
-		125: "Docker daemon error (container failed to run)",
-		126: "Command cannot execute (permission problem)",
-		127: "Command not found",
-		128: "Invalid argument to exit",
-		129: "Killed by SIGHUP (terminal closed / hangup)",
-		130: "Script terminated by Ctrl+C (SIGINT)",
-		131: "Killed by SIGQUIT (core dump)",
-		134: "Process aborted (SIGABRT)",
-		137: "Process killed (SIGKILL) - likely OOM",
-		139: "Segmentation fault (SIGSEGV)",
-		141: "Broken pipe (SIGPIPE)",
-		143: "Process terminated (SIGTERM)",
-		255: "DPKG: Fatal internal error",
+		// --- curl / wget ---
+		4:  {"curl: Feature not supported or protocol error", "network"},
+		5:  {"curl: Could not resolve proxy", "network"},
+		6:  {"curl: DNS resolution failed", "network"},
+		7:  {"curl: Connection refused / host down", "network"},
+		8:  {"curl: Server reply error", "network"},
+		16: {"curl: HTTP/2 framing layer error", "network"},
+		18: {"curl: Partial file (transfer incomplete)", "network"},
+		22: {"curl: HTTP error (404/500 etc.)", "network"},
+		23: {"curl: Write error (disk full?)", "storage"},
+		24: {"curl: Write to local file failed", "storage"},
+		25: {"curl: Upload failed", "network"},
+		26: {"curl: Read error on local file (I/O)", "storage"},
+		27: {"curl: Out of memory", "resource"},
+		28: {"curl: Connection timed out", "timeout"},
+		30: {"curl: FTP port command failed", "network"},
+		32: {"curl: FTP SIZE command failed", "network"},
+		33: {"curl: HTTP range error", "network"},
+		34: {"curl: HTTP post error", "network"},
+		35: {"curl: SSL/TLS handshake failed", "network"},
+		36: {"curl: FTP bad download resume", "network"},
+		47: {"curl: Too many redirects", "network"},
+		51: {"curl: SSL peer certificate verification failed", "network"},
+		52: {"curl: Empty reply from server", "network"},
+		55: {"curl: Failed sending network data", "network"},
+		56: {"curl: Receive error (connection reset)", "network"},
+		59: {"curl: Couldn't use specified SSL cipher", "network"},
+		75: {"Temporary failure (retry later)", "network"},
+		78: {"curl: Remote file not found (404)", "network"},
+		92: {"curl: HTTP/2 stream error", "network"},
+		95: {"curl: HTTP/3 layer error", "network"},
+
+		// --- Docker / Privileged ---
+		10: {"Docker / privileged mode required", "config"},
+
+		// --- BSD sysexits.h (64-78) ---
+		64: {"Usage error (wrong arguments)", "config"},
+		65: {"Data format error (bad input data)", "unknown"},
+		66: {"Input file not found", "unknown"},
+		67: {"User not found", "unknown"},
+		68: {"Host not found", "network"},
+		69: {"Service unavailable", "service"},
+		70: {"Internal software error", "unknown"},
+		71: {"System error (OS-level failure)", "unknown"},
+		72: {"Critical OS file missing", "unknown"},
+		73: {"Cannot create output file", "storage"},
+		74: {"I/O error", "storage"},
+		76: {"Remote protocol error", "network"},
+		77: {"Permission denied", "permission"},
+
+		// --- APT / DPKG ---
+		100: {"APT: Package manager error (broken packages)", "apt"},
+		101: {"APT: Configuration error (bad sources)", "apt"},
+		102: {"APT: Lock held by another process", "apt"},
+
+		// --- Script Validation & Setup (103-123) ---
+		103: {"Validation: Shell is not Bash", "config"},
+		104: {"Validation: Not running as root", "permission"},
+		105: {"Validation: PVE version not supported", "config"},
+		106: {"Validation: Architecture not supported (ARM/PiMox)", "config"},
+		107: {"Validation: Kernel key parameters unreadable", "config"},
+		108: {"Validation: Kernel key limits exceeded", "config"},
+		109: {"Proxmox: No available container ID", "proxmox"},
+		110: {"Proxmox: Failed to apply default.vars", "proxmox"},
+		111: {"Proxmox: App defaults file not available", "proxmox"},
+		112: {"Proxmox: Invalid install menu option", "config"},
+		113: {"LXC: Under-provisioned — user aborted", "user_aborted"},
+		114: {"LXC: Storage too low — user aborted", "user_aborted"},
+		115: {"Download: install.func failed or incomplete", "network"},
+		116: {"Proxmox: Default bridge vmbr0 not found", "config"},
+		117: {"LXC: Container did not reach running state", "proxmox"},
+		118: {"LXC: No IP assigned after timeout", "timeout"},
+		119: {"Proxmox: No valid storage for rootdir", "storage"},
+		120: {"Proxmox: No valid storage for vztmpl", "storage"},
+		121: {"LXC: Container network not ready", "network"},
+		122: {"LXC: No internet — user declined", "user_aborted"},
+		123: {"LXC: Local IP detection failed", "network"},
+
+		// --- Common shell/system errors ---
+		124: {"Command timed out", "timeout"},
+		125: {"Docker daemon error / command failed to start", "config"},
+		126: {"Command cannot execute (permission problem)", "permission"},
+		127: {"Command not found", "command_not_found"},
+		128: {"Invalid argument to exit", "signal"},
+		129: {"Killed by SIGHUP (terminal closed)", "user_aborted"},
+		130: {"Script terminated by Ctrl+C (SIGINT)", "user_aborted"},
+		131: {"Killed by SIGQUIT (core dump)", "signal"},
+		132: {"Killed by SIGILL (illegal instruction)", "signal"},
+		134: {"Process aborted (SIGABRT)", "signal"},
+		137: {"Process killed (SIGKILL) — likely OOM", "resource"},
+		139: {"Segmentation fault (SIGSEGV)", "unknown"},
+		141: {"Broken pipe (SIGPIPE)", "signal"},
+		143: {"Process terminated (SIGTERM)", "signal"},
+		144: {"Killed by signal 16 (SIGUSR1/SIGSTKFLT)", "signal"},
+		146: {"Killed by signal 18 (SIGTSTP)", "signal"},
+
+		// --- Systemd / Service errors (150-154) ---
+		150: {"Systemd: Service failed to start", "service"},
+		151: {"Systemd: Service unit not found", "service"},
+		152: {"Permission denied (EACCES)", "permission"},
+		153: {"Build/compile failed (make/gcc/cmake)", "build"},
+		154: {"Node.js: Native addon build failed (node-gyp)", "build"},
+
+		// --- Python / pip / uv (160-162) ---
+		160: {"Python: Virtualenv/uv environment missing or broken", "dependency"},
+		161: {"Python: Dependency resolution failed", "dependency"},
+		162: {"Python: Installation aborted (EXTERNALLY-MANAGED)", "dependency"},
+
+		// --- PostgreSQL (170-173) ---
+		170: {"PostgreSQL: Connection failed", "database"},
+		171: {"PostgreSQL: Authentication failed", "database"},
+		172: {"PostgreSQL: Database does not exist", "database"},
+		173: {"PostgreSQL: Fatal error in query", "database"},
+
+		// --- MySQL / MariaDB (180-183) ---
+		180: {"MySQL/MariaDB: Connection failed", "database"},
+		181: {"MySQL/MariaDB: Authentication failed", "database"},
+		182: {"MySQL/MariaDB: Database does not exist", "database"},
+		183: {"MySQL/MariaDB: Fatal error in query", "database"},
+
+		// --- MongoDB (190-193) ---
+		190: {"MongoDB: Connection failed", "database"},
+		191: {"MongoDB: Authentication failed", "database"},
+		192: {"MongoDB: Database not found", "database"},
+		193: {"MongoDB: Fatal query error", "database"},
+
+		// --- Proxmox Custom Codes (200-231) ---
+		200: {"Proxmox: Failed to create lock file", "proxmox"},
+		203: {"Proxmox: Missing CTID variable", "config"},
+		204: {"Proxmox: Missing PCT_OSTYPE variable", "config"},
+		205: {"Proxmox: Invalid CTID (<100)", "config"},
+		206: {"Proxmox: CTID already in use", "config"},
+		207: {"Proxmox: Password contains unescaped special chars", "config"},
+		208: {"Proxmox: Invalid configuration (DNS/MAC/Network)", "config"},
+		209: {"Proxmox: Container creation failed", "proxmox"},
+		210: {"Proxmox: Cluster not quorate", "proxmox"},
+		211: {"Proxmox: Timeout waiting for template lock", "timeout"},
+		212: {"Proxmox: Storage 'iscsidirect' does not support containers", "proxmox"},
+		213: {"Proxmox: Storage does not support 'rootdir' content", "proxmox"},
+		214: {"Proxmox: Not enough storage space", "storage"},
+		215: {"Proxmox: Container created but not listed (ghost state)", "proxmox"},
+		216: {"Proxmox: RootFS entry missing in config", "proxmox"},
+		217: {"Proxmox: Storage not accessible", "storage"},
+		218: {"Proxmox: Template file corrupted or incomplete", "proxmox"},
+		219: {"Proxmox: CephFS does not support containers", "storage"},
+		220: {"Proxmox: Unable to resolve template path", "proxmox"},
+		221: {"Proxmox: Template file not readable", "proxmox"},
+		222: {"Proxmox: Template download failed", "proxmox"},
+		223: {"Proxmox: Template not available after download", "proxmox"},
+		224: {"Proxmox: PBS storage is for backups only", "storage"},
+		225: {"Proxmox: No template available for OS/Version", "proxmox"},
+		226: {"Proxmox: VM disk import or post-creation setup failed", "proxmox"},
+		231: {"Proxmox: LXC stack upgrade failed", "proxmox"},
+
+		// --- Tools & Addon Scripts (232-238) ---
+		232: {"Tools: Wrong execution environment", "config"},
+		233: {"Tools: Application not installed (update prerequisite missing)", "config"},
+		234: {"Tools: No LXC containers found", "proxmox"},
+		235: {"Tools: Backup or restore operation failed", "storage"},
+		236: {"Tools: Required hardware not detected", "config"},
+		237: {"Tools: Dependency package installation failed", "dependency"},
+		238: {"Tools: OS or distribution not supported", "config"},
+
+		// --- Node.js / npm (239-249) ---
+		239: {"npm/Node.js: Unexpected runtime error", "dependency"},
+		243: {"Node.js: Out of memory (heap overflow)", "resource"},
+		245: {"Node.js: Invalid command-line option", "config"},
+		246: {"Node.js: Internal JavaScript Parse Error", "unknown"},
+		247: {"Node.js: Fatal internal error", "unknown"},
+		248: {"Node.js: Invalid C++ addon / N-API failure", "unknown"},
+		249: {"npm/pnpm/yarn: Unknown fatal error", "unknown"},
+
+		// --- Application Install/Update Errors (250-254) ---
+		250: {"App: Download failed or version not determined", "network"},
+		251: {"App: File extraction failed (corrupt/incomplete)", "storage"},
+		252: {"App: Required file or resource not found", "unknown"},
+		253: {"App: Data migration required — update aborted", "config"},
+		254: {"App: User declined prompt or input timed out", "user_aborted"},
+
+		// --- DPKG ---
+		255: {"DPKG: Fatal internal error / set -e triggered", "apt"},
 	}
 )
+
+// getExitCodeDescription returns the human-readable description for an exit code.
+// Falls back to signal-based description for codes 128-191, or "Unknown" otherwise.
+func getExitCodeDescription(code int) string {
+	if info, ok := exitCodeInfo[code]; ok {
+		return info.Desc
+	}
+	if code > 128 && code < 192 {
+		sigNum := code - 128
+		sigNames := map[int]string{
+			1: "SIGHUP", 2: "SIGINT", 3: "SIGQUIT", 6: "SIGABRT",
+			9: "SIGKILL", 11: "SIGSEGV", 13: "SIGPIPE", 15: "SIGTERM",
+			24: "SIGXCPU", 25: "SIGXFSZ",
+		}
+		if name, ok := sigNames[sigNum]; ok {
+			return fmt.Sprintf("Killed by %s (signal %d)", name, sigNum)
+		}
+		return fmt.Sprintf("Killed by signal %d", sigNum)
+	}
+	return fmt.Sprintf("Unknown (exit code %d)", code)
+}
+
+// getExitCodeCategory returns the error category for an exit code.
+// Falls back to "signal" for codes 128-191, or "unknown" otherwise.
+func getExitCodeCategory(code int) string {
+	if info, ok := exitCodeInfo[code]; ok {
+		return info.Category
+	}
+	if code > 128 && code < 192 {
+		return "signal"
+	}
+	return "unknown"
+}
 
 func sanitizeShort(s string, max int) string {
 	s = strings.TrimSpace(s)
@@ -1624,7 +1779,12 @@ func main() {
 	// API: Get exit code descriptions (static reference data)
 	mux.HandleFunc("/api/exit-codes", func(w http.ResponseWriter, r *http.Request) {
 		w.Header().Set("Content-Type", "application/json")
-		json.NewEncoder(w).Encode(exitCodeDescriptions)
+		// Build a simple map[int]string from the unified exitCodeInfo
+		descs := make(map[int]string, len(exitCodeInfo))
+		for code, info := range exitCodeInfo {
+			descs[code] = info.Desc
+		}
+		json.NewEncoder(w).Encode(descs)
 	})
 
 	// Serve static files from the /public/static directory
@@ -1866,7 +2026,7 @@ func main() {
 
 		// Auto-categorize errors based on exit code when no category provided
 		if in.Status == "failed" && (in.ErrorCategory == "" || in.ErrorCategory == "unknown") {
-			if cat, ok := exitCodeCategories[in.ExitCode]; ok {
+			if cat := getExitCodeCategory(in.ExitCode); cat != "unknown" {
 				in.ErrorCategory = cat
 			}
 		}
@@ -1878,13 +2038,7 @@ func main() {
 
 		// Enrich error text with exit code description if error text is empty
 		if in.Status == "failed" && in.Error == "" && in.ExitCode != 0 {
-			if desc, ok := exitCodeDescriptions[in.ExitCode]; ok {
-				in.Error = fmt.Sprintf("Exit code %d: %s", in.ExitCode, desc)
-			} else if in.ExitCode > 128 && in.ExitCode < 192 {
-				in.Error = fmt.Sprintf("Exit code %d: Killed by signal %d", in.ExitCode, in.ExitCode-128)
-			} else {
-				in.Error = fmt.Sprintf("Exit code %d: Unknown error", in.ExitCode)
-			}
+			in.Error = fmt.Sprintf("Exit code %d: %s", in.ExitCode, getExitCodeDescription(in.ExitCode))
 		}
 
 		// Map input to PocketBase schema
@@ -2029,15 +2183,10 @@ func securityHeaders(next http.Handler) http.Handler {
 	})
 }
 
-// categorizeExitCode returns a short human-readable category for an exit code
+// categorizeExitCode returns a short human-readable description for an exit code.
+// Delegates to getExitCodeDescription (single source of truth).
 func categorizeExitCode(code int) string {
-	if desc, ok := exitCodeDescriptions[code]; ok {
-		return desc
-	}
-	if code > 128 && code < 192 {
-		return fmt.Sprintf("Killed by signal %d", code-128)
-	}
-	return fmt.Sprintf("Unknown (exit code %d)", code)
+	return getExitCodeDescription(code)
 }
 
 // createGitHubIssue creates a new issue in the specified GitHub repository

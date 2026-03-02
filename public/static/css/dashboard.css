@@ -595,6 +595,29 @@ tr.clickable-row {
   border-color: rgba(100, 116, 139, 0.3);
 }
 
+/* Exit Code Badge */
+.exit-code-badge {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  min-width: 36px;
+  padding: 3px 8px;
+  border-radius: 6px;
+  font-size: 11px;
+  font-weight: 700;
+  font-family: 'JetBrains Mono', monospace;
+  background: rgba(239, 68, 68, 0.12);
+  color: var(--accent-red, #ef4444);
+  border: 1px solid rgba(239, 68, 68, 0.25);
+  letter-spacing: 0.5px;
+}
+
+.exit-code-badge.aborted {
+  background: rgba(168, 85, 247, 0.12);
+  color: var(--accent-purple, #a855f7);
+  border-color: rgba(168, 85, 247, 0.25);
+}
+
 /* Type Badge */
 .type-badge {
   display: inline-flex;
