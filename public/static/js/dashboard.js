@@ -565,29 +565,50 @@ function showRecordDetail(index) {
 
   modalTitle.textContent = record.nsapp || 'Record Details';
 
-  // Build detail content with sections
   let html = '';
 
-  // General Information Section
-  html += '<div class="detail-section">';
-  html += '<div class="detail-section-header"><svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><circle cx="12" cy="12" r="10"/><line x1="12" y1="16" x2="12" y2="12"/><line x1="12" y1="8" x2="12.01" y2="8"/></svg> General Information</div>';
-  html += '<div class="detail-grid">';
-  html += buildDetailItem('App Name', record.nsapp);
-  html += buildDetailItem('Status', record.status, 'status-' + (record.status || 'unknown'));
-  html += buildDetailItem('Type', formatType(record.type));
-  html += buildDetailItem('Method', record.method || 'default');
-  html += buildDetailItem('Random ID', record.random_id, 'mono');
-  html += '</div></div>';
+  // ── Header Card: quick overview strip ──
+  const statusCls = record.status || 'unknown';
+  const typeLbl = formatType(record.type) || record.type || '-';
+  const durStr = record.install_duration ? formatDuration(record.install_duration) : null;
 
-  // Pipeline Section (if pipeline data exists)
+  html += '<div class="detail-header-strip">';
+  html += '<div class="header-chip"><span class="status-badge ' + statusCls + '">' + escapeHtml(record.status || 'unknown') + '</span></div>';
+  if (record.exit_code !== undefined && record.exit_code !== null) {
+    const ecClass = record.exit_code === 0 ? 'ec-ok' : 'ec-fail';
+    html += '<div class="header-chip"><span class="header-chip-label">Exit</span><span class="exit-code-inline ' + ecClass + '">' + record.exit_code + '</span></div>';
+  }
+  html += '<div class="header-chip"><span class="header-chip-label">Type</span>' + escapeHtml(typeLbl) + '</div>';
+  if (record.method && record.method !== 'default') {
+    html += '<div class="header-chip"><span class="header-chip-label">Method</span>' + escapeHtml(record.method) + '</div>';
+  }
+  if (durStr) {
+    html += '<div class="header-chip"><span class="header-chip-label">Duration</span>' + escapeHtml(durStr) + '</div>';
+  }
+  if (record.created) {
+    html += '<div class="header-chip"><span class="header-chip-label">Created</span>' + escapeHtml(formatFullTimestamp(record.created)) + '</div>';
+  }
+  html += '</div>';
+
+  // ── Pipeline Section ──
+  html += '<div class="detail-section">';
+  html += '<div class="detail-section-header"><svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><polyline points="22 12 18 12 15 21 9 3 6 12 2 12"/></svg> Installation Pipeline</div>';
   if (record.pipeline) {
-    html += '<div class="detail-section">';
-    html += '<div class="detail-section-header"><svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><polyline points="22 12 18 12 15 21 9 3 6 12 2 12"/></svg> Installation Pipeline</div>';
     html += renderPipeline(record.pipeline);
+  } else {
+    html += '<div class="pipeline-empty">Pipeline tracking not available for this record</div>';
+  }
+  html += '</div>';
+
+  // ── Error Section (if failed) ──
+  if (record.error) {
+    html += '<div class="detail-section">';
+    html += '<div class="detail-section-header"><svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><circle cx="12" cy="12" r="10"/><line x1="15" y1="9" x2="9" y2="15"/><line x1="9" y1="9" x2="15" y2="15"/></svg> Error Details</div>';
+    html += renderErrorSection(record);
     html += '</div>';
   }
 
-  // System Resources Section
+  // ── System & Hardware (2-col layout) ──
   html += '<div class="detail-section">';
   html += '<div class="detail-section-header"><svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><rect x="4" y="4" width="16" height="16" rx="2" ry="2"/><rect x="9" y="9" width="6" height="6"/><line x1="9" y1="1" x2="9" y2="4"/><line x1="15" y1="1" x2="15" y2="4"/><line x1="9" y1="20" x2="9" y2="23"/><line x1="15" y1="20" x2="15" y2="23"/><line x1="20" y1="9" x2="23" y2="9"/><line x1="20" y1="14" x2="23" y2="14"/><line x1="1" y1="9" x2="4" y2="9"/><line x1="1" y1="14" x2="4" y2="14"/></svg> System Resources</div>';
   html += '<div class="detail-grid">';
@@ -597,7 +618,7 @@ function showRecordDetail(index) {
   html += buildDetailItem('CT Type', record.ct_type !== undefined ? (record.ct_type === 1 ? 'Unprivileged' : 'Privileged') : null);
   html += '</div></div>';
 
-  // Operating System Section
+  // ── OS Section ──
   html += '<div class="detail-section">';
   html += '<div class="detail-section-header"><svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><rect x="2" y="3" width="20" height="14" rx="2" ry="2"/><line x1="8" y1="21" x2="16" y2="21"/><line x1="12" y1="17" x2="12" y2="21"/></svg> Operating System</div>';
   html += '<div class="detail-grid">';
@@ -606,7 +627,7 @@ function showRecordDetail(index) {
   html += buildDetailItem('PVE Version', record.pve_version);
   html += '</div></div>';
 
-  // Hardware Section (CPU & GPU)
+  // ── Hardware Section ──
   const hasHardwareInfo = record.cpu_vendor || record.cpu_model || record.gpu_vendor || record.gpu_model || record.ram_speed;
   if (hasHardwareInfo) {
     html += '<div class="detail-section">';
@@ -621,27 +642,14 @@ function showRecordDetail(index) {
     html += '</div></div>';
   }
 
-  // Installation Details Section
+  // ── Meta Section (IDs / timestamps) ──
   html += '<div class="detail-section">';
-  html += '<div class="detail-section-header"><svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M21 15v4a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2v-4"/><polyline points="7 10 12 15 17 10"/><line x1="12" y1="15" x2="12" y2="3"/></svg> Installation</div>';
+  html += '<div class="detail-section-header"><svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><circle cx="12" cy="12" r="10"/><polyline points="12 6 12 12 16 14"/></svg> Metadata</div>';
   html += '<div class="detail-grid">';
-  html += buildDetailItem('Exit Code', record.exit_code !== undefined ? record.exit_code : null, record.exit_code === 0 ? 'status-success' : (record.exit_code ? 'status-failed' : ''));
-  html += buildDetailItem('Duration', record.install_duration ? formatDuration(record.install_duration) : null);
-  html += buildDetailItem('Error Category', record.error_category);
-  html += '</div></div>';
-
-  // Error Section (if present)
-  if (record.error) {
-    html += '<div class="detail-section">';
-    html += '<div class="detail-section-header"><svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><circle cx="12" cy="12" r="10"/><line x1="15" y1="9" x2="9" y2="15"/><line x1="9" y1="9" x2="15" y2="15"/></svg> Error Details</div>';
-    html += '<div class="error-box">' + escapeHtml(record.error) + '</div>';
-    html += '</div>';
+  html += buildDetailItem('Random ID', record.random_id, 'mono');
+  if (record.execution_id) {
+    html += buildDetailItem('Execution ID', record.execution_id, 'mono');
   }
-
-  // Timestamps Section
-  html += '<div class="detail-section">';
-  html += '<div class="detail-section-header"><svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><circle cx="12" cy="12" r="10"/><polyline points="12 6 12 12 16 14"/></svg> Timestamps</div>';
-  html += '<div class="detail-grid">';
   html += buildDetailItem('Created', formatFullTimestamp(record.created));
   html += buildDetailItem('Updated', formatFullTimestamp(record.updated));
   html += '</div></div>';
@@ -649,6 +657,75 @@ function showRecordDetail(index) {
   modalBody.innerHTML = html;
   modal.classList.add('active');
   document.body.style.overflow = 'hidden';
+}
+
+// Render the error section with parsed trace
+function renderErrorSection(record) {
+  var raw = record.error || '';
+  var html = '';
+
+  // Parse the structured error format: "exit_code=N | description\n---\nlog_lines"
+  var headerLine = '';
+  var traceLines = '';
+  var separatorIdx = raw.indexOf('\n---\n');
+  if (separatorIdx !== -1) {
+    headerLine = raw.substring(0, separatorIdx).trim();
+    traceLines = raw.substring(separatorIdx + 5).trim();
+  } else {
+    // No separator — try pipe-separated (container fallback uses | as newline)
+    var pipeIdx = raw.indexOf('|---|');
+    if (pipeIdx !== -1) {
+      headerLine = raw.substring(0, pipeIdx).trim();
+      traceLines = raw.substring(pipeIdx + 4).replace(/\|/g, '\n').trim();
+    } else {
+      headerLine = raw;
+    }
+  }
+
+  // Error category badge
+  if (record.error_category) {
+    html += '<div class="error-category-row">';
+    html += '<span class="error-category-badge">' + escapeHtml(record.error_category) + '</span>';
+    if (headerLine) {
+      html += '<span class="error-explanation">' + escapeHtml(headerLine) + '</span>';
+    }
+    html += '</div>';
+  } else if (headerLine) {
+    html += '<div class="error-category-row">';
+    html += '<span class="error-explanation">' + escapeHtml(headerLine) + '</span>';
+    html += '</div>';
+  }
+
+  // Error trace / log
+  if (traceLines) {
+    html += '<div class="error-trace-header">';
+    html += '<span>Error Trace</span>';
+    html += '<button class="btn-copy-trace" onclick="copyErrorTrace(this)" title="Copy to clipboard"><svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><rect x="9" y="9" width="13" height="13" rx="2" ry="2"/><path d="M5 15H4a2 2 0 01-2-2V4a2 2 0 012-2h9a2 2 0 012 2v1"/></svg> Copy</button>';
+    html += '</div>';
+    html += '<pre class="error-trace-box" data-trace="' + escapeAttr(traceLines) + '">' + escapeHtml(traceLines) + '</pre>';
+  } else if (!headerLine && raw) {
+    // Raw unstructured error — show as-is
+    html += '<div class="error-trace-header"><span>Raw Error</span></div>';
+    html += '<pre class="error-trace-box">' + escapeHtml(raw) + '</pre>';
+  } else if (!traceLines && headerLine) {
+    html += '<div class="error-trace-empty">No error trace was captured for this record.</div>';
+  }
+
+  return html;
+}
+
+function escapeAttr(s) {
+  return s.replace(/&/g, '&amp;').replace(/"/g, '&quot;').replace(/</g, '&lt;').replace(/>/g, '&gt;');
+}
+
+function copyErrorTrace(btn) {
+  var box = btn.closest('.detail-section').querySelector('.error-trace-box');
+  var text = box ? (box.getAttribute('data-trace') || box.textContent) : '';
+  navigator.clipboard.writeText(text).then(function() {
+    var orig = btn.innerHTML;
+    btn.innerHTML = '<svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><polyline points="20 6 9 17 4 12"/></svg> Copied!';
+    setTimeout(function() { btn.innerHTML = orig; }, 1500);
+  });
 }
 
 function buildDetailItem(label, value, extraClass) {
