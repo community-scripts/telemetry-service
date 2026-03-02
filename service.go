@@ -446,33 +446,47 @@ func (p *PBClient) UpdateTelemetryFull(ctx context.Context, recordID string, pay
 // EnsurePipelineField checks the PocketBase collection schema and adds the
 // 'pipeline' JSON field if it does not yet exist. Called once on startup.
 // Supports both PB <0.22 ("schema" key) and PB >=0.22 ("fields" key).
+// Requires admin privileges — tries configured auth first, then falls back to
+// _superusers (PB >=0.22) and _admins (PB <0.22) endpoints.
 func (p *PBClient) EnsurePipelineField(ctx context.Context) error {
 	if err := p.ensureAuth(ctx); err != nil {
 		return err
 	}
 
-	// Read current collection definition
-	req, err := http.NewRequestWithContext(ctx, http.MethodGet,
-		fmt.Sprintf("%s/api/collections/%s", p.baseURL, p.targetColl), nil)
-	if err != nil {
-		return err
-	}
-	req.Header.Set("Authorization", "Bearer "+p.token)
+	adminToken := p.token // start with the configured auth token
 
-	resp, err := p.http.Do(req)
-	if err != nil {
-		return err
+	// Try reading collection schema with current token
+	readResp, readErr := p.doGetCollections(ctx, adminToken)
+	if readErr != nil {
+		return readErr
 	}
-	defer resp.Body.Close()
+	defer readResp.Body.Close()
 
-	if resp.StatusCode < 200 || resp.StatusCode >= 300 {
-		return fmt.Errorf("read collection schema: HTTP %s", resp.Status)
+	// If 403, the token lacks admin privileges — try admin-specific auth
+	if readResp.StatusCode == 403 {
+		log.Printf("[MIGRATION] configured auth collection lacks admin privileges, trying superuser auth")
+		var fallbackErr error
+		adminToken, fallbackErr = p.tryAdminAuth(ctx)
+		if fallbackErr != nil {
+			return fmt.Errorf("read collection schema: HTTP 403 Forbidden (admin auth fallback also failed: %v)", fallbackErr)
+		}
+		// Retry with admin token
+		readResp.Body.Close()
+		readResp, readErr = p.doGetCollections(ctx, adminToken)
+		if readErr != nil {
+			return readErr
+		}
+		defer readResp.Body.Close()
+	}
+
+	if readResp.StatusCode < 200 || readResp.StatusCode >= 300 {
+		return fmt.Errorf("read collection schema: HTTP %s", readResp.Status)
 	}
 
 	// PB <0.22 uses "schema", PB >=0.22 uses "fields" for field definitions.
 	// Parse both and use whichever is present.
 	var raw map[string]json.RawMessage
-	body, _ := io.ReadAll(resp.Body)
+	body, _ := io.ReadAll(readResp.Body)
 	if err := json.Unmarshal(body, &raw); err != nil {
 		return fmt.Errorf("decode collection: %w", err)
 	}
@@ -526,7 +540,7 @@ func (p *PBClient) EnsurePipelineField(ctx context.Context) error {
 		return err
 	}
 	patchReq.Header.Set("Content-Type", "application/json")
-	patchReq.Header.Set("Authorization", "Bearer "+p.token)
+	patchReq.Header.Set("Authorization", "Bearer "+adminToken)
 
 	patchResp, err := p.http.Do(patchReq)
 	if err != nil {
@@ -541,6 +555,57 @@ func (p *PBClient) EnsurePipelineField(ctx context.Context) error {
 
 	log.Printf("[MIGRATION] Successfully added 'pipeline' field to '%s' via %s key", p.targetColl, fieldsKey)
 	return nil
+}
+
+// doGetCollections makes a GET request to read the target collection definition.
+func (p *PBClient) doGetCollections(ctx context.Context, token string) (*http.Response, error) {
+	req, err := http.NewRequestWithContext(ctx, http.MethodGet,
+		fmt.Sprintf("%s/api/collections/%s", p.baseURL, p.targetColl), nil)
+	if err != nil {
+		return nil, err
+	}
+	req.Header.Set("Authorization", "Bearer "+token)
+	return p.http.Do(req)
+}
+
+// tryAdminAuth attempts to authenticate as admin/superuser using known PocketBase
+// admin auth endpoints (_superusers for PB >=0.22, _admins for legacy PB).
+func (p *PBClient) tryAdminAuth(ctx context.Context) (string, error) {
+	endpoints := []string{
+		fmt.Sprintf("%s/api/collections/_superusers/auth-with-password", p.baseURL),
+		fmt.Sprintf("%s/api/admins/auth-with-password", p.baseURL),
+	}
+
+	body, _ := json.Marshal(map[string]string{
+		"identity": p.identity,
+		"password": p.password,
+	})
+
+	for _, ep := range endpoints {
+		req, err := http.NewRequestWithContext(ctx, http.MethodPost, ep, bytes.NewReader(body))
+		if err != nil {
+			continue
+		}
+		req.Header.Set("Content-Type", "application/json")
+
+		resp, err := p.http.Do(req)
+		if err != nil {
+			continue
+		}
+		defer resp.Body.Close()
+
+		if resp.StatusCode < 200 || resp.StatusCode >= 300 {
+			continue
+		}
+
+		var out struct{ Token string `json:"token"` }
+		if json.NewDecoder(resp.Body).Decode(&out) == nil && out.Token != "" {
+			log.Printf("[MIGRATION] admin auth succeeded via %s", ep)
+			return out.Token, nil
+		}
+	}
+
+	return "", fmt.Errorf("could not authenticate as admin via _superusers or _admins")
 }
 
 // FetchRecordsPaginated retrieves records with pagination and optional filters.
@@ -910,6 +975,10 @@ var (
 		"debian": true, "ubuntu": true, "alpine": true, "devuan": true,
 		"fedora": true, "rocky": true, "alma": true, "centos": true,
 		"opensuse": true, "gentoo": true, "openeuler": true,
+		// VM-specific OS types
+		"homeassistant": true, "opnsense": true, "openwrt": true,
+		"mikrotik": true, "umbrel-os": true, "pimox-haos": true,
+		"owncloud": true, "turnkey-nextcloud": true, "arch-linux": true,
 	}
 
 	// Allowed values for 'gpu_vendor' field
@@ -2224,12 +2293,18 @@ func main() {
 		dec := json.NewDecoder(bytes.NewReader(raw))
 		dec.DisallowUnknownFields()
 		if err := dec.Decode(&in); err != nil {
-			// Log first 200 chars of body to help diagnose (no PII in telemetry payloads)
+			// Log first 2000 chars of body + byte offset for diagnosis
 			snippet := string(raw)
-			if len(snippet) > 200 {
-				snippet = snippet[:200] + "..."
+			if len(snippet) > 2000 {
+				snippet = snippet[:2000] + "..."
 			}
-			log.Printf("[REJECT] json decode: %v | body=%s", err, snippet)
+			// Extract byte offset from json.SyntaxError if available
+			var syntaxErr *json.SyntaxError
+			if errors.As(err, &syntaxErr) {
+				log.Printf("[REJECT] json decode: %v (offset %d) | body=%s", err, syntaxErr.Offset, snippet)
+			} else {
+				log.Printf("[REJECT] json decode: %v | body=%s", err, snippet)
+			}
 			http.Error(w, "invalid json", http.StatusBadRequest)
 			return
 		}
