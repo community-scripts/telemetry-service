@@ -579,6 +579,14 @@ function showRecordDetail(index) {
   html += buildDetailItem('Random ID', record.random_id, 'mono');
   html += '</div></div>';
 
+  // Pipeline Section (if pipeline data exists)
+  if (record.pipeline) {
+    html += '<div class="detail-section">';
+    html += '<div class="detail-section-header"><svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><polyline points="22 12 18 12 15 21 9 3 6 12 2 12"/></svg> Installation Pipeline</div>';
+    html += renderPipeline(record.pipeline);
+    html += '</div>';
+  }
+
   // System Resources Section
   html += '<div class="detail-section">';
   html += '<div class="detail-section-header"><svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><rect x="4" y="4" width="16" height="16" rx="2" ry="2"/><rect x="9" y="9" width="6" height="6"/><line x1="9" y1="1" x2="9" y2="4"/><line x1="15" y1="1" x2="15" y2="4"/><line x1="9" y1="20" x2="9" y2="23"/><line x1="15" y1="20" x2="15" y2="23"/><line x1="20" y1="9" x2="23" y2="9"/><line x1="20" y1="14" x2="23" y2="14"/><line x1="1" y1="9" x2="4" y2="9"/><line x1="1" y1="14" x2="4" y2="14"/></svg> System Resources</div>';
@@ -649,6 +657,89 @@ function buildDetailItem(label, value, extraClass) {
   }
   const valueClass = extraClass ? 'value ' + extraClass : 'value';
   return '<div class="detail-item"><div class="label">' + escapeHtml(label) + '</div><div class="' + valueClass + '">' + escapeHtml(String(value)) + '</div></div>';
+}
+
+// renderPipeline renders the installation pipeline as a visual step indicator.
+// Input: JSON string or array of [{s: "installing", t: "2025-..."}, ...]
+function renderPipeline(pipelineData) {
+  var steps;
+  try {
+    steps = typeof pipelineData === 'string' ? JSON.parse(pipelineData) : pipelineData;
+  } catch (e) {
+    return '<div class="pipeline-empty">Pipeline data unavailable</div>';
+  }
+  if (!Array.isArray(steps) || steps.length === 0) {
+    return '<div class="pipeline-empty">No pipeline data</div>';
+  }
+
+  // Status display labels
+  var statusLabels = {
+    'installing': 'Installing',
+    'validation': 'Validation',
+    'configuring': 'Configuring',
+    'success': 'Completed',
+    'failed': 'Failed',
+    'aborted': 'Aborted'
+  };
+
+  // Terminal statuses
+  var terminalStatuses = { 'success': true, 'failed': true, 'aborted': true };
+
+  var html = '<div class="pipeline-track">';
+  for (var i = 0; i < steps.length; i++) {
+    var step = steps[i];
+    var status = step.s || 'unknown';
+    var label = statusLabels[status] || status;
+    var isTerminal = terminalStatuses[status] || false;
+    var isLast = (i === steps.length - 1);
+
+    // Determine step state for styling
+    var stepClass = 'pipeline-step';
+    if (status === 'success') {
+      stepClass += ' step-success';
+    } else if (status === 'failed') {
+      stepClass += ' step-failed';
+    } else if (status === 'aborted') {
+      stepClass += ' step-aborted';
+    } else if (!isLast || !isTerminal) {
+      // Non-terminal step that was reached = passed
+      stepClass += ' step-ok';
+    }
+
+    // Format timestamp
+    var timeStr = '';
+    if (step.t) {
+      try {
+        var d = new Date(step.t);
+        timeStr = d.toLocaleTimeString([], { hour: '2-digit', minute: '2-digit', second: '2-digit' });
+      } catch (e) { timeStr = ''; }
+    }
+
+    html += '<div class="' + stepClass + '">';
+    html += '<div class="step-icon">';
+    if (status === 'success') {
+      html += '<svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="3"><polyline points="20 6 9 17 4 12"/></svg>';
+    } else if (status === 'failed') {
+      html += '<svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="3"><line x1="18" y1="6" x2="6" y2="18"/><line x1="6" y1="6" x2="18" y2="18"/></svg>';
+    } else if (status === 'aborted') {
+      html += '<svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="3"><rect x="6" y="4" width="4" height="16"/><rect x="14" y="4" width="4" height="16"/></svg>';
+    } else {
+      html += '<svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="3"><polyline points="20 6 9 17 4 12"/></svg>';
+    }
+    html += '</div>';
+    html += '<div class="step-label">' + escapeHtml(label) + '</div>';
+    if (timeStr) {
+      html += '<div class="step-time">' + escapeHtml(timeStr) + '</div>';
+    }
+    html += '</div>';
+
+    // Arrow between steps
+    if (!isLast) {
+      html += '<div class="pipeline-arrow"><svg width="20" height="14" viewBox="0 0 20 14"><path d="M0 7h16M12 2l5 5-5 5" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"/></svg></div>';
+    }
+  }
+  html += '</div>';
+  return html;
 }
 
 function formatType(type) {

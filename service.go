@@ -150,23 +150,67 @@ type TelemetryOut struct {
 
 	// Repository source: "ProxmoxVE", "ProxmoxVED", or "external"
 	RepoSource string `json:"repo_source,omitempty"`
+
+	// Pipeline: JSON array of status transitions [{"s":"installing","t":"..."},…]
+	Pipeline json.RawMessage `json:"pipeline,omitempty"`
 }
 
 // TelemetryStatusUpdate contains only fields needed for status updates
 type TelemetryStatusUpdate struct {
-	Status          string `json:"status"`
-	ExecutionID     string `json:"execution_id,omitempty"`
-	Error           string `json:"error,omitempty"`
-	ExitCode        int    `json:"exit_code"`
-	InstallDuration int    `json:"install_duration,omitempty"`
-	ErrorCategory   string `json:"error_category,omitempty"`
-	GPUVendor       string `json:"gpu_vendor,omitempty"`
-	GPUModel        string `json:"gpu_model,omitempty"`
-	GPUPassthrough  string `json:"gpu_passthrough,omitempty"`
-	CPUVendor       string `json:"cpu_vendor,omitempty"`
-	CPUModel        string `json:"cpu_model,omitempty"`
-	RAMSpeed        string `json:"ram_speed,omitempty"`
-	RepoSource      string `json:"repo_source,omitempty"`
+	Status          string          `json:"status"`
+	ExecutionID     string          `json:"execution_id,omitempty"`
+	Error           string          `json:"error,omitempty"`
+	ExitCode        int             `json:"exit_code"`
+	InstallDuration int             `json:"install_duration,omitempty"`
+	ErrorCategory   string          `json:"error_category,omitempty"`
+	GPUVendor       string          `json:"gpu_vendor,omitempty"`
+	GPUModel        string          `json:"gpu_model,omitempty"`
+	GPUPassthrough  string          `json:"gpu_passthrough,omitempty"`
+	CPUVendor       string          `json:"cpu_vendor,omitempty"`
+	CPUModel        string          `json:"cpu_model,omitempty"`
+	RAMSpeed        string          `json:"ram_speed,omitempty"`
+	RepoSource      string          `json:"repo_source,omitempty"`
+	Pipeline        json.RawMessage `json:"pipeline,omitempty"`
+}
+
+// PipelineStep represents a single step in the installation pipeline history.
+type PipelineStep struct {
+	Status string `json:"s"`
+	Time   string `json:"t"`
+}
+
+// pipelineTracker keeps in-memory pipeline state for active installations.
+// Key: execution_id (or random_id), Value: JSON string of []PipelineStep.
+// Entries are cleaned up when a terminal status (success/failed/aborted) is received.
+var pipelineTracker sync.Map
+
+// pipelineTrackingKey returns the key used to track pipeline state for an installation.
+func pipelineTrackingKey(executionID, randomID string) string {
+	if executionID != "" {
+		return executionID
+	}
+	return randomID
+}
+
+// trackPipelineStep appends a status step to the in-memory pipeline and returns the updated JSON.
+func trackPipelineStep(trackingKey, status string) json.RawMessage {
+	now := time.Now().UTC().Format(time.RFC3339)
+	step := PipelineStep{Status: status, Time: now}
+
+	var steps []PipelineStep
+	if existing, ok := pipelineTracker.Load(trackingKey); ok {
+		_ = json.Unmarshal(existing.(json.RawMessage), &steps)
+	}
+	steps = append(steps, step)
+
+	data, _ := json.Marshal(steps)
+	pipelineTracker.Store(trackingKey, json.RawMessage(data))
+	return json.RawMessage(data)
+}
+
+// cleanupPipeline removes the in-memory pipeline state for a completed installation.
+func cleanupPipeline(trackingKey string) {
+	pipelineTracker.Delete(trackingKey)
 }
 
 // Allowed values for 'repo_source' field
@@ -367,6 +411,80 @@ func (p *PBClient) UpdateTelemetryStatus(ctx context.Context, recordID string, u
 	return nil
 }
 
+// EnsurePipelineField checks the PocketBase collection schema and adds the
+// 'pipeline' JSON field if it does not yet exist. Called once on startup.
+func (p *PBClient) EnsurePipelineField(ctx context.Context) error {
+	if err := p.ensureAuth(ctx); err != nil {
+		return err
+	}
+
+	// Read current collection definition
+	req, err := http.NewRequestWithContext(ctx, http.MethodGet,
+		fmt.Sprintf("%s/api/collections/%s", p.baseURL, p.targetColl), nil)
+	if err != nil {
+		return err
+	}
+	req.Header.Set("Authorization", "Bearer "+p.token)
+
+	resp, err := p.http.Do(req)
+	if err != nil {
+		return err
+	}
+	defer resp.Body.Close()
+
+	if resp.StatusCode < 200 || resp.StatusCode >= 300 {
+		return fmt.Errorf("read collection schema: HTTP %s", resp.Status)
+	}
+
+	var collection struct {
+		Schema []map[string]interface{} `json:"schema"`
+	}
+	body, _ := io.ReadAll(resp.Body)
+	if err := json.Unmarshal(body, &collection); err != nil {
+		return fmt.Errorf("decode collection schema: %w", err)
+	}
+
+	// Check if pipeline field already exists
+	for _, field := range collection.Schema {
+		if name, _ := field["name"].(string); name == "pipeline" {
+			return nil
+		}
+	}
+
+	// Append the pipeline field (PocketBase JSON type)
+	log.Printf("[MIGRATION] Adding 'pipeline' JSON field to collection '%s'", p.targetColl)
+	collection.Schema = append(collection.Schema, map[string]interface{}{
+		"name":     "pipeline",
+		"type":     "json",
+		"required": false,
+		"options":  map[string]interface{}{},
+	})
+
+	patchBody, _ := json.Marshal(map[string]interface{}{"schema": collection.Schema})
+	patchReq, err := http.NewRequestWithContext(ctx, http.MethodPatch,
+		fmt.Sprintf("%s/api/collections/%s", p.baseURL, p.targetColl),
+		bytes.NewReader(patchBody))
+	if err != nil {
+		return err
+	}
+	patchReq.Header.Set("Content-Type", "application/json")
+	patchReq.Header.Set("Authorization", "Bearer "+p.token)
+
+	patchResp, err := p.http.Do(patchReq)
+	if err != nil {
+		return fmt.Errorf("patch collection: %w", err)
+	}
+	defer patchResp.Body.Close()
+
+	if patchResp.StatusCode < 200 || patchResp.StatusCode >= 300 {
+		rb, _ := io.ReadAll(io.LimitReader(patchResp.Body, 4<<10))
+		return fmt.Errorf("add pipeline field: %s: %s", patchResp.Status, string(rb))
+	}
+
+	log.Printf("[MIGRATION] Successfully added 'pipeline' field to '%s'", p.targetColl)
+	return nil
+}
+
 // FetchRecordsPaginated retrieves records with pagination and optional filters.
 func (p *PBClient) FetchRecordsPaginated(ctx context.Context, page, limit int, status, app, osType, typeFilter, sortField, repoSource string, days int) ([]TelemetryRecord, int, error) {
 	if err := p.ensureAuth(ctx); err != nil {
@@ -528,6 +646,7 @@ func (p *PBClient) UpsertTelemetry(ctx context.Context, payload TelemetryOut) er
 		CPUModel:        payload.CPUModel,
 		RAMSpeed:        payload.RAMSpeed,
 		RepoSource:      payload.RepoSource,
+		Pipeline:        payload.Pipeline,
 	}
 	return p.UpdateTelemetryStatus(ctx, recordID, update)
 }
@@ -720,10 +839,10 @@ var (
 		Category string
 	}{
 		// --- Generic / Shell ---
-		0:  {"Success", ""},
-		1:  {"General error", "unknown"},
-		2:  {"Misuse of shell builtins", "unknown"},
-		3:  {"General syntax or argument error", "unknown"},
+		0: {"Success", ""},
+		1: {"General error", "unknown"},
+		2: {"Misuse of shell builtins", "unknown"},
+		3: {"General syntax or argument error", "unknown"},
 
 		// --- curl / wget ---
 		4:  {"curl: Feature not supported or protocol error", "network"},
@@ -1270,6 +1389,15 @@ func main() {
 	}
 
 	pb := NewPBClient(cfg)
+
+	// Auto-migrate: ensure 'pipeline' field exists in PocketBase collection
+	{
+		ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
+		if err := pb.EnsurePipelineField(ctx); err != nil {
+			log.Printf("[MIGRATION] Warning: could not ensure pipeline field: %v", err)
+		}
+		cancel()
+	}
 
 	// Persistent script stats stores (7d, 30d, all-time)
 	stats7d := NewScriptStatsStore(pb, "_script_stats_7d", 7)
@@ -2041,6 +2169,14 @@ func main() {
 			in.Error = fmt.Sprintf("Exit code %d: %s", in.ExitCode, getExitCodeDescription(in.ExitCode))
 		}
 
+		// Track pipeline step (in-memory, written to PocketBase with each upsert)
+		pKey := pipelineTrackingKey(in.ExecutionID, in.RandomID)
+		pipeline := trackPipelineStep(pKey, in.Status)
+		isTerminal := in.Status == "success" || in.Status == "failed" || in.Status == "aborted"
+		if isTerminal {
+			defer cleanupPipeline(pKey)
+		}
+
 		// Map input to PocketBase schema
 		out := TelemetryOut{
 			RandomID:        in.RandomID,
@@ -2067,6 +2203,7 @@ func main() {
 			InstallDuration: in.InstallDuration,
 			ErrorCategory:   in.ErrorCategory,
 			RepoSource:      in.RepoSource,
+			Pipeline:        pipeline,
 		}
 		_ = computeHash(out) // For future deduplication
 
