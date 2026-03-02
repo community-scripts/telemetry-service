@@ -411,6 +411,38 @@ func (p *PBClient) UpdateTelemetryStatus(ctx context.Context, recordID string, u
 	return nil
 }
 
+// UpdateTelemetryFull updates an existing record with ALL fields from the payload.
+// Used for terminal states (success/failed/aborted) to fill in any missing spec fields
+// from records that were created as fallbacks from configuring/validation pings.
+// Fields with omitempty+zero values are omitted from JSON, preserving existing PB values.
+func (p *PBClient) UpdateTelemetryFull(ctx context.Context, recordID string, payload TelemetryOut) error {
+	if err := p.ensureAuth(ctx); err != nil {
+		return err
+	}
+
+	b, _ := json.Marshal(payload)
+	req, err := http.NewRequestWithContext(ctx, http.MethodPatch,
+		fmt.Sprintf("%s/api/collections/%s/records/%s", p.baseURL, p.targetColl, recordID),
+		bytes.NewReader(b),
+	)
+	if err != nil {
+		return err
+	}
+	req.Header.Set("Content-Type", "application/json")
+	req.Header.Set("Authorization", "Bearer "+p.token)
+
+	resp, err := p.http.Do(req)
+	if err != nil {
+		return err
+	}
+	defer resp.Body.Close()
+	if resp.StatusCode < 200 || resp.StatusCode >= 300 {
+		rb, _ := io.ReadAll(io.LimitReader(resp.Body, 8<<10))
+		return fmt.Errorf("pocketbase full-update failed: %s: %s", resp.Status, strings.TrimSpace(string(rb)))
+	}
+	return nil
+}
+
 // EnsurePipelineField checks the PocketBase collection schema and adds the
 // 'pipeline' JSON field if it does not yet exist. Called once on startup.
 // Supports both PB <0.22 ("schema" key) and PB >=0.22 ("fields" key).
@@ -644,20 +676,31 @@ func (p *PBClient) UpsertTelemetry(ctx context.Context, payload TelemetryOut) er
 	}
 
 	if recordID == "" {
-		// Progress pings (validation/configuring) — never create a new record.
-		// This prevents ghost records (ct_type=0, all zeros, repo_source=N/A) when
-		// the ping arrives before the host's "installing" record was written.
+		// Progress pings (validation/configuring) — the "installing" record hasn't
+		// arrived yet (race condition, client timeout, or dropped request).
+		// Create a minimal record so subsequent updates (success/failed) can find it.
+		// The final status update includes full specs and will fill in missing fields.
 		if payload.Status == "configuring" || payload.Status == "validation" {
-			log.Printf("[WARN] %s update for %s (exec=%s) but no existing record found, skipping",
+			log.Printf("[WARN] %s update for %s (exec=%s) — no record found, creating fallback",
 				payload.Status, payload.NSAPP, payload.ExecutionID)
-			return nil
+			return p.CreateTelemetry(ctx, payload)
 		}
 		// For final states (failed/success/aborted) — create as fallback.
 		// post_update_to_api sends full payload so the record will have all fields.
 		return p.CreateTelemetry(ctx, payload)
 	}
 
-	// Update only status, error, exit_code, and new metrics fields
+	// Update record. For terminal states (success/failed/aborted), use the full
+	// payload so we fill in any missing fields from earlier fallback records.
+	// For progress pings, use partial update to avoid overwriting spec fields with zeros.
+	isTerminal := payload.Status == "success" || payload.Status == "failed" || payload.Status == "aborted"
+	if isTerminal {
+		// Full update: `post_update_to_api` sends all fields including specs.
+		// Fields with omitempty+zero values are omitted from JSON, preserving existing PB values.
+		return p.UpdateTelemetryFull(ctx, recordID, payload)
+	}
+
+	// Partial update for progress pings
 	update := TelemetryStatusUpdate{
 		Status:          payload.Status,
 		ExecutionID:     payload.ExecutionID,
@@ -2133,6 +2176,7 @@ func main() {
 			}
 		}
 		if !rl.Allow(key) {
+			log.Printf("[RATE] rejected key=%s", key)
 			http.Error(w, "rate limited", http.StatusTooManyRequests)
 			return
 		}
@@ -2140,6 +2184,7 @@ func main() {
 		r.Body = http.MaxBytesReader(w, r.Body, cfg.MaxBodyBytes)
 		raw, err := io.ReadAll(r.Body)
 		if err != nil {
+			log.Printf("[REJECT] body read error: %v", err)
 			http.Error(w, "invalid body", http.StatusBadRequest)
 			return
 		}
@@ -2149,13 +2194,17 @@ func main() {
 		dec := json.NewDecoder(bytes.NewReader(raw))
 		dec.DisallowUnknownFields()
 		if err := dec.Decode(&in); err != nil {
+			// Log first 200 chars of body to help diagnose (no PII in telemetry payloads)
+			snippet := string(raw)
+			if len(snippet) > 200 {
+				snippet = snippet[:200] + "..."
+			}
+			log.Printf("[REJECT] json decode: %v | body=%s", err, snippet)
 			http.Error(w, "invalid json", http.StatusBadRequest)
 			return
 		}
 		if err := validate(&in); err != nil {
-			if cfg.EnableReqLogging {
-				log.Printf("telemetry rejected: %v", err)
-			}
+			log.Printf("[REJECT] validation: %v | nsapp=%s status=%s", err, in.NSAPP, in.Status)
 			http.Error(w, "invalid payload", http.StatusBadRequest)
 			return
 		}
