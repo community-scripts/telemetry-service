@@ -845,15 +845,45 @@ func (pt *ProxyTrust) isTrusted(ip net.IP) bool {
 	return false
 }
 
+// isPrivateIP returns true if the IP is in RFC 1918 / RFC 6598 private ranges
+// (10.0.0.0/8, 172.16.0.0/12, 192.168.0.0/16, 100.64.0.0/10) or loopback.
+// These are always trusted as reverse proxy sources.
+func isPrivateIP(ip net.IP) bool {
+	if ip.IsLoopback() {
+		return true
+	}
+	privateRanges := []struct {
+		start net.IP
+		end   net.IP
+	}{
+		{net.ParseIP("10.0.0.0"), net.ParseIP("10.255.255.255")},
+		{net.ParseIP("172.16.0.0"), net.ParseIP("172.31.255.255")},
+		{net.ParseIP("192.168.0.0"), net.ParseIP("192.168.255.255")},
+		{net.ParseIP("100.64.0.0"), net.ParseIP("100.127.255.255")},
+	}
+	ip4 := ip.To4()
+	if ip4 == nil {
+		return false
+	}
+	for _, r := range privateRanges {
+		if bytes.Compare(ip4, r.start.To4()) >= 0 && bytes.Compare(ip4, r.end.To4()) <= 0 {
+			return true
+		}
+	}
+	return false
+}
+
 func getClientIP(r *http.Request, pt *ProxyTrust) net.IP {
-	// If behind reverse proxy, trust X-Forwarded-For only if remote is trusted proxy.
+	// If behind reverse proxy, trust X-Forwarded-For if remote is a configured
+	// trusted proxy OR a private/RFC1918 IP (common Docker/K8s/reverse proxy setup).
 	host, _, _ := net.SplitHostPort(r.RemoteAddr)
 	remote := net.ParseIP(host)
 	if remote == nil {
 		return nil
 	}
 
-	if pt != nil && pt.isTrusted(remote) {
+	trusted := (pt != nil && pt.isTrusted(remote)) || isPrivateIP(remote)
+	if trusted {
 		xff := r.Header.Get("X-Forwarded-For")
 		if xff != "" {
 			parts := strings.Split(xff, ",")
@@ -1411,8 +1441,8 @@ func main() {
 		PBTargetColl:     mustEnv("PB_TARGET_COLLECTION"),
 
 		MaxBodyBytes:     envInt64("MAX_BODY_BYTES", 262144),
-		RateLimitRPM:     envInt("RATE_LIMIT_RPM", 60),
-		RateBurst:        envInt("RATE_BURST", 20),
+		RateLimitRPM:     envInt("RATE_LIMIT_RPM", 300),
+		RateBurst:        envInt("RATE_BURST", 60),
 		RateKeyMode:      env("RATE_KEY_MODE", "ip"), // "ip" or "header"
 		RateKeyHeader:    env("RATE_KEY_HEADER", "X-Telemetry-Key"),
 		RequestTimeout:   time.Duration(envInt("UPSTREAM_TIMEOUT_MS", 60000)) * time.Millisecond,
