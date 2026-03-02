@@ -598,7 +598,9 @@ func (p *PBClient) tryAdminAuth(ctx context.Context) (string, error) {
 			continue
 		}
 
-		var out struct{ Token string `json:"token"` }
+		var out struct {
+			Token string `json:"token"`
+		}
 		if json.NewDecoder(resp.Body).Decode(&out) == nil && out.Token != "" {
 			log.Printf("[MIGRATION] admin auth succeeded via %s", ep)
 			return out.Token, nil
@@ -709,13 +711,24 @@ func (p *PBClient) FetchRecordsPaginated(ctx context.Context, page, limit int, s
 // UpsertTelemetry handles both creation and updates intelligently.
 // All records go to the same collection; repo_source is stored as a field.
 //
-// For status="installing": always creates a new record.
+// For status="installing": creates a new record (idempotent — deduplicates on execution_id).
 // For status!="installing": updates existing record.
 //   - Prefers execution_id lookup (unique-indexed, O(1)) when available.
 //   - Falls back to random_id lookup (filter query) for old clients.
 func (p *PBClient) UpsertTelemetry(ctx context.Context, payload TelemetryOut) error {
-	// For "installing" status, always create new record
+	// For "installing" status, create new record (with dedup check)
 	if payload.Status == "installing" {
+		// Idempotent: if a record with this execution_id already exists
+		// (e.g., client retried after timeout), skip creating a duplicate.
+		if payload.ExecutionID != "" {
+			existingID, err := p.FindRecordByExecutionID(ctx, payload.ExecutionID)
+			if err == nil && existingID != "" {
+				// Record already exists — this is a client retry. Return success
+				// without creating a duplicate.
+				return nil
+			}
+			// If lookup failed or returned empty, proceed with creation.
+		}
 		return p.CreateTelemetry(ctx, payload)
 	}
 
