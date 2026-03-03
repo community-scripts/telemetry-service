@@ -2337,6 +2337,17 @@ func main() {
 			}
 		}
 
+		// Auto-reclassify: addon and pve type failures → success (excluded from failure stats)
+		if in.Status == "failed" && (in.Type == "addon" || in.Type == "pve") {
+			in.Status = "success"
+			in.Error = ""
+			in.ErrorCategory = ""
+			in.ExitCode = 0
+			if cfg.EnableReqLogging {
+				log.Printf("auto-reclassified %s failure as success: nsapp=%s", in.Type, in.NSAPP)
+			}
+		}
+
 		// Auto-reclassify: clients still send status="failed" for SIGINT/Ctrl+C and SIGHUP,
 		// detect and reclassify as "aborted" server-side.
 		errorLower := strings.ToLower(in.Error)
