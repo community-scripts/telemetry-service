@@ -1009,7 +1009,7 @@ var (
 		"timeout": true, "config": true, "resource": true, "unknown": true, "": true,
 		"user_aborted": true, "apt": true, "command_not_found": true,
 		"service": true, "database": true, "signal": true, "proxmox": true,
-		"shell": true, "build": true,
+		"shell": true, "build": true, "preflight": true,
 	}
 
 	// exitCodeInfo consolidates description and category for all known exit codes.
@@ -1081,12 +1081,12 @@ var (
 		102: {"APT: Lock held by another process", "apt"},
 
 		// --- Script Validation & Setup (103-123) ---
-		103: {"Validation: Shell is not Bash", "config"},
-		104: {"Validation: Not running as root", "permission"},
-		105: {"Validation: PVE version not supported", "config"},
-		106: {"Validation: Architecture not supported (ARM/PiMox)", "config"},
-		107: {"Validation: Kernel key parameters unreadable", "config"},
-		108: {"Validation: Kernel key limits exceeded", "config"},
+		103: {"Validation: Shell is not Bash", "preflight"},
+		104: {"Validation: Not running as root", "preflight"},
+		105: {"Validation: PVE version not supported", "preflight"},
+		106: {"Validation: Architecture not supported (ARM/PiMox)", "preflight"},
+		107: {"Validation: Kernel key parameters unreadable", "preflight"},
+		108: {"Validation: Kernel key limits exceeded", "preflight"},
 		109: {"Proxmox: No available container ID", "proxmox"},
 		110: {"Proxmox: Failed to apply default.vars", "proxmox"},
 		111: {"Proxmox: App defaults file not available", "proxmox"},

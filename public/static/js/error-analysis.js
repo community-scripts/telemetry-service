@@ -9,7 +9,8 @@ const catColors = {
   'storage': '#ec4899', 'resource': '#f97316', 'dependency': '#22d3ee',
   'signal': '#eab308', 'config': '#84cc16', 'unknown': '#64748b',
   'uncategorized': '#94a3b8', 'service': '#06b6d4', 'database': '#8b5cf6',
-  'proxmox': '#f59e0b', 'shell': '#fb923c', 'build': '#d946ef'
+  'proxmox': '#f59e0b', 'shell': '#fb923c', 'build': '#d946ef',
+  'preflight': '#14b8a6'
 };
 
 function escapeHtml(str) {

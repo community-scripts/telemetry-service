@@ -475,6 +475,36 @@ tr:hover td {
   color: var(--text-muted);
 }
 
+.category-badge.preflight {
+  background: rgba(20, 184, 166, 0.15);
+  color: #14b8a6;
+}
+
+.category-badge.proxmox {
+  background: rgba(245, 158, 11, 0.15);
+  color: #f59e0b;
+}
+
+.category-badge.service {
+  background: rgba(6, 182, 212, 0.15);
+  color: #06b6d4;
+}
+
+.category-badge.database {
+  background: rgba(139, 92, 246, 0.15);
+  color: #8b5cf6;
+}
+
+.category-badge.shell {
+  background: rgba(251, 146, 60, 0.15);
+  color: #fb923c;
+}
+
+.category-badge.build {
+  background: rgba(217, 70, 239, 0.15);
+  color: #d946ef;
+}
+
 .charts-grid {
   display: grid;
   grid-template-columns: 1fr 1fr;
