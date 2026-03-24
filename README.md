@@ -7,6 +7,7 @@ A standalone Go microservice that collects anonymous telemetry data from [Proxmo
 This service acts as a telemetry ingestion layer between the bash installation scripts and a PocketBase backend. When users run scripts from the ProxmoxVE/ProxmoxVED repositories, optional anonymous usage data is sent here for aggregation and analysis.
 
 **What gets collected:**
+
 - Script name and installation status (success/failed)
 - Container/VM type and resource allocation (CPU, RAM, disk)
 - OS type and version
@@ -14,6 +15,7 @@ This service acts as a telemetry ingestion layer between the bash installation s
 - Anonymous session ID (randomly generated UUID)
 
 **What is NOT collected:**
+
 - IP addresses (not logged, not stored)
 - Hostnames or domain names
 - User credentials or personal information
@@ -22,6 +24,7 @@ This service acts as a telemetry ingestion layer between the bash installation s
 - Any data that could identify a person or system
 
 **What this enables:**
+
 - Understanding which scripts are most popular
 - Identifying scripts with high failure rates
 - Tracking resource allocation trends
@@ -47,7 +50,7 @@ flowchart LR
 
 ## Dashboard
 
-The built-in dashboard (`/dashboard`) provides real-time analytics:
+The built-in dashboard is publicly available at `https://telemetry.community-scripts.org/` and is served from `/` (with `/dashboard` kept as a compatibility alias). It provides real-time analytics:
 
 - **Installation Statistics** - Total installs, success/failure rates
 - **Top Applications** - Most installed scripts with counts
@@ -57,6 +60,7 @@ The built-in dashboard (`/dashboard`) provides real-time analytics:
 - **Proxmox Versions** - PVE version distribution
 
 **Dashboard Features:**
+
 - Automatic cache warmup (every 4 minutes)
 - Configurable time range (7, 30, 90, 365 days)
 - Shows actual total count vs. analyzed sample size
@@ -81,12 +85,19 @@ go.mod          # Go module definition
 
 ## API Endpoints
 
-| Endpoint | Method | Description |
-|----------|--------|-------------|
-| `/` | POST | Receive telemetry data from scripts |
-| `/health` | GET | Health check endpoint |
-| `/dashboard` | GET | HTML dashboard UI |
-| `/api/dashboard` | GET | Dashboard data as JSON |
+| Endpoint          | Method | Description                              |
+| ----------------- | ------ | ---------------------------------------- |
+| `/`               | GET    | HTML dashboard UI                        |
+| `/dashboard`      | GET    | Compatibility alias for the dashboard UI |
+| `/telemetry`      | POST   | Receive telemetry data from scripts      |
+| `/healthz`        | GET    | Health check endpoint                    |
+| `/api/dashboard`  | GET    | Dashboard data as JSON                   |
+| `/api/records`    | GET    | Paginated installation log data          |
+| `/api/scripts`    | GET    | Script analysis data                     |
+| `/api/exit-codes` | GET    | Exit-code reference data                 |
+| `/metrics`        | GET    | Prometheus-style metrics output          |
+
+Operational endpoints also exist for alerts and cleanup workflows, including `/api/alerts`, `/api/cleanup/status`, and `POST /api/cleanup/run`.
 
 ## Privacy & Compliance
 
@@ -99,6 +110,7 @@ This service is designed with privacy in mind and is **GDPR/DSGVO compliant**:
 - ✅ **No third parties** - Data is only stored in our self-hosted PocketBase instance
 
 For full details, see:
+
 - **[Privacy & Telemetry Documentation](docs/PRIVACY.md)** — What we collect, how, and why
 - **[Records of Processing Activities (ROPA)](docs/ROPA.md)** — GDPR Art. 30
 - **[Technical & Organizational Measures (TOMS)](docs/TOMS.md)** — GDPR Art. 32

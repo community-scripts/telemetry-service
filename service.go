@@ -76,7 +76,7 @@ type TelemetryIn struct {
 	// Required
 	RandomID    string `json:"random_id"`              // Session UUID
 	ExecutionID string `json:"execution_id,omitempty"` // Unique execution ID (unique-indexed in PocketBase)
-	Type        string `json:"type"`                   // "lxc", "vm", "pve", "addon"
+	Type        string `json:"type"`                   // "lxc", "vm", "turnkey", "pve", "addon"
 	NSAPP       string `json:"nsapp"`                  // Application name (e.g., "jellyfin")
 	Status      string `json:"status"`                 // "installing", "success", "failed", "aborted", "unknown"
 
