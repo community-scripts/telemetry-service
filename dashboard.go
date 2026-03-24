@@ -1529,7 +1529,7 @@ type fetchRecordsResult struct {
 func (p *PBClient) fetchRecords(ctx context.Context, filter string) (*fetchRecordsResult, error) {
 	var allRecords []TelemetryRecord
 	page := 1
-	perPage := 500
+	perPage := 1000
 	totalItems := 0
 
 	for {

@@ -3,9 +3,7 @@ package main
 import (
 	"bytes"
 	"context"
-	"crypto/sha256"
 	"embed"
-	"encoding/hex"
 	"encoding/json"
 	"errors"
 	"fmt"
@@ -150,67 +148,23 @@ type TelemetryOut struct {
 
 	// Repository source: "ProxmoxVE", "ProxmoxVED", or "external"
 	RepoSource string `json:"repo_source,omitempty"`
-
-	// Pipeline: JSON array of status transitions [{"s":"installing","t":"..."},…]
-	Pipeline json.RawMessage `json:"pipeline,omitempty"`
 }
 
 // TelemetryStatusUpdate contains only fields needed for status updates
 type TelemetryStatusUpdate struct {
-	Status          string          `json:"status"`
-	ExecutionID     string          `json:"execution_id,omitempty"`
-	Error           string          `json:"error,omitempty"`
-	ExitCode        int             `json:"exit_code"`
-	InstallDuration int             `json:"install_duration,omitempty"`
-	ErrorCategory   string          `json:"error_category,omitempty"`
-	GPUVendor       string          `json:"gpu_vendor,omitempty"`
-	GPUModel        string          `json:"gpu_model,omitempty"`
-	GPUPassthrough  string          `json:"gpu_passthrough,omitempty"`
-	CPUVendor       string          `json:"cpu_vendor,omitempty"`
-	CPUModel        string          `json:"cpu_model,omitempty"`
-	RAMSpeed        string          `json:"ram_speed,omitempty"`
-	RepoSource      string          `json:"repo_source,omitempty"`
-	Pipeline        json.RawMessage `json:"pipeline,omitempty"`
-}
-
-// PipelineStep represents a single step in the installation pipeline history.
-type PipelineStep struct {
-	Status string `json:"s"`
-	Time   string `json:"t"`
-}
-
-// pipelineTracker keeps in-memory pipeline state for active installations.
-// Key: execution_id (or random_id), Value: JSON string of []PipelineStep.
-// Entries are cleaned up when a terminal status (success/failed/aborted) is received.
-var pipelineTracker sync.Map
-
-// pipelineTrackingKey returns the key used to track pipeline state for an installation.
-func pipelineTrackingKey(executionID, randomID string) string {
-	if executionID != "" {
-		return executionID
-	}
-	return randomID
-}
-
-// trackPipelineStep appends a status step to the in-memory pipeline and returns the updated JSON.
-func trackPipelineStep(trackingKey, status string) json.RawMessage {
-	now := time.Now().UTC().Format(time.RFC3339)
-	step := PipelineStep{Status: status, Time: now}
-
-	var steps []PipelineStep
-	if existing, ok := pipelineTracker.Load(trackingKey); ok {
-		_ = json.Unmarshal(existing.(json.RawMessage), &steps)
-	}
-	steps = append(steps, step)
-
-	data, _ := json.Marshal(steps)
-	pipelineTracker.Store(trackingKey, json.RawMessage(data))
-	return json.RawMessage(data)
-}
-
-// cleanupPipeline removes the in-memory pipeline state for a completed installation.
-func cleanupPipeline(trackingKey string) {
-	pipelineTracker.Delete(trackingKey)
+	Status          string `json:"status"`
+	ExecutionID     string `json:"execution_id,omitempty"`
+	Error           string `json:"error,omitempty"`
+	ExitCode        int    `json:"exit_code"`
+	InstallDuration int    `json:"install_duration,omitempty"`
+	ErrorCategory   string `json:"error_category,omitempty"`
+	GPUVendor       string `json:"gpu_vendor,omitempty"`
+	GPUModel        string `json:"gpu_model,omitempty"`
+	GPUPassthrough  string `json:"gpu_passthrough,omitempty"`
+	CPUVendor       string `json:"cpu_vendor,omitempty"`
+	CPUModel        string `json:"cpu_model,omitempty"`
+	RAMSpeed        string `json:"ram_speed,omitempty"`
+	RepoSource      string `json:"repo_source,omitempty"`
 }
 
 // Allowed values for 'repo_source' field
@@ -234,6 +188,12 @@ type PBClient struct {
 }
 
 func NewPBClient(cfg Config) *PBClient {
+	transport := &http.Transport{
+		MaxIdleConns:        100,
+		MaxIdleConnsPerHost: 50,
+		IdleConnTimeout:     90 * time.Second,
+		DisableCompression:  true, // PB responses are small JSON, compression overhead not worth it
+	}
 	return &PBClient{
 		baseURL:        strings.TrimRight(cfg.PBBaseURL, "/"),
 		authCollection: cfg.PBAuthCollection,
@@ -241,9 +201,215 @@ func NewPBClient(cfg Config) *PBClient {
 		password:       cfg.PBPassword,
 		targetColl:     cfg.PBTargetColl,
 		http: &http.Client{
-			Timeout: cfg.RequestTimeout,
+			Timeout:   cfg.RequestTimeout,
+			Transport: transport,
 		},
 	}
+}
+
+// ---------- Write-Ahead Queue ----------
+// Decouples HTTP accept from PocketBase write. The /telemetry handler enqueues
+// work and returns 202 immediately. A pool of workers drains the queue with retries.
+
+// WriteItem is a single telemetry payload queued for PocketBase write.
+type WriteItem struct {
+	Payload   TelemetryOut
+	Attempt   int
+	EnqueueAt time.Time
+}
+
+// WriteQueue buffers telemetry writes and processes them via worker goroutines.
+type WriteQueue struct {
+	ch       chan WriteItem
+	pb       *PBClient
+	workers  int
+	maxRetry int
+	index    *ExecIndex // in-memory execution_id → PB record_id
+}
+
+// NewWriteQueue creates a buffered write queue with the given capacity and worker count.
+func NewWriteQueue(pb *PBClient, capacity, workers int, index *ExecIndex) *WriteQueue {
+	wq := &WriteQueue{
+		ch:       make(chan WriteItem, capacity),
+		pb:       pb,
+		workers:  workers,
+		maxRetry: 3,
+		index:    index,
+	}
+	return wq
+}
+
+// Start launches the worker goroutines.
+func (wq *WriteQueue) Start() {
+	for i := 0; i < wq.workers; i++ {
+		go wq.worker(i)
+	}
+	log.Printf("[QUEUE] Started %d write workers (buffer=%d)", wq.workers, cap(wq.ch))
+}
+
+// Enqueue adds a payload to the write queue. Returns false if the queue is full.
+func (wq *WriteQueue) Enqueue(payload TelemetryOut) bool {
+	select {
+	case wq.ch <- WriteItem{Payload: payload, Attempt: 0, EnqueueAt: time.Now()}:
+		return true
+	default:
+		return false
+	}
+}
+
+// Len returns the current queue depth.
+func (wq *WriteQueue) Len() int {
+	return len(wq.ch)
+}
+
+func (wq *WriteQueue) worker(id int) {
+	for item := range wq.ch {
+		ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
+		err := wq.processItem(ctx, item)
+		cancel()
+
+		if err != nil {
+			item.Attempt++
+			if item.Attempt < wq.maxRetry {
+				// Exponential backoff: 1s, 2s, 4s
+				backoff := time.Duration(1<<uint(item.Attempt)) * time.Second
+				time.Sleep(backoff)
+				// Re-enqueue for retry (non-blocking — drop if queue full)
+				select {
+				case wq.ch <- item:
+				default:
+					log.Printf("[QUEUE] worker %d: retry queue full, dropping nsapp=%s status=%s exec=%s (attempt %d)",
+						id, item.Payload.NSAPP, item.Payload.Status, item.Payload.ExecutionID, item.Attempt)
+				}
+			} else {
+				log.Printf("[QUEUE] worker %d: final failure nsapp=%s status=%s exec=%s: %v",
+					id, item.Payload.NSAPP, item.Payload.Status, item.Payload.ExecutionID, err)
+			}
+		}
+	}
+}
+
+// processItem performs the actual PocketBase upsert, using the in-memory index when available.
+func (wq *WriteQueue) processItem(ctx context.Context, item WriteItem) error {
+	payload := item.Payload
+
+	// For "installing" status, create new record
+	if payload.Status == "installing" {
+		if payload.ExecutionID != "" {
+			// Check in-memory index first
+			if _, found := wq.index.Get(payload.ExecutionID); found {
+				return nil // Already exists (client retry)
+			}
+			// Check PB (dedup)
+			existingID, err := wq.pb.FindRecordByExecutionID(ctx, payload.ExecutionID)
+			if err == nil && existingID != "" {
+				wq.index.Set(payload.ExecutionID, existingID)
+				return nil
+			}
+		}
+		recordID, err := wq.pb.CreateTelemetryReturningID(ctx, payload)
+		if err != nil {
+			return err
+		}
+		if payload.ExecutionID != "" && recordID != "" {
+			wq.index.Set(payload.ExecutionID, recordID)
+		}
+		return nil
+	}
+
+	// For status updates, find existing record
+	var recordID string
+	var err error
+
+	if payload.ExecutionID != "" {
+		// Check in-memory index first
+		if id, found := wq.index.Get(payload.ExecutionID); found {
+			recordID = id
+		} else {
+			recordID, err = wq.pb.FindRecordByExecutionID(ctx, payload.ExecutionID)
+			if err == nil && recordID != "" {
+				wq.index.Set(payload.ExecutionID, recordID)
+			}
+		}
+		if recordID == "" && err != nil {
+			// Fallback to random_id
+			recordID, err = wq.pb.FindRecordByRandomID(ctx, payload.RandomID)
+		}
+	} else {
+		recordID, err = wq.pb.FindRecordByRandomID(ctx, payload.RandomID)
+	}
+
+	if err != nil {
+		return fmt.Errorf("cannot find record to update: %w", err)
+	}
+
+	if recordID == "" {
+		// No existing record — create as fallback
+		newID, createErr := wq.pb.CreateTelemetryReturningID(ctx, payload)
+		if createErr != nil {
+			return createErr
+		}
+		if payload.ExecutionID != "" && newID != "" {
+			wq.index.Set(payload.ExecutionID, newID)
+		}
+		return nil
+	}
+
+	isTerminal := payload.Status == "success" || payload.Status == "failed" || payload.Status == "aborted"
+	if isTerminal {
+		err = wq.pb.UpdateTelemetryFull(ctx, recordID, payload)
+		if err == nil && payload.ExecutionID != "" {
+			// Clean up index entry for terminal states (installation complete)
+			wq.index.Delete(payload.ExecutionID)
+		}
+		return err
+	}
+
+	update := TelemetryStatusUpdate{
+		Status:          payload.Status,
+		ExecutionID:     payload.ExecutionID,
+		Error:           payload.Error,
+		ExitCode:        payload.ExitCode,
+		InstallDuration: payload.InstallDuration,
+		ErrorCategory:   payload.ErrorCategory,
+		GPUVendor:       payload.GPUVendor,
+		GPUModel:        payload.GPUModel,
+		GPUPassthrough:  payload.GPUPassthrough,
+		CPUVendor:       payload.CPUVendor,
+		CPUModel:        payload.CPUModel,
+		RAMSpeed:        payload.RAMSpeed,
+		RepoSource:      payload.RepoSource,
+	}
+	return wq.pb.UpdateTelemetryStatus(ctx, recordID, update)
+}
+
+// ---------- In-Memory Execution ID Index ----------
+// Maps execution_id → PB record_id to avoid repeated FindRecord calls.
+
+type ExecIndex struct {
+	m sync.Map
+}
+
+func NewExecIndex() *ExecIndex {
+	return &ExecIndex{}
+}
+
+func (idx *ExecIndex) Get(executionID string) (string, bool) {
+	v, ok := idx.m.Load(executionID)
+	if !ok {
+		return "", false
+	}
+	return v.(string), true
+}
+
+func (idx *ExecIndex) Set(executionID, recordID string) {
+	if executionID != "" && recordID != "" {
+		idx.m.Store(executionID, recordID)
+	}
+}
+
+func (idx *ExecIndex) Delete(executionID string) {
+	idx.m.Delete(executionID)
 }
 
 func (p *PBClient) ensureAuth(ctx context.Context) error {
@@ -443,173 +609,6 @@ func (p *PBClient) UpdateTelemetryFull(ctx context.Context, recordID string, pay
 	return nil
 }
 
-// EnsurePipelineField checks the PocketBase collection schema and adds the
-// 'pipeline' JSON field if it does not yet exist. Called once on startup.
-// Supports both PB <0.22 ("schema" key) and PB >=0.22 ("fields" key).
-// Requires admin privileges — tries configured auth first, then falls back to
-// _superusers (PB >=0.22) and _admins (PB <0.22) endpoints.
-func (p *PBClient) EnsurePipelineField(ctx context.Context) error {
-	if err := p.ensureAuth(ctx); err != nil {
-		return err
-	}
-
-	adminToken := p.token // start with the configured auth token
-
-	// Try reading collection schema with current token
-	readResp, readErr := p.doGetCollections(ctx, adminToken)
-	if readErr != nil {
-		return readErr
-	}
-	defer readResp.Body.Close()
-
-	// If 403, the token lacks admin privileges — try admin-specific auth
-	if readResp.StatusCode == 403 {
-		log.Printf("[MIGRATION] configured auth collection lacks admin privileges, trying superuser auth")
-		var fallbackErr error
-		adminToken, fallbackErr = p.tryAdminAuth(ctx)
-		if fallbackErr != nil {
-			return fmt.Errorf("read collection schema: HTTP 403 Forbidden (admin auth fallback also failed: %v)", fallbackErr)
-		}
-		// Retry with admin token
-		readResp.Body.Close()
-		readResp, readErr = p.doGetCollections(ctx, adminToken)
-		if readErr != nil {
-			return readErr
-		}
-		defer readResp.Body.Close()
-	}
-
-	if readResp.StatusCode < 200 || readResp.StatusCode >= 300 {
-		return fmt.Errorf("read collection schema: HTTP %s", readResp.Status)
-	}
-
-	// PB <0.22 uses "schema", PB >=0.22 uses "fields" for field definitions.
-	// Parse both and use whichever is present.
-	var raw map[string]json.RawMessage
-	body, _ := io.ReadAll(readResp.Body)
-	if err := json.Unmarshal(body, &raw); err != nil {
-		return fmt.Errorf("decode collection: %w", err)
-	}
-
-	// Determine which key holds the field definitions
-	fieldsKey := "fields" // PB >=0.22 default
-	fieldsDef, hasFields := raw["fields"]
-	schemaDef, hasSchema := raw["schema"]
-	if !hasFields && hasSchema {
-		fieldsKey = "schema" // PB <0.22 fallback
-		fieldsDef = schemaDef
-	} else if !hasFields && !hasSchema {
-		return fmt.Errorf("collection response has neither 'fields' nor 'schema' key")
-	}
-
-	var fields []map[string]interface{}
-	if fieldsDef != nil {
-		if err := json.Unmarshal(fieldsDef, &fields); err != nil {
-			return fmt.Errorf("decode %s array: %w", fieldsKey, err)
-		}
-	}
-
-	// Check if pipeline field already exists
-	for _, field := range fields {
-		if name, _ := field["name"].(string); name == "pipeline" {
-			log.Printf("[MIGRATION] Pipeline field already exists in '%s' (via %s key)", p.targetColl, fieldsKey)
-			return nil
-		}
-	}
-
-	// Append the pipeline field (PocketBase JSON type)
-	log.Printf("[MIGRATION] Adding 'pipeline' JSON field to collection '%s' (using %s key)", p.targetColl, fieldsKey)
-	newField := map[string]interface{}{
-		"name":     "pipeline",
-		"type":     "json",
-		"required": false,
-	}
-	// PB <0.22 expects "options", PB >=0.22 uses "maxSize" directly
-	if fieldsKey == "schema" {
-		newField["options"] = map[string]interface{}{}
-	} else {
-		newField["maxSize"] = 0 // 0 = unlimited
-	}
-	fields = append(fields, newField)
-
-	patchBody, _ := json.Marshal(map[string]interface{}{fieldsKey: fields})
-	patchReq, err := http.NewRequestWithContext(ctx, http.MethodPatch,
-		fmt.Sprintf("%s/api/collections/%s", p.baseURL, p.targetColl),
-		bytes.NewReader(patchBody))
-	if err != nil {
-		return err
-	}
-	patchReq.Header.Set("Content-Type", "application/json")
-	patchReq.Header.Set("Authorization", "Bearer "+adminToken)
-
-	patchResp, err := p.http.Do(patchReq)
-	if err != nil {
-		return fmt.Errorf("patch collection: %w", err)
-	}
-	defer patchResp.Body.Close()
-
-	if patchResp.StatusCode < 200 || patchResp.StatusCode >= 300 {
-		rb, _ := io.ReadAll(io.LimitReader(patchResp.Body, 4<<10))
-		return fmt.Errorf("add pipeline field via %s: %s: %s", fieldsKey, patchResp.Status, string(rb))
-	}
-
-	log.Printf("[MIGRATION] Successfully added 'pipeline' field to '%s' via %s key", p.targetColl, fieldsKey)
-	return nil
-}
-
-// doGetCollections makes a GET request to read the target collection definition.
-func (p *PBClient) doGetCollections(ctx context.Context, token string) (*http.Response, error) {
-	req, err := http.NewRequestWithContext(ctx, http.MethodGet,
-		fmt.Sprintf("%s/api/collections/%s", p.baseURL, p.targetColl), nil)
-	if err != nil {
-		return nil, err
-	}
-	req.Header.Set("Authorization", "Bearer "+token)
-	return p.http.Do(req)
-}
-
-// tryAdminAuth attempts to authenticate as admin/superuser using known PocketBase
-// admin auth endpoints (_superusers for PB >=0.22, _admins for legacy PB).
-func (p *PBClient) tryAdminAuth(ctx context.Context) (string, error) {
-	endpoints := []string{
-		fmt.Sprintf("%s/api/collections/_superusers/auth-with-password", p.baseURL),
-		fmt.Sprintf("%s/api/admins/auth-with-password", p.baseURL),
-	}
-
-	body, _ := json.Marshal(map[string]string{
-		"identity": p.identity,
-		"password": p.password,
-	})
-
-	for _, ep := range endpoints {
-		req, err := http.NewRequestWithContext(ctx, http.MethodPost, ep, bytes.NewReader(body))
-		if err != nil {
-			continue
-		}
-		req.Header.Set("Content-Type", "application/json")
-
-		resp, err := p.http.Do(req)
-		if err != nil {
-			continue
-		}
-		defer resp.Body.Close()
-
-		if resp.StatusCode < 200 || resp.StatusCode >= 300 {
-			continue
-		}
-
-		var out struct {
-			Token string `json:"token"`
-		}
-		if json.NewDecoder(resp.Body).Decode(&out) == nil && out.Token != "" {
-			log.Printf("[MIGRATION] admin auth succeeded via %s", ep)
-			return out.Token, nil
-		}
-	}
-
-	return "", fmt.Errorf("could not authenticate as admin via _superusers or _admins")
-}
-
 // FetchRecordsPaginated retrieves records with pagination and optional filters.
 func (p *PBClient) FetchRecordsPaginated(ctx context.Context, page, limit int, status, app, osType, typeFilter, sortField, repoSource string, days int) ([]TelemetryRecord, int, error) {
 	if err := p.ensureAuth(ctx); err != nil {
@@ -793,14 +792,19 @@ func (p *PBClient) UpsertTelemetry(ctx context.Context, payload TelemetryOut) er
 		CPUModel:        payload.CPUModel,
 		RAMSpeed:        payload.RAMSpeed,
 		RepoSource:      payload.RepoSource,
-		Pipeline:        payload.Pipeline,
 	}
 	return p.UpdateTelemetryStatus(ctx, recordID, update)
 }
 
 func (p *PBClient) CreateTelemetry(ctx context.Context, payload TelemetryOut) error {
+	_, err := p.CreateTelemetryReturningID(ctx, payload)
+	return err
+}
+
+// CreateTelemetryReturningID creates a new record and returns its PocketBase record ID.
+func (p *PBClient) CreateTelemetryReturningID(ctx context.Context, payload TelemetryOut) (string, error) {
 	if err := p.ensureAuth(ctx); err != nil {
-		return err
+		return "", err
 	}
 
 	b, _ := json.Marshal(payload)
@@ -809,21 +813,28 @@ func (p *PBClient) CreateTelemetry(ctx context.Context, payload TelemetryOut) er
 		bytes.NewReader(b),
 	)
 	if err != nil {
-		return err
+		return "", err
 	}
 	req.Header.Set("Content-Type", "application/json")
 	req.Header.Set("Authorization", "Bearer "+p.token)
 
 	resp, err := p.http.Do(req)
 	if err != nil {
-		return err
+		return "", err
 	}
 	defer resp.Body.Close()
 	if resp.StatusCode < 200 || resp.StatusCode >= 300 {
 		rb, _ := io.ReadAll(io.LimitReader(resp.Body, 8<<10))
-		return fmt.Errorf("pocketbase create failed: %s: %s", resp.Status, strings.TrimSpace(string(rb)))
+		return "", fmt.Errorf("pocketbase create failed: %s: %s", resp.Status, strings.TrimSpace(string(rb)))
 	}
-	return nil
+
+	var result struct {
+		ID string `json:"id"`
+	}
+	if err := json.NewDecoder(resp.Body).Decode(&result); err != nil {
+		return "", nil // Record created but ID parse failed — not fatal
+	}
+	return result.ID, nil
 }
 
 // -------- Rate limiter (token bucket / minute window, simple) --------
@@ -978,7 +989,7 @@ func getClientIP(r *http.Request, pt *ProxyTrust) net.IP {
 
 var (
 	// Allowed values for 'type' field
-	allowedType = map[string]bool{"lxc": true, "vm": true, "pve": true, "addon": true, "tool": true}
+	allowedType = map[string]bool{"lxc": true, "vm": true, "turnkey": true, "pve": true, "addon": true, "tool": true}
 
 	// Allowed values for 'status' field
 	allowedStatus = map[string]bool{"installing": true, "validation": true, "configuring": true, "success": true, "failed": true, "aborted": true, "unknown": true}
@@ -1400,99 +1411,6 @@ func validate(in *TelemetryIn) error {
 	return nil
 }
 
-// computeHash generates a hash for deduplication (GDPR-safe, no IP)
-func computeHash(out TelemetryOut) string {
-	key := fmt.Sprintf("%s|%s|%s|%s|%d",
-		out.RandomID, out.NSAPP, out.Type, out.Status, out.ExitCode,
-	)
-	sum := sha256.Sum256([]byte(key))
-	return hex.EncodeToString(sum[:])
-}
-
-// categorizeErrorText assigns an error_category based on error text patterns
-func categorizeErrorText(errLower string) string {
-	// Docker / container errors (check early, before generic patterns)
-	if strings.Contains(errLower, "docker") ||
-		strings.Contains(errLower, "privileged mode") ||
-		strings.Contains(errLower, "container runtime") ||
-		strings.Contains(errLower, "daemon") {
-		return "config"
-	}
-	// Network errors
-	if strings.Contains(errLower, "connection refused") ||
-		strings.Contains(errLower, "could not resolve") ||
-		strings.Contains(errLower, "dns") ||
-		strings.Contains(errLower, "failed to download") ||
-		strings.Contains(errLower, "curl") ||
-		strings.Contains(errLower, "wget") ||
-		strings.Contains(errLower, "network unreachable") ||
-		strings.Contains(errLower, "timed out") ||
-		strings.Contains(errLower, "ssl") ||
-		strings.Contains(errLower, "certificate") {
-		return "network"
-	}
-	// APT / package manager (check before generic "dependency")
-	if strings.Contains(errLower, "apt") ||
-		strings.Contains(errLower, "dpkg") ||
-		strings.Contains(errLower, "broken packages") ||
-		strings.Contains(errLower, "unmet dependencies") ||
-		strings.Contains(errLower, "unable to locate package") {
-		return "apt"
-	}
-	// Storage
-	if strings.Contains(errLower, "no space left") ||
-		strings.Contains(errLower, "disk full") ||
-		strings.Contains(errLower, "read-only file system") ||
-		strings.Contains(errLower, "i/o error") {
-		return "storage"
-	}
-	// Permission
-	if strings.Contains(errLower, "permission denied") ||
-		strings.Contains(errLower, "operation not permitted") ||
-		strings.Contains(errLower, "access denied") {
-		return "permission"
-	}
-	// Resource (OOM, memory)
-	if strings.Contains(errLower, "oom") ||
-		strings.Contains(errLower, "out of memory") ||
-		strings.Contains(errLower, "cannot allocate") ||
-		strings.Contains(errLower, "killed") ||
-		strings.Contains(errLower, "sigkill") {
-		return "resource"
-	}
-	// Signal-related errors
-	if strings.Contains(errLower, "sighup") ||
-		strings.Contains(errLower, "sigquit") ||
-		strings.Contains(errLower, "sigterm") ||
-		strings.Contains(errLower, "sigabrt") ||
-		strings.Contains(errLower, "sigpipe") ||
-		strings.Contains(errLower, "core dump") {
-		return "signal"
-	}
-	// Command not found
-	if strings.Contains(errLower, "command not found") ||
-		strings.Contains(errLower, "not found") {
-		return "command_not_found"
-	}
-	// Dependency
-	if strings.Contains(errLower, "dependency") ||
-		strings.Contains(errLower, "requires") ||
-		strings.Contains(errLower, "missing") {
-		return "dependency"
-	}
-	// Config
-	if strings.Contains(errLower, "config") ||
-		strings.Contains(errLower, "syntax error") ||
-		strings.Contains(errLower, "invalid") {
-		return "config"
-	}
-	// Timeout
-	if strings.Contains(errLower, "timeout") {
-		return "timeout"
-	}
-	return "unknown"
-}
-
 // -------- HTTP server --------
 
 func serveHTMLFile(w http.ResponseWriter, r *http.Request, filePath string) {
@@ -1571,27 +1489,10 @@ func main() {
 
 	pb := NewPBClient(cfg)
 
-	// Auto-migrate: ensure 'pipeline' field exists in PocketBase collection.
-	// Retry up to 3 times with backoff in case PB is still starting up.
-	{
-		var migErr error
-		for attempt := 1; attempt <= 3; attempt++ {
-			ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
-			migErr = pb.EnsurePipelineField(ctx)
-			cancel()
-			if migErr == nil {
-				break
-			}
-			log.Printf("[MIGRATION] Attempt %d/3 failed: %v", attempt, migErr)
-			if attempt < 3 {
-				time.Sleep(time.Duration(attempt*2) * time.Second)
-			}
-		}
-		if migErr != nil {
-			log.Printf("[MIGRATION] WARNING: pipeline field migration failed after 3 attempts: %v", migErr)
-			log.Printf("[MIGRATION] Pipeline tracking will NOT work until the field is added manually or the service is restarted")
-		}
-	}
+	// Write-ahead queue: decouples HTTP accept from PB writes
+	execIndex := NewExecIndex()
+	writeQueue := NewWriteQueue(pb, envInt("WRITE_QUEUE_SIZE", 10000), envInt("WRITE_WORKERS", 4), execIndex)
+	writeQueue.Start()
 
 	// Persistent script stats stores (7d, 30d, all-time)
 	stats7d := NewScriptStatsStore(pb, "_script_stats_7d", 7)
@@ -1627,7 +1528,7 @@ func main() {
 	// Initialize cleanup/retention job (GDPR Löschkonzept)
 	cleaner := NewCleaner(CleanupConfig{
 		Enabled:          envBool("CLEANUP_ENABLED", true),
-		CheckInterval:    time.Duration(envInt("CLEANUP_INTERVAL_MIN", 15)) * time.Minute,
+		CheckInterval:    time.Duration(envInt("CLEANUP_INTERVAL_MIN", 60)) * time.Minute,
 		StuckAfterHours:  envInt("CLEANUP_STUCK_HOURS", 1),
 		RetentionEnabled: envBool("RETENTION_ENABLED", false),
 		RetentionDays:    envInt("RETENTION_DAYS", 365),
@@ -2376,27 +2277,9 @@ func main() {
 			}
 		}
 
-		// Auto-categorize based on error text patterns when still uncategorized
-		if in.Status == "failed" && (in.ErrorCategory == "" || in.ErrorCategory == "unknown") && in.Error != "" {
-			in.ErrorCategory = categorizeErrorText(errorLower)
-		}
-
 		// Enrich error text with exit code description if error text is empty
 		if in.Status == "failed" && in.Error == "" && in.ExitCode != 0 {
 			in.Error = fmt.Sprintf("Exit code %d: %s", in.ExitCode, getExitCodeDescription(in.ExitCode))
-		}
-
-		// Track pipeline step (in-memory, written to PocketBase with each upsert)
-		pKey := pipelineTrackingKey(in.ExecutionID, in.RandomID)
-		pipeline := trackPipelineStep(pKey, in.Status)
-		isTerminal := in.Status == "success" || in.Status == "failed" || in.Status == "aborted"
-		if isTerminal {
-			defer cleanupPipeline(pKey)
-		}
-
-		if cfg.EnableReqLogging {
-			log.Printf("pipeline tracked: nsapp=%s status=%s key=%s steps=%d bytes=%d",
-				in.NSAPP, in.Status, pKey, bytes.Count(pipeline, []byte(`"s":`)), len(pipeline))
 		}
 
 		// Map input to PocketBase schema
@@ -2425,30 +2308,18 @@ func main() {
 			InstallDuration: in.InstallDuration,
 			ErrorCategory:   in.ErrorCategory,
 			RepoSource:      in.RepoSource,
-			Pipeline:        pipeline,
 		}
-		_ = computeHash(out) // For future deduplication
 
-		ctx, cancel := context.WithTimeout(r.Context(), cfg.RequestTimeout)
-		defer cancel()
-
-		// Upsert: Creates new record if random_id doesn't exist, updates if it does
-		// repo_source is stored as a field on the record for filtering
-		if err := pb.UpsertTelemetry(ctx, out); err != nil {
-			// Log enough context to debug without exposing personal data (GDPR-safe)
-			log.Printf("pocketbase write failed: %v | nsapp=%s type=%s status=%s ct_type=%d repo=%s method=%s",
-				err, out.NSAPP, out.Type, out.Status, out.CTType, out.RepoSource, out.Method)
-			http.Error(w, "upstream error", http.StatusBadGateway)
+		// Enqueue for async PB write (decoupled from HTTP response)
+		if !writeQueue.Enqueue(out) {
+			log.Printf("[QUEUE] full, dropping nsapp=%s status=%s exec=%s", out.NSAPP, out.Status, out.ExecutionID)
+			http.Error(w, "server busy", http.StatusServiceUnavailable)
 			return
 		}
 
 		if cfg.EnableReqLogging {
-			log.Printf("telemetry accepted nsapp=%s status=%s repo=%s", out.NSAPP, out.Status, in.RepoSource)
+			log.Printf("telemetry accepted nsapp=%s status=%s repo=%s qlen=%d", out.NSAPP, out.Status, in.RepoSource, writeQueue.Len())
 		}
-
-		// Don't invalidate cache on every write - the background warmup
-		// refreshes every 30 minutes, which is sufficient for a dashboard.
-		// Invalidating on every write caused cascading timeouts with large datasets.
 
 		w.WriteHeader(http.StatusAccepted)
 		_, _ = w.Write([]byte("accepted"))
@@ -2509,8 +2380,8 @@ func main() {
 			time.Sleep(5 * time.Second)
 			warmupCaches(pb, cache, cfg, false, scriptStores)
 
-			// Periodic "today" refresh every 15 min
-			todayTicker := time.NewTicker(15 * time.Minute)
+			// Periodic "today" refresh every 30 min
+			todayTicker := time.NewTicker(30 * time.Minute)
 			// Nightly full refresh at 02:00 UTC
 			nightlyTimer := time.NewTimer(timeUntilNextUTC(2, 0))
 
@@ -2525,7 +2396,7 @@ func main() {
 				}
 			}
 		}()
-		log.Printf("background cache warmup enabled (nightly 02:00 UTC, today refresh every 15m)")
+		log.Printf("background cache warmup enabled (nightly 02:00 UTC, today refresh every 30m)")
 	}
 
 	log.Printf("telemetry-ingest listening on %s", cfg.ListenAddr)
@@ -2685,9 +2556,11 @@ func warmupCaches(pb *PBClient, cache *Cache, cfg Config, todayOnly bool, stores
 	log.Printf("[CACHE] Starting %s cache warmup...", label)
 	start := time.Now()
 
+	// Today-only: just dashboard + errors for day=1 (scripts served from persistent stores)
+	// Full: day=1 + day=90 (skip 365 — too expensive, served from stale cache on demand)
 	dayRanges := []int{1}
 	if !todayOnly {
-		dayRanges = []int{1, 90, 365} // Only Today + ranges without persistent store
+		dayRanges = []int{1, 90}
 	}
 	repos := []string{"ProxmoxVE"}
 
@@ -2716,6 +2589,9 @@ func warmupCaches(pb *PBClient, cache *Cache, cfg Config, todayOnly bool, stores
 			_ = cache.Set(context.Background(), cacheKey, data, 23*time.Hour)
 			warmed++
 			log.Printf("[CACHE] scripts:%d cache warmed from persistent store (%s)", store.windowDays, store.label)
+
+			// Small pause between heavy store updates to let PB breathe
+			time.Sleep(2 * time.Second)
 		}
 	}
 
@@ -2727,9 +2603,7 @@ func warmupCaches(pb *PBClient, cache *Cache, cfg Config, todayOnly bool, stores
 
 		// Scale timeout by data volume
 		timeout := 180 * time.Second
-		if days >= 365 {
-			timeout = 600 * time.Second
-		} else if days >= 90 {
+		if days >= 90 {
 			timeout = 300 * time.Second
 		}
 
@@ -2750,10 +2624,12 @@ func warmupCaches(pb *PBClient, cache *Cache, cfg Config, todayOnly bool, stores
 						warmed++
 					}
 				}
+				// Pause between heavy fetches
+				time.Sleep(1 * time.Second)
 			}
 
-			// --- Scripts ---
-			{
+			// --- Scripts (only for today — persistent stores handle 7d/30d/alltime) ---
+			if days == 1 {
 				cacheKey := fmt.Sprintf("scripts:%d:%s", days, repo)
 				if cache.TryStartRefresh(cacheKey) {
 					ctx, cancel := context.WithTimeout(context.Background(), timeout)
@@ -2768,10 +2644,11 @@ func warmupCaches(pb *PBClient, cache *Cache, cfg Config, todayOnly bool, stores
 						warmed++
 					}
 				}
+				time.Sleep(1 * time.Second)
 			}
 
-			// --- Errors ---
-			{
+			// --- Errors (skip for today-only refresh — errors don't change that fast) ---
+			if !todayOnly {
 				cacheKey := fmt.Sprintf("errors:%d:%s", days, repo)
 				if cache.TryStartRefresh(cacheKey) {
 					ctx, cancel := context.WithTimeout(context.Background(), timeout)
@@ -2786,6 +2663,7 @@ func warmupCaches(pb *PBClient, cache *Cache, cfg Config, todayOnly bool, stores
 						warmed++
 					}
 				}
+				time.Sleep(1 * time.Second)
 			}
 		}
 	}
