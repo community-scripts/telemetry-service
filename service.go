@@ -1494,12 +1494,6 @@ func main() {
 	writeQueue := NewWriteQueue(pb, envInt("WRITE_QUEUE_SIZE", 10000), envInt("WRITE_WORKERS", 4), execIndex)
 	writeQueue.Start()
 
-	// Persistent script stats stores (7d, 30d, all-time)
-	stats7d := NewScriptStatsStore(pb, "_script_stats_7d", 7)
-	stats30d := NewScriptStatsStore(pb, "_script_stats_30d", 30)
-	statsAllTime := NewScriptStatsStore(pb, "_script_stats_alltime", 0)
-	scriptStores := []*ScriptStatsStore{stats7d, stats30d, statsAllTime}
-
 	rl := NewRateLimiter(cfg.RateLimitRPM, cfg.RateBurst)
 
 	// Initialize cache
@@ -1832,19 +1826,24 @@ func main() {
 		ctx, cancel := context.WithTimeout(r.Context(), 120*time.Second)
 		defer cancel()
 
-		// Persistent stores: 7d, 30d, All Time (days=0)
-		// Only Today (days=1) uses live telemetry fetch
-		var store *ScriptStatsStore
+		// Determine which PB collection holds pre-computed stats
+		// 7d, 30d, alltime are SQL-generated in PocketBase
+		// Only live fetches (days > 30, days == 1) read raw telemetry
+		var statsCollection string
+		var windowDays int
 		switch {
 		case days == 0:
-			store = statsAllTime
+			statsCollection = "_script_stats_alltime"
+			windowDays = 0
 		case days <= 7:
-			store = stats7d
+			statsCollection = "_script_stats_7d"
+			windowDays = 7
 		case days <= 30:
-			store = stats30d
+			statsCollection = "_script_stats_30d"
+			windowDays = 30
 		}
 
-		if store != nil {
+		if statsCollection != "" {
 			cacheKey := fmt.Sprintf("scripts:%d:%s", days, repoSource)
 			var data *ScriptAnalysisData
 			if cfg.CacheEnabled && cache.Get(ctx, cacheKey, &data) {
@@ -1854,9 +1853,12 @@ func main() {
 				return
 			}
 
-			// Build from persistent store (instant, ~466 rows in memory)
-			knownScripts, _ := pb.FetchKnownScripts(ctx)
-			data = store.BuildData(knownScripts)
+			data, err := pb.FetchScriptStatsFromCollection(ctx, statsCollection, windowDays)
+			if err != nil {
+				log.Printf("script stats fetch from %s failed: %v", statsCollection, err)
+				http.Error(w, "failed to fetch script data", http.StatusInternalServerError)
+				return
+			}
 
 			if cfg.CacheEnabled {
 				_ = cache.Set(ctx, cacheKey, data, 23*time.Hour)
@@ -1868,7 +1870,7 @@ func main() {
 			return
 		}
 
-		// Today (days=1): live fetch from telemetry
+		// Live fetch from raw telemetry (days > 30, or today)
 		cacheKey := fmt.Sprintf("scripts:%d:%s", days, repoSource)
 		var data *ScriptAnalysisData
 		if cfg.CacheEnabled && cache.Get(ctx, cacheKey, &data) {
@@ -2334,52 +2336,13 @@ func main() {
 
 	// Background cache warmup job
 	// - On startup: full warmup (dashboard + scripts + errors, all day ranges)
-	// - Every 15 min: refresh "today" data only (fast, changes frequently)
+	// - Every 30 min: refresh "today" data only (fast, changes frequently)
 	// - Nightly at 02:00 UTC: full warmup with 23h TTL (data barely changes intra-day)
 	if cfg.CacheEnabled {
 		go func() {
-			// Load all script stats stores from PocketBase on startup
-			for _, store := range scriptStores {
-				ctx, cancel := context.WithTimeout(context.Background(), 60*time.Second)
-				if err := store.LoadFromPB(ctx); err != nil {
-					log.Printf("[STATS:%s] LoadFromPB failed: %v", store.label, err)
-				}
-				cancel()
-			}
-
-			// If alltime store is empty, bootstrap from raw telemetry (first run)
-			if statsAllTime.IsEmpty() {
-				log.Println("[STATS:alltime] Store is empty, bootstrapping...")
-				ctx, cancel := context.WithTimeout(context.Background(), 900*time.Second)
-				if err := statsAllTime.Bootstrap(ctx, "ProxmoxVE"); err != nil {
-					log.Printf("[STATS:alltime] Bootstrap failed: %v", err)
-					log.Println("[STATS:alltime] Continuing with empty store - will build up incrementally")
-					// Initialize with today's date to start incremental updates from now on
-					today := time.Now().Format("2006-01-02")
-					statsAllTime.mu.Lock()
-					statsAllTime.stats = map[string]*CachedScriptStat{
-						"_marker": {LastDate: today}, // Marker to prevent re-bootstrap
-					}
-					statsAllTime.mu.Unlock()
-				}
-				cancel()
-			}
-
-			// If 7d/30d stores are empty, rebuild them
-			for _, store := range []*ScriptStatsStore{stats7d, stats30d} {
-				if store.IsEmpty() {
-					log.Printf("[STATS:%s] Store is empty, rebuilding...", store.label)
-					ctx, cancel := context.WithTimeout(context.Background(), 300*time.Second)
-					if err := store.Rebuild(ctx, "ProxmoxVE"); err != nil {
-						log.Printf("[STATS:%s] Rebuild failed: %v", store.label, err)
-					}
-					cancel()
-				}
-			}
-
 			// Initial full warmup after startup
 			time.Sleep(5 * time.Second)
-			warmupCaches(pb, cache, cfg, false, scriptStores)
+			warmupCaches(pb, cache, cfg, false)
 
 			// Periodic "today" refresh every 30 min
 			todayTicker := time.NewTicker(30 * time.Minute)
@@ -2389,10 +2352,10 @@ func main() {
 			for {
 				select {
 				case <-todayTicker.C:
-					warmupCaches(pb, cache, cfg, true, scriptStores)
+					warmupCaches(pb, cache, cfg, true)
 				case <-nightlyTimer.C:
 					log.Println("[CACHE] Nightly full warmup triggered")
-					warmupCaches(pb, cache, cfg, false, scriptStores)
+					warmupCaches(pb, cache, cfg, false)
 					nightlyTimer.Reset(24 * time.Hour)
 				}
 			}
@@ -2549,7 +2512,7 @@ func timeUntilNextUTC(hour, minute int) time.Duration {
 // warmupCaches pre-populates the cache for dashboard, scripts, AND errors endpoints.
 // If todayOnly=true, only warms days=1 (fast refresh for current-day data).
 // If todayOnly=false, warms all day ranges with long TTLs (nightly/startup).
-func warmupCaches(pb *PBClient, cache *Cache, cfg Config, todayOnly bool, stores []*ScriptStatsStore) {
+func warmupCaches(pb *PBClient, cache *Cache, cfg Config, todayOnly bool) {
 	label := "full"
 	if todayOnly {
 		label = "today-only"
@@ -2557,8 +2520,6 @@ func warmupCaches(pb *PBClient, cache *Cache, cfg Config, todayOnly bool, stores
 	log.Printf("[CACHE] Starting %s cache warmup...", label)
 	start := time.Now()
 
-	// Today-only: just dashboard + errors for day=1 (scripts served from persistent stores)
-	// Full: day=1 + day=90 (skip 365 — too expensive, served from stale cache on demand)
 	dayRanges := []int{1}
 	if !todayOnly {
 		dayRanges = []int{1, 90}
@@ -2568,31 +2529,28 @@ func warmupCaches(pb *PBClient, cache *Cache, cfg Config, todayOnly bool, stores
 	warmed := 0
 	failed := 0
 
-	// Update all persistent stores + cache their data on full warmup
+	// Warm script stats from PB SQL collections (7d, 30d, alltime) on full warmup
 	if !todayOnly {
-		ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
-		knownScripts, _ := pb.FetchKnownScripts(ctx)
-		cancel()
-
-		for _, store := range stores {
-			uCtx, uCancel := context.WithTimeout(context.Background(), 600*time.Second)
-			err := store.Update(uCtx, "ProxmoxVE")
-			uCancel()
+		for _, spec := range []struct {
+			collection string
+			days       int
+		}{
+			{"_script_stats_7d", 7},
+			{"_script_stats_30d", 30},
+			{"_script_stats_alltime", 0},
+		} {
+			ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
+			data, err := pb.FetchScriptStatsFromCollection(ctx, spec.collection, spec.days)
+			cancel()
 			if err != nil {
-				log.Printf("[CACHE] store %s update failed: %v", store.label, err)
+				log.Printf("[CACHE] scripts:%d warmup failed: %v", spec.days, err)
 				failed++
 				continue
 			}
-
-			// Build + cache the data
-			data := store.BuildData(knownScripts)
-			cacheKey := fmt.Sprintf("scripts:%d:ProxmoxVE", store.windowDays)
+			cacheKey := fmt.Sprintf("scripts:%d:ProxmoxVE", spec.days)
 			_ = cache.Set(context.Background(), cacheKey, data, 23*time.Hour)
 			warmed++
-			log.Printf("[CACHE] scripts:%d cache warmed from persistent store (%s)", store.windowDays, store.label)
-
-			// Small pause between heavy store updates to let PB breathe
-			time.Sleep(2 * time.Second)
+			log.Printf("[CACHE] scripts:%d cache warmed from PB collection %s", spec.days, spec.collection)
 		}
 	}
 
@@ -2625,11 +2583,10 @@ func warmupCaches(pb *PBClient, cache *Cache, cfg Config, todayOnly bool, stores
 						warmed++
 					}
 				}
-				// Pause between heavy fetches
 				time.Sleep(1 * time.Second)
 			}
 
-			// --- Scripts (only for today — persistent stores handle 7d/30d/alltime) ---
+			// --- Scripts (only for today — PB SQL collections handle 7d/30d/alltime) ---
 			if days == 1 {
 				cacheKey := fmt.Sprintf("scripts:%d:%s", days, repo)
 				if cache.TryStartRefresh(cacheKey) {
