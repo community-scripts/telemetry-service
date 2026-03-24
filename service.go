@@ -604,7 +604,16 @@ func (p *PBClient) UpdateTelemetryFull(ctx context.Context, recordID string, pay
 	defer resp.Body.Close()
 	if resp.StatusCode < 200 || resp.StatusCode >= 300 {
 		rb, _ := io.ReadAll(io.LimitReader(resp.Body, 8<<10))
-		return fmt.Errorf("pocketbase full-update failed: %s: %s", resp.Status, strings.TrimSpace(string(rb)))
+		rbStr := strings.TrimSpace(string(rb))
+
+		// If PB rejected error_category (schema out of sync), retry with "unknown"
+		if resp.StatusCode == 400 && strings.Contains(rbStr, "error_category") && payload.ErrorCategory != "unknown" {
+			log.Printf("[WARN] PB rejected error_category=%q for nsapp=%s, retrying with 'unknown'", payload.ErrorCategory, payload.NSAPP)
+			payload.ErrorCategory = "unknown"
+			return p.UpdateTelemetryFull(ctx, recordID, payload)
+		}
+
+		return fmt.Errorf("pocketbase full-update failed: %s: %s", resp.Status, rbStr)
 	}
 	return nil
 }
@@ -1284,6 +1293,62 @@ func sanitizeMultiLine(s string, max int) string {
 // ipv4Re matches IPv4 addresses (e.g. 192.168.1.100) for GDPR anonymization.
 var ipv4Re = regexp.MustCompile(`(\d{1,3}\.)\d{1,3}\.\d{1,3}`)
 
+// numericFieldSuffixRe matches JSON numeric fields with unit suffixes like 32G, 100M.
+// Captures: "field_name": 123G → replace with "field_name": 123
+var numericFieldSuffixRe = regexp.MustCompile(`("(?:disk_size|core_count|ram_size)"\s*:\s*)(\d+)[A-Za-z]+`)
+
+// hexEscapeRe matches invalid \xNN hex escapes in JSON strings (JSON only supports \uNNNN).
+var hexEscapeRe = regexp.MustCompile(`\\x([0-9A-Fa-f]{2})`)
+
+// sanitizeRawJSON attempts to fix common JSON encoding issues from bash clients.
+// Called only when the initial json.Decode fails — this is a best-effort rescue.
+func sanitizeRawJSON(raw []byte) []byte {
+	// 1. Strip unit suffixes from numeric fields: "disk_size": 32G → "disk_size": 32
+	raw = numericFieldSuffixRe.ReplaceAll(raw, []byte("${1}${2}"))
+
+	// 2. Replace \xNN hex escapes with \u00NN (valid JSON unicode escapes)
+	raw = hexEscapeRe.ReplaceAll(raw, []byte(`\u00$1`))
+
+	// 3. Replace literal control characters inside strings with safe alternatives
+	// (tab=0x09, vertical tab=0x0B, form feed=0x0C, etc. — only valid if escaped in JSON)
+	inString := false
+	escaped := false
+	cleaned := make([]byte, 0, len(raw))
+	for _, b := range raw {
+		if escaped {
+			escaped = false
+			cleaned = append(cleaned, b)
+			continue
+		}
+		if b == '\\' && inString {
+			escaped = true
+			cleaned = append(cleaned, b)
+			continue
+		}
+		if b == '"' {
+			inString = !inString
+			cleaned = append(cleaned, b)
+			continue
+		}
+		if inString && b < 0x20 {
+			// Replace control characters with space (\n and \r are common, others rare)
+			switch b {
+			case '\n':
+				cleaned = append(cleaned, '\\', 'n')
+			case '\r':
+				cleaned = append(cleaned, '\\', 'r')
+			case '\t':
+				cleaned = append(cleaned, '\\', 't')
+			default:
+				cleaned = append(cleaned, ' ')
+			}
+			continue
+		}
+		cleaned = append(cleaned, b)
+	}
+	return cleaned
+}
+
 // sanitizeIPs anonymizes IPv4 addresses in log text for GDPR compliance.
 // Keeps the first octet visible for debugging (e.g. "192.x.x"), strips the rest.
 func sanitizeIPs(s string) string {
@@ -1373,6 +1438,10 @@ func validate(in *TelemetryIn) error {
 	// These are only required for initial creation
 	isUpdate := in.Status != "installing"
 
+	// os_type: normalize "-" (used by VM scripts for "not applicable") to empty
+	if in.OsType == "-" || in.OsType == "none" {
+		in.OsType = ""
+	}
 	// os_type is optional but if provided must be valid (only for lxc/vm)
 	if (in.Type == "lxc" || in.Type == "vm") && in.OsType != "" && !allowedOsType[in.OsType] {
 		return errors.New("invalid os_type")
@@ -2210,20 +2279,27 @@ func main() {
 		var in TelemetryIn
 		dec := json.NewDecoder(bytes.NewReader(raw))
 		if err := dec.Decode(&in); err != nil {
-			// Log first 2000 chars of body + byte offset for diagnosis
-			snippet := string(raw)
-			if len(snippet) > 2000 {
-				snippet = snippet[:2000] + "..."
+			// Attempt rescue: sanitize common bash-client JSON issues and retry
+			sanitized := sanitizeRawJSON(raw)
+			var in2 TelemetryIn
+			dec2 := json.NewDecoder(bytes.NewReader(sanitized))
+			if err2 := dec2.Decode(&in2); err2 != nil {
+				// Both attempts failed — log the original error
+				snippet := string(raw)
+				if len(snippet) > 2000 {
+					snippet = snippet[:2000] + "..."
+				}
+				var syntaxErr *json.SyntaxError
+				if errors.As(err, &syntaxErr) {
+					log.Printf("[REJECT] json decode: %v (offset %d) | body=%s", err, syntaxErr.Offset, snippet)
+				} else {
+					log.Printf("[REJECT] json decode: %v | body=%s", err, snippet)
+				}
+				http.Error(w, "invalid json", http.StatusBadRequest)
+				return
 			}
-			// Extract byte offset from json.SyntaxError if available
-			var syntaxErr *json.SyntaxError
-			if errors.As(err, &syntaxErr) {
-				log.Printf("[REJECT] json decode: %v (offset %d) | body=%s", err, syntaxErr.Offset, snippet)
-			} else {
-				log.Printf("[REJECT] json decode: %v | body=%s", err, snippet)
-			}
-			http.Error(w, "invalid json", http.StatusBadRequest)
-			return
+			in = in2
+			log.Printf("[WARN] json sanitized: nsapp=%s exec=%s (original error: %v)", in.NSAPP, in.ExecutionID, err)
 		}
 		if err := validate(&in); err != nil {
 			log.Printf("[REJECT] validation: %v | nsapp=%s status=%s", err, in.NSAPP, in.Status)
