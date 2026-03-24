@@ -2202,10 +2202,11 @@ func main() {
 			return
 		}
 
-		// strict JSON decode (no unknown fields)
+		// Lenient JSON decode: ignore unknown fields for forward compatibility.
+		// When api.func adds new fields before the server is updated, requests
+		// must not be rejected — otherwise ALL telemetry is lost until deploy.
 		var in TelemetryIn
 		dec := json.NewDecoder(bytes.NewReader(raw))
-		dec.DisallowUnknownFields()
 		if err := dec.Decode(&in); err != nil {
 			// Log first 2000 chars of body + byte offset for diagnosis
 			snippet := string(raw)
