@@ -2335,14 +2335,20 @@ func main() {
 	}
 
 	// Background cache warmup job
-	// - On startup: full warmup (dashboard + scripts + errors, all day ranges)
+	// - On startup: load PB cached blobs → fast warmup (day=1 + script stats) → deferred heavy warmup (90d)
 	// - Every 30 min: refresh "today" data only (fast, changes frequently)
-	// - Nightly at 02:00 UTC: full warmup with 23h TTL (data barely changes intra-day)
+	// - Nightly at 02:00 UTC: full warmup + heavy dashboard rebuild
 	if cfg.CacheEnabled {
 		go func() {
-			// Initial full warmup after startup
+			// Load persisted heavy dashboard blobs from PB (instant, survives restarts)
+			loadDashboardCache(pb, cache)
+
+			// Fast warmup: day=1 dashboard/errors + script stats from PB collections
 			time.Sleep(5 * time.Second)
 			warmupCaches(pb, cache, cfg, false)
+
+			// Deferred heavy warmup: 90d dashboard + errors (runs in background, ~10-15 min)
+			go warmupHeavyDashboard(pb, cache, cfg)
 
 			// Periodic "today" refresh every 30 min
 			todayTicker := time.NewTicker(30 * time.Minute)
@@ -2356,6 +2362,7 @@ func main() {
 				case <-nightlyTimer.C:
 					log.Println("[CACHE] Nightly full warmup triggered")
 					warmupCaches(pb, cache, cfg, false)
+					go warmupHeavyDashboard(pb, cache, cfg)
 					nightlyTimer.Reset(24 * time.Hour)
 				}
 			}
@@ -2521,9 +2528,6 @@ func warmupCaches(pb *PBClient, cache *Cache, cfg Config, todayOnly bool) {
 	start := time.Now()
 
 	dayRanges := []int{1}
-	if !todayOnly {
-		dayRanges = []int{1, 90}
-	}
 	repos := []string{"ProxmoxVE"}
 
 	warmed := 0
@@ -2627,4 +2631,88 @@ func warmupCaches(pb *PBClient, cache *Cache, cfg Config, todayOnly bool) {
 	}
 
 	log.Printf("[CACHE] Warmup %s complete: %d warmed, %d failed (took %v)", label, warmed, failed, time.Since(start).Round(time.Second))
+}
+
+// loadDashboardCache loads persisted heavy dashboard blobs from PocketBase on startup.
+// This provides instant cache for 90d data that would otherwise take ~15 min to rebuild.
+func loadDashboardCache(pb *PBClient, cache *Cache) {
+	ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
+	defer cancel()
+
+	blobs := pb.LoadDashboardBlobs(ctx)
+	if len(blobs) == 0 {
+		return
+	}
+
+	for key, payload := range blobs {
+		_ = cache.Set(context.Background(), key, json.RawMessage(payload), 23*time.Hour)
+		log.Printf("[CACHE-BLOB] Restored %s from PB blob", key)
+	}
+}
+
+// warmupHeavyDashboard builds dashboard + error data for expensive day ranges (90d)
+// in the background with generous timeouts. Results are cached and persisted to PB.
+func warmupHeavyDashboard(pb *PBClient, cache *Cache, cfg Config) {
+	heavyRanges := []int{90}
+	repos := []string{"ProxmoxVE"}
+
+	log.Println("[CACHE] Starting deferred heavy dashboard warmup (90d)...")
+	start := time.Now()
+	warmed := 0
+	failed := 0
+
+	for _, days := range heavyRanges {
+		// Generous timeout: ~10s per expected page of 1000 records
+		timeout := 900 * time.Second
+		cacheTTL := 23 * time.Hour
+
+		for _, repo := range repos {
+			// --- Dashboard ---
+			cacheKey := fmt.Sprintf("dashboard:%d:%s", days, repo)
+			func() {
+				ctx, cancel := context.WithTimeout(context.Background(), timeout)
+				defer cancel()
+				data, err := pb.FetchDashboardData(ctx, days, repo)
+				if err != nil {
+					log.Printf("[CACHE] Heavy warmup dashboard:%d failed: %v", days, err)
+					failed++
+					return
+				}
+				_ = cache.Set(context.Background(), cacheKey, data, cacheTTL)
+				warmed++
+				log.Printf("[CACHE] Heavy warmup dashboard:%d complete", days)
+
+				// Persist to PB for instant load on next restart
+				saveCtx, saveCancel := context.WithTimeout(context.Background(), 30*time.Second)
+				pb.SaveDashboardBlob(saveCtx, cacheKey, data)
+				saveCancel()
+			}()
+
+			time.Sleep(5 * time.Second)
+
+			// --- Errors ---
+			cacheKey = fmt.Sprintf("errors:%d:%s", days, repo)
+			func() {
+				ctx, cancel := context.WithTimeout(context.Background(), timeout)
+				defer cancel()
+				data, err := pb.FetchErrorAnalysisData(ctx, days, repo)
+				if err != nil {
+					log.Printf("[CACHE] Heavy warmup errors:%d failed: %v", days, err)
+					failed++
+					return
+				}
+				_ = cache.Set(context.Background(), cacheKey, data, cacheTTL)
+				warmed++
+				log.Printf("[CACHE] Heavy warmup errors:%d complete", days)
+
+				saveCtx, saveCancel := context.WithTimeout(context.Background(), 30*time.Second)
+				pb.SaveDashboardBlob(saveCtx, cacheKey, data)
+				saveCancel()
+			}()
+
+			time.Sleep(5 * time.Second)
+		}
+	}
+
+	log.Printf("[CACHE] Heavy warmup complete: %d warmed, %d failed (took %v)", warmed, failed, time.Since(start).Round(time.Second))
 }

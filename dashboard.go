@@ -1597,3 +1597,122 @@ func buildAddonStats(addonCounts map[string]int, n int) []AddonCount {
 	}
 	return result
 }
+
+// ========================================================
+// Dashboard Cache Blobs (persistent JSON in PocketBase)
+// Collection: _dashboard_cache (cache_key: text, payload: json)
+// Survives service restarts — heavy data (90d) is loaded instantly.
+// ========================================================
+
+// SaveDashboardBlob persists a computed dashboard/error result as JSON in PocketBase.
+// Best-effort: silently returns on any error (collection may not exist yet).
+func (p *PBClient) SaveDashboardBlob(ctx context.Context, cacheKey string, data interface{}) {
+	payload, err := json.Marshal(data)
+	if err != nil {
+		return
+	}
+
+	if err := p.ensureAuth(ctx); err != nil {
+		return
+	}
+
+	body := fmt.Sprintf(`{"cache_key":%q,"payload":%s}`, cacheKey, string(payload))
+
+	// Check if record exists
+	filter := url.QueryEscape(fmt.Sprintf("cache_key = '%s'", cacheKey))
+	findURL := fmt.Sprintf("%s/api/collections/_dashboard_cache/records?filter=%s&perPage=1",
+		p.baseURL, filter)
+
+	req, err := http.NewRequestWithContext(ctx, http.MethodGet, findURL, nil)
+	if err != nil {
+		return
+	}
+	req.Header.Set("Authorization", "Bearer "+p.token)
+	resp, err := p.http.Do(req)
+	if err != nil {
+		return
+	}
+
+	var found struct {
+		Items []struct {
+			ID string `json:"id"`
+		} `json:"items"`
+	}
+	json.NewDecoder(resp.Body).Decode(&found)
+	resp.Body.Close()
+
+	if resp.StatusCode != http.StatusOK {
+		return // Collection probably doesn't exist
+	}
+
+	var method string
+	var reqURL string
+	if len(found.Items) > 0 {
+		method = http.MethodPatch
+		reqURL = fmt.Sprintf("%s/api/collections/_dashboard_cache/records/%s", p.baseURL, found.Items[0].ID)
+	} else {
+		method = http.MethodPost
+		reqURL = fmt.Sprintf("%s/api/collections/_dashboard_cache/records", p.baseURL)
+	}
+
+	req, err = http.NewRequestWithContext(ctx, method, reqURL, strings.NewReader(body))
+	if err != nil {
+		return
+	}
+	req.Header.Set("Authorization", "Bearer "+p.token)
+	req.Header.Set("Content-Type", "application/json")
+
+	resp, err = p.http.Do(req)
+	if err != nil {
+		return
+	}
+	resp.Body.Close()
+	log.Printf("[CACHE-BLOB] Saved %s to _dashboard_cache (%s)", cacheKey, method)
+}
+
+// LoadDashboardBlobs reads all cached blobs from the _dashboard_cache collection.
+// Returns a map of cache_key → raw JSON payload. Best-effort: returns nil on error.
+func (p *PBClient) LoadDashboardBlobs(ctx context.Context) map[string]json.RawMessage {
+	if err := p.ensureAuth(ctx); err != nil {
+		return nil
+	}
+
+	reqURL := fmt.Sprintf("%s/api/collections/_dashboard_cache/records?perPage=100", p.baseURL)
+	req, err := http.NewRequestWithContext(ctx, http.MethodGet, reqURL, nil)
+	if err != nil {
+		return nil
+	}
+	req.Header.Set("Authorization", "Bearer "+p.token)
+
+	resp, err := p.http.Do(req)
+	if err != nil {
+		return nil
+	}
+	defer resp.Body.Close()
+
+	if resp.StatusCode != http.StatusOK {
+		return nil // Collection doesn't exist yet
+	}
+
+	var result struct {
+		Items []struct {
+			CacheKey string          `json:"cache_key"`
+			Payload  json.RawMessage `json:"payload"`
+		} `json:"items"`
+	}
+	if err := json.NewDecoder(resp.Body).Decode(&result); err != nil {
+		return nil
+	}
+
+	blobs := make(map[string]json.RawMessage)
+	for _, item := range result.Items {
+		if item.CacheKey != "" && len(item.Payload) > 0 {
+			blobs[item.CacheKey] = item.Payload
+		}
+	}
+
+	if len(blobs) > 0 {
+		log.Printf("[CACHE-BLOB] Loaded %d cached blobs from _dashboard_cache", len(blobs))
+	}
+	return blobs
+}
