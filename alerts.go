@@ -27,9 +27,9 @@ type AlertConfig struct {
 	Cooldown         time.Duration // Minimum time between alerts
 
 	// Weekly Report settings
-	WeeklyReportEnabled bool          // Enable weekly summary reports
-	WeeklyReportDay     time.Weekday  // Day to send report (0=Sunday, 1=Monday, etc.)
-	WeeklyReportHour    int           // Hour to send report (0-23)
+	WeeklyReportEnabled bool         // Enable weekly summary reports
+	WeeklyReportDay     time.Weekday // Day to send report (0=Sunday, 1=Monday, etc.)
+	WeeklyReportHour    int          // Hour to send report (0-23)
 }
 
 // WeeklyReportData contains aggregated weekly statistics
@@ -60,9 +60,9 @@ type AppStat struct {
 
 // WeekComparison shows changes compared to previous week
 type WeekComparison struct {
-	InstallsChange   int     // Difference in total installs
-	InstallsPercent  float64 // Percentage change
-	FailRateChange   float64 // Change in failure rate (percentage points)
+	InstallsChange  int     // Difference in total installs
+	InstallsPercent float64 // Percentage change
+	FailRateChange  float64 // Change in failure rate (percentage points)
 }
 
 // Alerter handles alerting functionality
@@ -71,7 +71,7 @@ type Alerter struct {
 	lastAlertAt      time.Time
 	lastWeeklyReport time.Time
 	mu               sync.Mutex
-	pb               *PBClient
+	ch               *CHClient
 	lastStats        alertStats
 	alertHistory     []AlertEvent
 }
@@ -91,10 +91,10 @@ type AlertEvent struct {
 }
 
 // NewAlerter creates a new alerter instance
-func NewAlerter(cfg AlertConfig, pb *PBClient) *Alerter {
+func NewAlerter(cfg AlertConfig, ch *CHClient) *Alerter {
 	return &Alerter{
 		cfg:          cfg,
-		pb:           pb,
+		ch:           ch,
 		alertHistory: make([]AlertEvent, 0),
 	}
 }
@@ -135,7 +135,7 @@ func (a *Alerter) checkAndAlert() {
 	defer cancel()
 
 	// Fetch last hour's data
-	data, err := a.pb.FetchDashboardData(ctx, 1, "ProxmoxVE")
+	data, err := a.ch.FetchDashboardData(ctx, 1, "ProxmoxVE")
 	if err != nil {
 		log.Printf("WARN: alert check failed: %v", err)
 		return
@@ -395,7 +395,7 @@ func (a *Alerter) SendWeeklyReport() error {
 func (a *Alerter) fetchWeeklyReportData(ctx context.Context) (*WeeklyReportData, error) {
 	// Calculate the previous week's date range (Mon-Sun)
 	now := time.Now()
-	
+
 	// Find last Monday
 	daysToLastMonday := int(now.Weekday() - time.Monday)
 	if daysToLastMonday < 0 {
@@ -411,13 +411,13 @@ func (a *Alerter) fetchWeeklyReportData(ctx context.Context) (*WeeklyReportData,
 	year, week := lastMonday.ISOWeek()
 
 	// Fetch current week's data (7 days)
-	currentData, err := a.pb.FetchDashboardData(ctx, 7, "ProxmoxVE")
+	currentData, err := a.ch.FetchDashboardData(ctx, 7, "ProxmoxVE")
 	if err != nil {
 		return nil, fmt.Errorf("failed to fetch current week data: %w", err)
 	}
 
 	// Fetch previous week's data for comparison (14 days, we'll compare)
-	prevData, err := a.pb.FetchDashboardData(ctx, 14, "ProxmoxVE")
+	prevData, err := a.ch.FetchDashboardData(ctx, 14, "ProxmoxVE")
 	if err != nil {
 		// Non-fatal, just log
 		log.Printf("WARN: could not fetch previous week data: %v", err)

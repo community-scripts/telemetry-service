@@ -2,11 +2,8 @@ package main
 
 import (
 	"context"
-	"encoding/json"
 	"fmt"
 	"log"
-	"net/http"
-	"net/url"
 	"time"
 )
 
@@ -22,14 +19,14 @@ type CleanupConfig struct {
 // Cleaner handles cleanup of stuck installations
 type Cleaner struct {
 	cfg CleanupConfig
-	pb  *PBClient
+	ch  *CHClient
 }
 
 // NewCleaner creates a new cleaner instance
-func NewCleaner(cfg CleanupConfig, pb *PBClient) *Cleaner {
+func NewCleaner(cfg CleanupConfig, ch *CHClient) *Cleaner {
 	return &Cleaner{
 		cfg: cfg,
-		pb:  pb,
+		ch:  ch,
 	}
 }
 
@@ -42,7 +39,7 @@ func (c *Cleaner) Start() {
 
 	go c.cleanupLoop()
 	log.Printf("INFO: cleanup job started (interval: %v, stuck after: %d hours)", c.cfg.CheckInterval, c.cfg.StuckAfterHours)
-	
+
 	// Start retention job if enabled
 	if c.cfg.RetentionEnabled && c.cfg.RetentionDays > 0 {
 		go c.retentionLoop()
@@ -67,8 +64,7 @@ func (c *Cleaner) runCleanup() {
 	ctx, cancel := context.WithTimeout(context.Background(), 120*time.Second)
 	defer cancel()
 
-	// Find stuck records
-	stuckRecords, err := c.findStuckInstallations(ctx)
+	stuckRecords, err := c.ch.FindStuckInstallations(ctx, c.cfg.StuckAfterHours)
 	if err != nil {
 		log.Printf("WARN: cleanup - failed to find stuck installations: %v", err)
 		return
@@ -81,10 +77,9 @@ func (c *Cleaner) runCleanup() {
 
 	log.Printf("INFO: cleanup - found %d stuck installations (older than %dh)", len(stuckRecords), c.cfg.StuckAfterHours)
 
-	// Update each record
 	updated := 0
 	for _, record := range stuckRecords {
-		if err := c.markAsUnknown(ctx, record.ID); err != nil {
+		if err := c.ch.MarkRecordAsUnknown(ctx, record, c.cfg.StuckAfterHours); err != nil {
 			log.Printf("WARN: cleanup - failed to update record %s (%s): %v", record.ID, record.NSAPP, err)
 			continue
 		}
@@ -101,85 +96,19 @@ type StuckRecord struct {
 	Created string `json:"created"`
 }
 
-// findStuckInstallations finds records that are stuck in "installing" status
-// Paginates through all results to ensure no stuck records are missed
-func (c *Cleaner) findStuckInstallations(ctx context.Context) ([]StuckRecord, error) {
-	if err := c.pb.ensureAuth(ctx); err != nil {
-		return nil, err
-	}
-
-	// Calculate cutoff time
-	cutoff := time.Now().Add(-time.Duration(c.cfg.StuckAfterHours) * time.Hour)
-	cutoffStr := cutoff.Format("2006-01-02 15:04:05")
-
-	// Build filter: status='installing' AND created < cutoff
-	filter := url.QueryEscape(fmt.Sprintf("(status='installing' || status='configuring') && created<'%s'", cutoffStr))
-
-	var allRecords []StuckRecord
-	page := 1
-	perPage := 200
-
-	for {
-		req, err := http.NewRequestWithContext(ctx, http.MethodGet,
-			fmt.Sprintf("%s/api/collections/%s/records?filter=%s&perPage=%d&page=%d&sort=created",
-				c.pb.baseURL, c.pb.targetColl, filter, perPage, page),
-			nil,
-		)
-		if err != nil {
-			return allRecords, err
-		}
-		req.Header.Set("Authorization", "Bearer "+c.pb.token)
-
-		resp, err := c.pb.http.Do(req)
-		if err != nil {
-			return allRecords, err
-		}
-
-		var result struct {
-			Items      []StuckRecord `json:"items"`
-			TotalItems int           `json:"totalItems"`
-		}
-		if err := json.NewDecoder(resp.Body).Decode(&result); err != nil {
-			resp.Body.Close()
-			return allRecords, err
-		}
-		resp.Body.Close()
-
-		allRecords = append(allRecords, result.Items...)
-
-		// Stop when we've fetched all records
-		if len(allRecords) >= result.TotalItems || len(result.Items) == 0 {
-			break
-		}
-		page++
-	}
-
-	return allRecords, nil
-}
-
-// markAsUnknown updates a stuck record's status to "unknown" with timeout details
-func (c *Cleaner) markAsUnknown(ctx context.Context, recordID string) error {
-	update := TelemetryStatusUpdate{
-		Status:        "unknown",
-		Error:         fmt.Sprintf("Installation timed out - no completion status received after %dh", c.cfg.StuckAfterHours),
-		ErrorCategory: "timeout",
-	}
-	return c.pb.UpdateTelemetryStatus(ctx, recordID, update)
-}
-
 // RunNow triggers an immediate cleanup run (for testing/manual trigger)
 func (c *Cleaner) RunNow() (int, error) {
 	ctx, cancel := context.WithTimeout(context.Background(), 60*time.Second)
 	defer cancel()
 
-	stuckRecords, err := c.findStuckInstallations(ctx)
+	stuckRecords, err := c.ch.FindStuckInstallations(ctx, c.cfg.StuckAfterHours)
 	if err != nil {
 		return 0, fmt.Errorf("failed to find stuck installations: %w", err)
 	}
 
 	updated := 0
 	for _, record := range stuckRecords {
-		if err := c.markAsUnknown(ctx, record.ID); err != nil {
+		if err := c.ch.MarkRecordAsUnknown(ctx, record, c.cfg.StuckAfterHours); err != nil {
 			log.Printf("WARN: cleanup - failed to update record %s: %v", record.ID, err)
 			continue
 		}
@@ -191,11 +120,7 @@ func (c *Cleaner) RunNow() (int, error) {
 
 // GetStuckCount returns the current number of stuck installations
 func (c *Cleaner) GetStuckCount(ctx context.Context) (int, error) {
-	records, err := c.findStuckInstallations(ctx)
-	if err != nil {
-		return 0, err
-	}
-	return len(records), nil
+	return c.ch.GetStuckCount(ctx, c.cfg.StuckAfterHours)
 }
 
 // =============================================
@@ -228,108 +153,12 @@ func (c *Cleaner) runRetention() {
 
 	log.Printf("INFO: retention - starting cleanup of records older than %d days", c.cfg.RetentionDays)
 
-	deleted, err := c.deleteOldRecords(ctx)
-	if err != nil {
+	if err := c.ch.DeleteOldRecords(ctx, c.cfg.RetentionDays); err != nil {
 		log.Printf("WARN: retention - failed to delete old records: %v", err)
 		return
 	}
 
-	if deleted > 0 {
-		log.Printf("INFO: retention - deleted %d records older than %d days", deleted, c.cfg.RetentionDays)
-	} else {
-		log.Printf("INFO: retention - no records to delete")
-	}
-}
-
-// deleteOldRecords finds and deletes records older than RetentionDays
-func (c *Cleaner) deleteOldRecords(ctx context.Context) (int, error) {
-	if err := c.pb.ensureAuth(ctx); err != nil {
-		return 0, err
-	}
-
-	// Calculate cutoff date
-	cutoff := time.Now().AddDate(0, 0, -c.cfg.RetentionDays)
-	cutoffStr := cutoff.Format("2006-01-02 00:00:00")
-
-	deleted := 0
-	page := 1
-	maxDeletePerRun := 1000 // Limit to prevent timeout
-
-	for deleted < maxDeletePerRun {
-		// Find old records
-		filter := url.QueryEscape(fmt.Sprintf("created<'%s'", cutoffStr))
-		reqURL := fmt.Sprintf("%s/api/collections/%s/records?filter=%s&perPage=100&page=%d",
-			c.pb.baseURL, c.pb.targetColl, filter, page)
-
-		req, err := http.NewRequestWithContext(ctx, http.MethodGet, reqURL, nil)
-		if err != nil {
-			return deleted, err
-		}
-		req.Header.Set("Authorization", "Bearer "+c.pb.token)
-
-		resp, err := c.pb.http.Do(req)
-		if err != nil {
-			return deleted, err
-		}
-
-		var result struct {
-			Items []struct {
-				ID string `json:"id"`
-			} `json:"items"`
-			TotalItems int `json:"totalItems"`
-		}
-		if err := json.NewDecoder(resp.Body).Decode(&result); err != nil {
-			resp.Body.Close()
-			return deleted, err
-		}
-		resp.Body.Close()
-
-		if len(result.Items) == 0 {
-			break
-		}
-
-		// Delete each record
-		for _, item := range result.Items {
-			if err := c.deleteRecord(ctx, item.ID); err != nil {
-				log.Printf("WARN: retention - failed to delete record %s: %v", item.ID, err)
-				continue
-			}
-			deleted++
-
-			if deleted >= maxDeletePerRun {
-				log.Printf("INFO: retention - reached max delete limit (%d), will continue next run", maxDeletePerRun)
-				return deleted, nil
-			}
-		}
-
-		// Don't increment page since we deleted records
-	}
-
-	return deleted, nil
-}
-
-// deleteRecord permanently deletes a record from PocketBase
-func (c *Cleaner) deleteRecord(ctx context.Context, recordID string) error {
-	reqURL := fmt.Sprintf("%s/api/collections/%s/records/%s",
-		c.pb.baseURL, c.pb.targetColl, recordID)
-
-	req, err := http.NewRequestWithContext(ctx, http.MethodDelete, reqURL, nil)
-	if err != nil {
-		return err
-	}
-	req.Header.Set("Authorization", "Bearer "+c.pb.token)
-
-	resp, err := c.pb.http.Do(req)
-	if err != nil {
-		return err
-	}
-	defer resp.Body.Close()
-
-	if resp.StatusCode != http.StatusOK && resp.StatusCode != http.StatusNoContent {
-		return fmt.Errorf("delete failed with status %d", resp.StatusCode)
-	}
-
-	return nil
+	log.Printf("INFO: retention - DELETE mutation submitted for records older than %d days", c.cfg.RetentionDays)
 }
 
 // GetRetentionStats returns statistics about records eligible for deletion
@@ -338,42 +167,21 @@ func (c *Cleaner) GetRetentionStats(ctx context.Context) (eligible int, oldestDa
 		return 0, "", nil
 	}
 
-	if err := c.pb.ensureAuth(ctx); err != nil {
-		return 0, "", err
-	}
-
 	cutoff := time.Now().AddDate(0, 0, -c.cfg.RetentionDays)
-	cutoffStr := cutoff.Format("2006-01-02 00:00:00")
-	filter := url.QueryEscape(fmt.Sprintf("created<'%s'", cutoffStr))
-
-	reqURL := fmt.Sprintf("%s/api/collections/%s/records?filter=%s&perPage=1&sort=created",
-		c.pb.baseURL, c.pb.targetColl, filter)
-
-	req, err := http.NewRequestWithContext(ctx, http.MethodGet, reqURL, nil)
-	if err != nil {
-		return 0, "", err
-	}
-	req.Header.Set("Authorization", "Bearer "+c.pb.token)
-
-	resp, err := c.pb.http.Do(req)
-	if err != nil {
-		return 0, "", err
-	}
-	defer resp.Body.Close()
-
-	var result struct {
-		Items []struct {
-			Created string `json:"created"`
-		} `json:"items"`
-		TotalItems int `json:"totalItems"`
-	}
-	if err := json.NewDecoder(resp.Body).Decode(&result); err != nil {
+	var cnt uint64
+	if err := c.ch.db.QueryRowContext(ctx,
+		"SELECT count() FROM telemetry_db.telemetry WHERE created < ?", cutoff,
+	).Scan(&cnt); err != nil {
 		return 0, "", err
 	}
 
-	if len(result.Items) > 0 {
-		oldestDate = result.Items[0].Created[:10] // Just the date part
+	var oldest string
+	_ = c.ch.db.QueryRowContext(ctx,
+		"SELECT toString(min(created)) FROM telemetry_db.telemetry",
+	).Scan(&oldest)
+	if len(oldest) >= 10 {
+		oldest = oldest[:10]
 	}
 
-	return result.TotalItems, oldestDate, nil
+	return int(cnt), oldest, nil
 }
