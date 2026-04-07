@@ -12,7 +12,6 @@ import (
 	"log"
 	"net"
 	"net/http"
-	"net/url"
 	"os"
 	"regexp"
 	"strings"
@@ -29,13 +28,6 @@ type Config struct {
 
 	// ClickHouse (primary telemetry store)
 	CHDSN string // clickhouse://user:pass@host:9000/telemetry_db
-
-	// PocketBase (only for script metadata: script_scripts, categories, etc.)
-	PBBaseURL        string
-	PBAuthCollection string // PB auth collection name (from env)
-	PBIdentity       string // email
-	PBPassword       string
-	PBTargetColl     string // PB data collection name (from env)
 
 	// Limits
 	MaxBodyBytes     int64
@@ -76,7 +68,7 @@ type Config struct {
 type TelemetryIn struct {
 	// Required
 	RandomID    string `json:"random_id"`              // Session UUID
-	ExecutionID string `json:"execution_id,omitempty"` // Unique execution ID (unique-indexed in PocketBase)
+	ExecutionID string `json:"execution_id,omitempty"` // Unique execution ID
 	Type        string `json:"type"`                   // "lxc", "vm", "turnkey", "pve", "addon"
 	NSAPP       string `json:"nsapp"`                  // Application name (e.g., "jellyfin")
 	Status      string `json:"status"`                 // "installing", "success", "failed", "aborted", "unknown"
@@ -121,7 +113,7 @@ type TelemetryIn struct {
 	RepoSource string `json:"repo_source,omitempty"` // "ProxmoxVE", "ProxmoxVED", or "external"
 }
 
-// TelemetryOut is sent to PocketBase (matches telemetry collection)
+// TelemetryOut is the output shape for telemetry records
 type TelemetryOut struct {
 	RandomID    string `json:"random_id"`
 	ExecutionID string `json:"execution_id,omitempty"`
@@ -177,44 +169,11 @@ var allowedRepoSource = map[string]bool{
 	"external":   true,
 }
 
-type PBClient struct {
-	baseURL        string
-	authCollection string
-	identity       string
-	password       string
-	targetColl     string // single collection for all telemetry data
-
-	mu    sync.Mutex
-	token string
-	exp   time.Time
-	http  *http.Client
-}
-
-func NewPBClient(cfg Config) *PBClient {
-	transport := &http.Transport{
-		MaxIdleConns:        100,
-		MaxIdleConnsPerHost: 50,
-		IdleConnTimeout:     90 * time.Second,
-		DisableCompression:  true, // PB responses are small JSON, compression overhead not worth it
-	}
-	return &PBClient{
-		baseURL:        strings.TrimRight(cfg.PBBaseURL, "/"),
-		authCollection: cfg.PBAuthCollection,
-		identity:       cfg.PBIdentity,
-		password:       cfg.PBPassword,
-		targetColl:     cfg.PBTargetColl,
-		http: &http.Client{
-			Timeout:   cfg.RequestTimeout,
-			Transport: transport,
-		},
-	}
-}
-
 // ---------- Write-Ahead Queue ----------
-// Decouples HTTP accept from PocketBase write. The /telemetry handler enqueues
+// Decouples HTTP accept from ClickHouse write. The /telemetry handler enqueues
 // work and returns 202 immediately. A pool of workers drains the queue with retries.
 
-// WriteItem is a single telemetry payload queued for PocketBase write.
+// WriteItem is a single telemetry payload queued for ClickHouse write.
 type WriteItem struct {
 	Payload   TelemetryOut
 	Attempt   int
@@ -293,7 +252,7 @@ func (wq *WriteQueue) worker(id int) {
 }
 
 // processItem performs the ClickHouse INSERT.
-// Unlike PocketBase, there is no find+update â€” every event is a new row.
+// Every event is a new row in ClickHouse (append-only). There is no find+update â€” every event is a new row.
 // The stats MV only counts terminal statuses, so "installing" events don't inflate counts.
 func (wq *WriteQueue) processItem(ctx context.Context, item WriteItem) error {
 	payload := item.Payload
@@ -351,442 +310,7 @@ func (idx *ExecIndex) Delete(executionID string) {
 	idx.m.Delete(executionID)
 }
 
-func (p *PBClient) ensureAuth(ctx context.Context) error {
-	p.mu.Lock()
-	defer p.mu.Unlock()
-
-	// refresh if token missing or expiring soon
-	if p.token != "" && time.Until(p.exp) > 60*time.Second {
-		return nil
-	}
-
-	body := map[string]string{
-		"identity": p.identity,
-		"password": p.password,
-	}
-	b, _ := json.Marshal(body)
-	req, err := http.NewRequestWithContext(ctx, http.MethodPost,
-		fmt.Sprintf("%s/api/collections/%s/auth-with-password", p.baseURL, p.authCollection),
-		bytes.NewReader(b),
-	)
-	if err != nil {
-		return err
-	}
-	req.Header.Set("Content-Type", "application/json")
-
-	resp, err := p.http.Do(req)
-	if err != nil {
-		return err
-	}
-	defer resp.Body.Close()
-
-	if resp.StatusCode < 200 || resp.StatusCode >= 300 {
-		rb, _ := io.ReadAll(io.LimitReader(resp.Body, 4<<10))
-		return fmt.Errorf("pocketbase auth failed: %s: %s", resp.Status, strings.TrimSpace(string(rb)))
-	}
-
-	var out struct {
-		Token string `json:"token"`
-		// record omitted
-	}
-	if err := json.NewDecoder(resp.Body).Decode(&out); err != nil {
-		return err
-	}
-	if out.Token == "" {
-		return errors.New("pocketbase auth token missing")
-	}
-
-	// PocketBase JWT exp can be parsed, but keep it simple: set 50 min
-	p.token = out.Token
-	p.exp = time.Now().Add(50 * time.Minute)
-	return nil
-}
-
-// FindRecordByRandomID searches for an existing record by random_id
-func (p *PBClient) FindRecordByRandomID(ctx context.Context, randomID string) (string, error) {
-	if err := p.ensureAuth(ctx); err != nil {
-		return "", err
-	}
-
-	// URL encode the filter to ensure special characters are handled correctly
-	filter := fmt.Sprintf("random_id='%s'", randomID)
-	req, err := http.NewRequestWithContext(ctx, http.MethodGet,
-		fmt.Sprintf("%s/api/collections/%s/records?filter=%s&fields=id&perPage=1",
-			p.baseURL, p.targetColl, url.QueryEscape(filter)),
-		nil,
-	)
-	if err != nil {
-		return "", err
-	}
-	req.Header.Set("Authorization", "Bearer "+p.token)
-
-	resp, err := p.http.Do(req)
-	if err != nil {
-		return "", err
-	}
-	defer resp.Body.Close()
-
-	if resp.StatusCode < 200 || resp.StatusCode >= 300 {
-		return "", fmt.Errorf("pocketbase search failed: %s", resp.Status)
-	}
-
-	var result struct {
-		Items []struct {
-			ID string `json:"id"`
-		} `json:"items"`
-	}
-	if err := json.NewDecoder(resp.Body).Decode(&result); err != nil {
-		return "", err
-	}
-
-	if len(result.Items) == 0 {
-		return "", nil // Not found
-	}
-	return result.Items[0].ID, nil
-}
-
-// FindRecordByExecutionID searches for an existing record by execution_id (unique-indexed, O(1) lookup)
-func (p *PBClient) FindRecordByExecutionID(ctx context.Context, executionID string) (string, error) {
-	if err := p.ensureAuth(ctx); err != nil {
-		return "", err
-	}
-
-	filter := fmt.Sprintf("execution_id='%s'", executionID)
-	req, err := http.NewRequestWithContext(ctx, http.MethodGet,
-		fmt.Sprintf("%s/api/collections/%s/records?filter=%s&fields=id&perPage=1",
-			p.baseURL, p.targetColl, url.QueryEscape(filter)),
-		nil,
-	)
-	if err != nil {
-		return "", err
-	}
-	req.Header.Set("Authorization", "Bearer "+p.token)
-
-	resp, err := p.http.Do(req)
-	if err != nil {
-		return "", err
-	}
-	defer resp.Body.Close()
-
-	if resp.StatusCode < 200 || resp.StatusCode >= 300 {
-		return "", fmt.Errorf("pocketbase search by execution_id failed: %s", resp.Status)
-	}
-
-	var result struct {
-		Items []struct {
-			ID string `json:"id"`
-		} `json:"items"`
-	}
-	if err := json.NewDecoder(resp.Body).Decode(&result); err != nil {
-		return "", err
-	}
-
-	if len(result.Items) == 0 {
-		return "", nil // Not found
-	}
-	return result.Items[0].ID, nil
-}
-
-// UpdateTelemetryStatus updates only status, error, and exit_code of an existing record
-func (p *PBClient) UpdateTelemetryStatus(ctx context.Context, recordID string, update TelemetryStatusUpdate) error {
-	if err := p.ensureAuth(ctx); err != nil {
-		return err
-	}
-
-	b, _ := json.Marshal(update)
-	req, err := http.NewRequestWithContext(ctx, http.MethodPatch,
-		fmt.Sprintf("%s/api/collections/%s/records/%s", p.baseURL, p.targetColl, recordID),
-		bytes.NewReader(b),
-	)
-	if err != nil {
-		return err
-	}
-	req.Header.Set("Content-Type", "application/json")
-	req.Header.Set("Authorization", "Bearer "+p.token)
-
-	resp, err := p.http.Do(req)
-	if err != nil {
-		return err
-	}
-	defer resp.Body.Close()
-	if resp.StatusCode < 200 || resp.StatusCode >= 300 {
-		rb, _ := io.ReadAll(io.LimitReader(resp.Body, 8<<10))
-		return fmt.Errorf("pocketbase update failed: %s: %s", resp.Status, strings.TrimSpace(string(rb)))
-	}
-	return nil
-}
-
-// UpdateTelemetryFull updates an existing record with ALL fields from the payload.
-// Used for terminal states (success/failed/aborted) to fill in any missing spec fields
-// from records that were created as fallbacks from configuring/validation pings.
-// Fields with omitempty+zero values are omitted from JSON, preserving existing PB values.
-func (p *PBClient) UpdateTelemetryFull(ctx context.Context, recordID string, payload TelemetryOut) error {
-	if err := p.ensureAuth(ctx); err != nil {
-		return err
-	}
-
-	b, _ := json.Marshal(payload)
-	req, err := http.NewRequestWithContext(ctx, http.MethodPatch,
-		fmt.Sprintf("%s/api/collections/%s/records/%s", p.baseURL, p.targetColl, recordID),
-		bytes.NewReader(b),
-	)
-	if err != nil {
-		return err
-	}
-	req.Header.Set("Content-Type", "application/json")
-	req.Header.Set("Authorization", "Bearer "+p.token)
-
-	resp, err := p.http.Do(req)
-	if err != nil {
-		return err
-	}
-	defer resp.Body.Close()
-	if resp.StatusCode < 200 || resp.StatusCode >= 300 {
-		rb, _ := io.ReadAll(io.LimitReader(resp.Body, 8<<10))
-		rbStr := strings.TrimSpace(string(rb))
-
-		// If PB rejected error_category (schema out of sync), retry with "unknown"
-		if resp.StatusCode == 400 && strings.Contains(rbStr, "error_category") && payload.ErrorCategory != "unknown" {
-			log.Printf("[WARN] PB rejected error_category=%q for nsapp=%s, retrying with 'unknown'", payload.ErrorCategory, payload.NSAPP)
-			payload.ErrorCategory = "unknown"
-			return p.UpdateTelemetryFull(ctx, recordID, payload)
-		}
-
-		return fmt.Errorf("pocketbase full-update failed: %s: %s", resp.Status, rbStr)
-	}
-	return nil
-}
-
-// FetchRecordsPaginated retrieves records with pagination and optional filters.
-func (p *PBClient) FetchRecordsPaginated(ctx context.Context, page, limit int, status, app, osType, typeFilter, sortField, repoSource string, days int) ([]TelemetryRecord, int, error) {
-	if err := p.ensureAuth(ctx); err != nil {
-		return nil, 0, err
-	}
-
-	// Build filter
-	var filters []string
-	// Date filter
-	if days > 0 {
-		var since string
-		if days == 1 {
-			// "Today" = since midnight today (not yesterday)
-			since = time.Now().Format("2006-01-02") + " 00:00:00"
-		} else {
-			// N days = today + (N-1) previous days
-			since = time.Now().AddDate(0, 0, -(days-1)).Format("2006-01-02") + " 00:00:00"
-		}
-		filters = append(filters, fmt.Sprintf("created >= '%s'", since))
-	}
-	if status != "" {
-		if status == "aborted" {
-			// Include both native "aborted" and legacy "failed" records with SIGINT/SIGHUP indicators
-			filters = append(filters, "(status='aborted' || (status='failed' && (exit_code=129 || exit_code=130 || error~'SIGINT' || error~'SIGHUP' || error~'Ctrl+C' || error~'Ctrl-C')))")
-		} else if status == "failed" {
-			// Exclude SIGINT/SIGHUP records from "failed" (they are reclassified as "aborted")
-			// PocketBase negation uses !~ operator, not !(field~value)
-			filters = append(filters, "(status='failed' && exit_code!=129 && exit_code!=130 && error!~'SIGINT' && error!~'SIGHUP' && error!~'Ctrl+C' && error!~'Ctrl-C')")
-		} else {
-			filters = append(filters, fmt.Sprintf("status='%s'", status))
-		}
-	}
-	if app != "" {
-		filters = append(filters, fmt.Sprintf("nsapp~'%s'", app))
-	}
-	if osType != "" {
-		filters = append(filters, fmt.Sprintf("os_type='%s'", osType))
-	}
-	if typeFilter != "" {
-		filters = append(filters, fmt.Sprintf("type='%s'", typeFilter))
-	}
-	if repoSource != "" {
-		filters = append(filters, fmt.Sprintf("repo_source='%s'", repoSource))
-	}
-
-	filterStr := ""
-	if len(filters) > 0 {
-		filterStr = "&filter=" + url.QueryEscape(strings.Join(filters, " && "))
-	}
-
-	// Handle sort parameter (default: -created)
-	sort := "-created"
-	if sortField != "" {
-		// Validate sort field to prevent injection
-		allowedFields := map[string]bool{
-			"created": true, "-created": true,
-			"nsapp": true, "-nsapp": true,
-			"status": true, "-status": true,
-			"os_type": true, "-os_type": true,
-			"type": true, "-type": true,
-			"method": true, "-method": true,
-			"exit_code": true, "-exit_code": true,
-		}
-		if allowedFields[sortField] {
-			sort = sortField
-		}
-	}
-
-	reqURL := fmt.Sprintf("%s/api/collections/%s/records?sort=%s&page=%d&perPage=%d%s",
-		p.baseURL, p.targetColl, sort, page, limit, filterStr)
-
-	req, err := http.NewRequestWithContext(ctx, http.MethodGet, reqURL, nil)
-	if err != nil {
-		return nil, 0, err
-	}
-	req.Header.Set("Authorization", "Bearer "+p.token)
-
-	resp, err := p.http.Do(req)
-	if err != nil {
-		return nil, 0, err
-	}
-	defer resp.Body.Close()
-
-	if resp.StatusCode < 200 || resp.StatusCode >= 300 {
-		return nil, 0, fmt.Errorf("pocketbase fetch failed: %s", resp.Status)
-	}
-
-	var result struct {
-		Items      []TelemetryRecord `json:"items"`
-		TotalItems int               `json:"totalItems"`
-	}
-	if err := json.NewDecoder(resp.Body).Decode(&result); err != nil {
-		return nil, 0, err
-	}
-
-	return result.Items, result.TotalItems, nil
-}
-
-// UpsertTelemetry handles both creation and updates intelligently.
-// All records go to the same collection; repo_source is stored as a field.
-//
-// For status="installing": creates a new record (idempotent â€” deduplicates on execution_id).
-// For status!="installing": updates existing record.
-//   - Prefers execution_id lookup (unique-indexed, O(1)) when available.
-//   - Falls back to random_id lookup (filter query) for old clients.
-func (p *PBClient) UpsertTelemetry(ctx context.Context, payload TelemetryOut) error {
-	// For "installing" status, create new record (with dedup check)
-	if payload.Status == "installing" {
-		// Idempotent: if a record with this execution_id already exists
-		// (e.g., client retried after timeout), skip creating a duplicate.
-		if payload.ExecutionID != "" {
-			existingID, err := p.FindRecordByExecutionID(ctx, payload.ExecutionID)
-			if err == nil && existingID != "" {
-				// Record already exists â€” this is a client retry. Return success
-				// without creating a duplicate.
-				return nil
-			}
-			// If lookup failed or returned empty, proceed with creation.
-		}
-		return p.CreateTelemetry(ctx, payload)
-	}
-
-	// For status updates (success/failed/unknown), find and update existing record
-	// Prefer execution_id (unique-indexed) over random_id (filter query) for faster lookups
-	var recordID string
-	var err error
-
-	if payload.ExecutionID != "" {
-		recordID, err = p.FindRecordByExecutionID(ctx, payload.ExecutionID)
-		if err != nil {
-			// Execution ID lookup failed, fall back to random_id
-			recordID, err = p.FindRecordByRandomID(ctx, payload.RandomID)
-		}
-	} else {
-		// Old client without execution_id â€” use random_id lookup
-		recordID, err = p.FindRecordByRandomID(ctx, payload.RandomID)
-	}
-
-	if err != nil {
-		// Search failed, log and return error
-		return fmt.Errorf("cannot find record to update: %w", err)
-	}
-
-	if recordID == "" {
-		// Progress pings (validation/configuring) â€” the "installing" record hasn't
-		// arrived yet (race condition, client timeout, or dropped request).
-		// Create a minimal record so subsequent updates (success/failed) can find it.
-		// The final status update includes full specs and will fill in missing fields.
-		if payload.Status == "configuring" || payload.Status == "validation" {
-			log.Printf("[WARN] %s update for %s (exec=%s) â€” no record found, creating fallback",
-				payload.Status, payload.NSAPP, payload.ExecutionID)
-			return p.CreateTelemetry(ctx, payload)
-		}
-		// For final states (failed/success/aborted) â€” create as fallback.
-		// post_update_to_api sends full payload so the record will have all fields.
-		return p.CreateTelemetry(ctx, payload)
-	}
-
-	// Update record. For terminal states (success/failed/aborted), use the full
-	// payload so we fill in any missing fields from earlier fallback records.
-	// For progress pings, use partial update to avoid overwriting spec fields with zeros.
-	isTerminal := payload.Status == "success" || payload.Status == "failed" || payload.Status == "aborted"
-	if isTerminal {
-		// Full update: `post_update_to_api` sends all fields including specs.
-		// Fields with omitempty+zero values are omitted from JSON, preserving existing PB values.
-		return p.UpdateTelemetryFull(ctx, recordID, payload)
-	}
-
-	// Partial update for progress pings
-	update := TelemetryStatusUpdate{
-		Status:          payload.Status,
-		ExecutionID:     payload.ExecutionID,
-		Error:           payload.Error,
-		ExitCode:        payload.ExitCode,
-		InstallDuration: payload.InstallDuration,
-		ErrorCategory:   payload.ErrorCategory,
-		GPUVendor:       payload.GPUVendor,
-		GPUModel:        payload.GPUModel,
-		GPUPassthrough:  payload.GPUPassthrough,
-		CPUVendor:       payload.CPUVendor,
-		CPUModel:        payload.CPUModel,
-		RAMSpeed:        payload.RAMSpeed,
-		RepoSource:      payload.RepoSource,
-	}
-	return p.UpdateTelemetryStatus(ctx, recordID, update)
-}
-
-func (p *PBClient) CreateTelemetry(ctx context.Context, payload TelemetryOut) error {
-	_, err := p.CreateTelemetryReturningID(ctx, payload)
-	return err
-}
-
-// CreateTelemetryReturningID creates a new record and returns its PocketBase record ID.
-func (p *PBClient) CreateTelemetryReturningID(ctx context.Context, payload TelemetryOut) (string, error) {
-	if err := p.ensureAuth(ctx); err != nil {
-		return "", err
-	}
-
-	b, _ := json.Marshal(payload)
-	req, err := http.NewRequestWithContext(ctx, http.MethodPost,
-		fmt.Sprintf("%s/api/collections/%s/records", p.baseURL, p.targetColl),
-		bytes.NewReader(b),
-	)
-	if err != nil {
-		return "", err
-	}
-	req.Header.Set("Content-Type", "application/json")
-	req.Header.Set("Authorization", "Bearer "+p.token)
-
-	resp, err := p.http.Do(req)
-	if err != nil {
-		return "", err
-	}
-	defer resp.Body.Close()
-	if resp.StatusCode < 200 || resp.StatusCode >= 300 {
-		rb, _ := io.ReadAll(io.LimitReader(resp.Body, 8<<10))
-		return "", fmt.Errorf("pocketbase create failed: %s: %s", resp.Status, strings.TrimSpace(string(rb)))
-	}
-
-	var result struct {
-		ID string `json:"id"`
-	}
-	if err := json.NewDecoder(resp.Body).Decode(&result); err != nil {
-		return "", nil // Record created but ID parse failed â€” not fatal
-	}
-	return result.ID, nil
-}
-
 // -------- Rate limiter (token bucket / minute window, simple) --------
-
 type bucket struct {
 	tokens int
 	reset  time.Time
@@ -962,7 +486,7 @@ var (
 	// Allowed values for 'cpu_vendor' field
 	allowedCPUVendor = map[string]bool{"intel": true, "amd": true, "arm": true, "apple": true, "qualcomm": true, "unknown": true, "": true}
 
-	// Allowed values for 'error_category' field (must match PocketBase schema)
+	// Allowed values for 'error_category' field
 	allowedErrorCategory = map[string]bool{
 		"network": true, "storage": true, "dependency": true, "permission": true,
 		"timeout": true, "config": true, "resource": true, "unknown": true, "": true,
@@ -1445,13 +969,6 @@ func main() {
 		// ClickHouse (primary telemetry store)
 		CHDSN: env("CH_DSN", "clickhouse://default:@localhost:9000/telemetry_db"),
 
-		// PocketBase (script metadata only)
-		PBBaseURL:        env("PB_URL", ""),
-		PBAuthCollection: env("PB_AUTH_COLLECTION", "_superusers"),
-		PBIdentity:       env("PB_IDENTITY", ""),
-		PBPassword:       env("PB_PASSWORD", ""),
-		PBTargetColl:     env("PB_TARGET_COLLECTION", "telemetry"),
-
 		MaxBodyBytes:     envInt64("MAX_BODY_BYTES", 262144),
 		RateLimitRPM:     envInt("RATE_LIMIT_RPM", 300),
 		RateBurst:        envInt("RATE_BURST", 60),
@@ -1498,8 +1015,6 @@ func main() {
 		}
 		pt = p
 	}
-
-	pb := NewPBClient(cfg)
 
 	// ClickHouse: primary telemetry data store
 	ch, err := NewCHClient(cfg.CHDSN)
@@ -1550,7 +1065,7 @@ func main() {
 	mux := http.NewServeMux()
 
 	mux.HandleFunc("/healthz", func(w http.ResponseWriter, r *http.Request) {
-		// Check PocketBase connectivity
+		// Check ClickHouse connectivity
 		ctx, cancel := context.WithTimeout(r.Context(), 2*time.Second)
 		defer cancel()
 
@@ -1856,8 +1371,7 @@ func main() {
 						defer cache.FinishRefresh(cacheKey)
 						refreshCtx, cancel := context.WithTimeout(context.Background(), 120*time.Second)
 						defer cancel()
-						knownScripts, _ := pb.FetchKnownScripts(refreshCtx)
-						freshData, err := ch.FetchScriptStats(refreshCtx, days, repoSource, knownScripts)
+						freshData, err := ch.FetchScriptStats(refreshCtx, days, repoSource, nil)
 						if err != nil {
 							log.Printf("[CACHE] background refresh failed for %s: %v", cacheKey, err)
 							return
@@ -1870,8 +1384,7 @@ func main() {
 			return
 		}
 
-		knownScripts, _ := pb.FetchKnownScripts(ctx)
-		data, err := ch.FetchScriptStats(ctx, days, repoSource, knownScripts)
+		data, err := ch.FetchScriptStats(ctx, days, repoSource, nil)
 		if err != nil {
 			log.Printf("script stats fetch failed: %v", err)
 			http.Error(w, "failed to fetch script data", http.StatusInternalServerError)
@@ -2271,7 +1784,7 @@ func main() {
 			in.Error = fmt.Sprintf("Exit code %d: %s", in.ExitCode, getExitCodeDescription(in.ExitCode))
 		}
 
-		// Map input to PocketBase schema
+		// Map input to telemetry schema
 		out := TelemetryOut{
 			RandomID:        in.RandomID,
 			ExecutionID:     in.ExecutionID,
@@ -2321,20 +1834,17 @@ func main() {
 	}
 
 	// Background cache warmup job
-	// - On startup: load PB cached blobs â†’ fast warmup (day=1 + script stats) â†’ deferred heavy warmup (90d)
+	// - On startup: fast warmup (day=1 + script stats) then deferred heavy warmup (90d)
 	// - Every 30 min: refresh "today" data only (fast, changes frequently)
 	// - Nightly at 02:00 UTC: full warmup + heavy dashboard rebuild
 	if cfg.CacheEnabled {
 		go func() {
-			// Load persisted heavy dashboard blobs from PB (instant, survives restarts)
-			loadDashboardCache(pb, cache)
-
 			// Fast warmup: day=1 dashboard/errors + script stats from ClickHouse
 			time.Sleep(5 * time.Second)
-			warmupCaches(ch, pb, cache, cfg, false)
+			warmupCaches(ch, cache, cfg, false)
 
 			// Deferred heavy warmup: 90d dashboard + errors (runs in background)
-			go warmupHeavyDashboard(ch, pb, cache, cfg)
+			go warmupHeavyDashboard(ch, cache, cfg)
 
 			// Periodic "today" refresh every 30 min
 			todayTicker := time.NewTicker(30 * time.Minute)
@@ -2344,11 +1854,11 @@ func main() {
 			for {
 				select {
 				case <-todayTicker.C:
-					warmupCaches(ch, pb, cache, cfg, true)
+					warmupCaches(ch, cache, cfg, true)
 				case <-nightlyTimer.C:
 					log.Println("[CACHE] Nightly full warmup triggered")
-					warmupCaches(ch, pb, cache, cfg, false)
-					go warmupHeavyDashboard(ch, pb, cache, cfg)
+					warmupCaches(ch, cache, cfg, false)
+					go warmupHeavyDashboard(ch, cache, cfg)
 					nightlyTimer.Reset(24 * time.Hour)
 				}
 			}
@@ -2505,7 +2015,7 @@ func timeUntilNextUTC(hour, minute int) time.Duration {
 // warmupCaches pre-populates the cache for dashboard, scripts, AND errors endpoints.
 // If todayOnly=true, only warms days=1 (fast refresh for current-day data).
 // If todayOnly=false, warms all day ranges with long TTLs (nightly/startup).
-func warmupCaches(ch *CHClient, pb *PBClient, cache *Cache, cfg Config, todayOnly bool) {
+func warmupCaches(ch *CHClient, cache *Cache, cfg Config, todayOnly bool) {
 	label := "full"
 	if todayOnly {
 		label = "today-only"
@@ -2527,8 +2037,7 @@ func warmupCaches(ch *CHClient, pb *PBClient, cache *Cache, cfg Config, todayOnl
 			{7}, {30}, {0},
 		} {
 			ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
-			knownScripts, _ := pb.FetchKnownScripts(ctx)
-			data, err := ch.FetchScriptStats(ctx, spec.days, "ProxmoxVE", knownScripts)
+			data, err := ch.FetchScriptStats(ctx, spec.days, "ProxmoxVE", nil)
 			cancel()
 			if err != nil {
 				log.Printf("[CACHE] scripts:%d warmup failed: %v", spec.days, err)
@@ -2579,8 +2088,7 @@ func warmupCaches(ch *CHClient, pb *PBClient, cache *Cache, cfg Config, todayOnl
 				cacheKey := fmt.Sprintf("scripts:%d:%s", days, repo)
 				if cache.TryStartRefresh(cacheKey) {
 					ctx, cancel := context.WithTimeout(context.Background(), timeout)
-					knownScripts, _ := pb.FetchKnownScripts(ctx)
-					data, err := ch.FetchScriptStats(ctx, days, repo, knownScripts)
+					data, err := ch.FetchScriptStats(ctx, days, repo, nil)
 					cancel()
 					cache.FinishRefresh(cacheKey)
 					if err != nil {
@@ -2618,26 +2126,9 @@ func warmupCaches(ch *CHClient, pb *PBClient, cache *Cache, cfg Config, todayOnl
 	log.Printf("[CACHE] Warmup %s complete: %d warmed, %d failed (took %v)", label, warmed, failed, time.Since(start).Round(time.Second))
 }
 
-// loadDashboardCache loads persisted heavy dashboard blobs from PocketBase on startup.
-// This provides instant cache for 90d data that would otherwise take ~15 min to rebuild.
-func loadDashboardCache(pb *PBClient, cache *Cache) {
-	ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
-	defer cancel()
-
-	blobs := pb.LoadDashboardBlobs(ctx)
-	if len(blobs) == 0 {
-		return
-	}
-
-	for key, payload := range blobs {
-		_ = cache.Set(context.Background(), key, json.RawMessage(payload), 23*time.Hour)
-		log.Printf("[CACHE-BLOB] Restored %s from PB blob", key)
-	}
-}
-
 // warmupHeavyDashboard builds dashboard + error data for expensive day ranges (90d)
-// in the background with generous timeouts. Results are cached and persisted to PB.
-func warmupHeavyDashboard(ch *CHClient, pb *PBClient, cache *Cache, cfg Config) {
+// in the background with generous timeouts. Results are cached.
+func warmupHeavyDashboard(ch *CHClient, cache *Cache, cfg Config) {
 	heavyRanges := []int{90}
 	repos := []string{"ProxmoxVE"}
 
@@ -2666,11 +2157,6 @@ func warmupHeavyDashboard(ch *CHClient, pb *PBClient, cache *Cache, cfg Config) 
 				_ = cache.Set(context.Background(), cacheKey, data, cacheTTL)
 				warmed++
 				log.Printf("[CACHE] Heavy warmup dashboard:%d complete", days)
-
-				// Persist to PB for instant load on next restart
-				saveCtx, saveCancel := context.WithTimeout(context.Background(), 30*time.Second)
-				pb.SaveDashboardBlob(saveCtx, cacheKey, data)
-				saveCancel()
 			}()
 
 			time.Sleep(5 * time.Second)
@@ -2689,10 +2175,6 @@ func warmupHeavyDashboard(ch *CHClient, pb *PBClient, cache *Cache, cfg Config) 
 				_ = cache.Set(context.Background(), cacheKey, data, cacheTTL)
 				warmed++
 				log.Printf("[CACHE] Heavy warmup errors:%d complete", days)
-
-				saveCtx, saveCancel := context.WithTimeout(context.Background(), 30*time.Second)
-				pb.SaveDashboardBlob(saveCtx, cacheKey, data)
-				saveCancel()
 			}()
 
 			time.Sleep(5 * time.Second)
