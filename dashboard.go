@@ -4,6 +4,7 @@ import (
 	"strings"
 	"time"
 )
+
 // DashboardData holds aggregated statistics for the dashboard
 type DashboardData struct {
 	TotalInstalls   int               `json:"total_installs"`

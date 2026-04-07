@@ -126,9 +126,17 @@ async function fetchData() {
 }
 
 function updateStats(data) {
-  // Use total_all_time for display if available, otherwise total_installs
-  const displayTotal = data.total_all_time || data.total_installs;
-  document.getElementById('totalInstalls').textContent = displayTotal.toLocaleString();
+  // Show time-filtered total as main number, all-time as subtitle
+  document.getElementById('totalInstalls').textContent = (data.total_installs || 0).toLocaleString();
+  
+  // Show all-time total in subtitle if different from filtered total
+  const allTime = data.total_all_time || data.total_installs || 0;
+  const subtitle = document.getElementById('totalSubtitle');
+  if (subtitle) {
+    subtitle.textContent = allTime !== data.total_installs 
+      ? allTime.toLocaleString() + ' all time' 
+      : '';
+  }
 
   // Failed count (separate card)
   document.getElementById('failedCount').textContent = (data.failed_count || 0).toLocaleString();

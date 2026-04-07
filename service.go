@@ -1229,6 +1229,9 @@ func main() {
 		limit := 50
 		status := r.URL.Query().Get("status")
 		app := r.URL.Query().Get("app")
+		if s := r.URL.Query().Get("search"); s != "" && app == "" {
+			app = s
+		}
 		osType := r.URL.Query().Get("os")
 		typeFilter := r.URL.Query().Get("type")
 		sort := r.URL.Query().Get("sort")

@@ -32,7 +32,194 @@ func NewCHClient(dsn string) (*CHClient, error) {
 		return nil, fmt.Errorf("clickhouse ping: %w", err)
 	}
 	log.Println("[CH] Connected to ClickHouse")
-	return &CHClient{db: db}, nil
+	ch := &CHClient{db: db}
+	ch.migrate()
+	return ch, nil
+}
+
+// migrate creates the database, tables, and materialized views if they don't exist.
+func (ch *CHClient) migrate() {
+	ctx := context.Background()
+	stmts := []string{
+		`CREATE DATABASE IF NOT EXISTS telemetry_db`,
+
+		// ── Main telemetry table ──
+		`CREATE TABLE IF NOT EXISTS telemetry_db.telemetry (
+			id               String,
+			nsapp            String,
+			type             String,
+			status           String,
+			method           String,
+			created          DateTime64(3),
+			core_count       UInt8,
+			ct_type          UInt8,
+			disk_size        UInt32,
+			ram_size         UInt32,
+			exit_code        Int16,
+			error            String,
+			error_category   String,
+			os_type          String,
+			os_version       String,
+			pve_version      String,
+			random_id        String,
+			execution_id     String,
+			repo_source      String,
+			cpu_vendor       String,
+			cpu_model        String,
+			gpu_vendor       String,
+			gpu_model        String,
+			gpu_passthrough  String,
+			ram_speed        String,
+			install_duration UInt32
+		) ENGINE = MergeTree()
+		ORDER BY (created, nsapp)
+		PARTITION BY toYYYYMM(created)`,
+
+		// ── Materialized view: daily stats per app ──
+		// Pre-aggregates counts per (date, nsapp, type, status, repo_source).
+		// Queries GROUP BY date/app become instant.
+		`CREATE TABLE IF NOT EXISTS telemetry_db.mv_daily_stats (
+			day              Date,
+			nsapp            String,
+			type             String,
+			repo_source      String,
+			total            UInt64,
+			success          UInt64,
+			failed           UInt64,
+			aborted          UInt64,
+			installing       UInt64
+		) ENGINE = SummingMergeTree()
+		ORDER BY (day, nsapp, type, repo_source)
+		PARTITION BY toYYYYMM(day)`,
+
+		`CREATE MATERIALIZED VIEW IF NOT EXISTS telemetry_db.mv_daily_stats_view
+		TO telemetry_db.mv_daily_stats AS
+		SELECT
+			toDate(created) AS day,
+			nsapp,
+			type,
+			repo_source,
+			count()                        AS total,
+			countIf(status='success')      AS success,
+			countIf(status='failed')       AS failed,
+			countIf(status='aborted')      AS aborted,
+			countIf(status IN ('installing','validation','configuring')) AS installing
+		FROM telemetry_db.telemetry
+		GROUP BY day, nsapp, type, repo_source`,
+
+		// ── Materialized view: daily OS distribution ──
+		`CREATE TABLE IF NOT EXISTS telemetry_db.mv_daily_os (
+			day         Date,
+			repo_source String,
+			os_type     String,
+			cnt         UInt64
+		) ENGINE = SummingMergeTree()
+		ORDER BY (day, repo_source, os_type)
+		PARTITION BY toYYYYMM(day)`,
+
+		`CREATE MATERIALIZED VIEW IF NOT EXISTS telemetry_db.mv_daily_os_view
+		TO telemetry_db.mv_daily_os AS
+		SELECT
+			toDate(created) AS day,
+			repo_source,
+			os_type,
+			count() AS cnt
+		FROM telemetry_db.telemetry
+		WHERE os_type != '' AND status IN ('success','failed','aborted','unknown')
+		GROUP BY day, repo_source, os_type`,
+
+		// ── Materialized view: daily method distribution ──
+		`CREATE TABLE IF NOT EXISTS telemetry_db.mv_daily_method (
+			day         Date,
+			repo_source String,
+			method      String,
+			cnt         UInt64
+		) ENGINE = SummingMergeTree()
+		ORDER BY (day, repo_source, method)
+		PARTITION BY toYYYYMM(day)`,
+
+		`CREATE MATERIALIZED VIEW IF NOT EXISTS telemetry_db.mv_daily_method_view
+		TO telemetry_db.mv_daily_method AS
+		SELECT
+			toDate(created) AS day,
+			repo_source,
+			method,
+			count() AS cnt
+		FROM telemetry_db.telemetry
+		WHERE method != '' AND status IN ('success','failed','aborted','unknown')
+		GROUP BY day, repo_source, method`,
+
+		// ── Materialized view: daily PVE version distribution ──
+		`CREATE TABLE IF NOT EXISTS telemetry_db.mv_daily_pve (
+			day         Date,
+			repo_source String,
+			pve_version String,
+			cnt         UInt64
+		) ENGINE = SummingMergeTree()
+		ORDER BY (day, repo_source, pve_version)
+		PARTITION BY toYYYYMM(day)`,
+
+		`CREATE MATERIALIZED VIEW IF NOT EXISTS telemetry_db.mv_daily_pve_view
+		TO telemetry_db.mv_daily_pve AS
+		SELECT
+			toDate(created) AS day,
+			repo_source,
+			pve_version,
+			count() AS cnt
+		FROM telemetry_db.telemetry
+		WHERE pve_version != '' AND status IN ('success','failed','aborted','unknown')
+		GROUP BY day, repo_source, pve_version`,
+	}
+
+	for _, s := range stmts {
+		if _, err := ch.db.ExecContext(ctx, s); err != nil {
+			log.Printf("[CH-MIGRATE] %v", err)
+		}
+	}
+
+	// Backfill materialized views from existing data if they're empty
+	var mvCount uint64
+	_ = ch.db.QueryRowContext(ctx, "SELECT count() FROM telemetry_db.mv_daily_stats").Scan(&mvCount)
+	if mvCount == 0 {
+		var srcCount uint64
+		_ = ch.db.QueryRowContext(ctx, "SELECT count() FROM telemetry_db.telemetry").Scan(&srcCount)
+		if srcCount > 0 {
+			log.Printf("[CH-MIGRATE] Backfilling materialized views from %d existing rows...", srcCount)
+			backfills := []string{
+				`INSERT INTO telemetry_db.mv_daily_stats
+				SELECT toDate(created), nsapp, type, repo_source,
+					count(), countIf(status='success'), countIf(status='failed'),
+					countIf(status='aborted'),
+					countIf(status IN ('installing','validation','configuring'))
+				FROM telemetry_db.telemetry GROUP BY toDate(created), nsapp, type, repo_source`,
+
+				`INSERT INTO telemetry_db.mv_daily_os
+				SELECT toDate(created), repo_source, os_type, count()
+				FROM telemetry_db.telemetry
+				WHERE os_type != '' AND status IN ('success','failed','aborted','unknown')
+				GROUP BY toDate(created), repo_source, os_type`,
+
+				`INSERT INTO telemetry_db.mv_daily_method
+				SELECT toDate(created), repo_source, method, count()
+				FROM telemetry_db.telemetry
+				WHERE method != '' AND status IN ('success','failed','aborted','unknown')
+				GROUP BY toDate(created), repo_source, method`,
+
+				`INSERT INTO telemetry_db.mv_daily_pve
+				SELECT toDate(created), repo_source, pve_version, count()
+				FROM telemetry_db.telemetry
+				WHERE pve_version != '' AND status IN ('success','failed','aborted','unknown')
+				GROUP BY toDate(created), repo_source, pve_version`,
+			}
+			for _, q := range backfills {
+				if _, err := ch.db.ExecContext(ctx, q); err != nil {
+					log.Printf("[CH-MIGRATE] backfill error: %v", err)
+				}
+			}
+			log.Println("[CH-MIGRATE] Backfill complete")
+		}
+	}
+	log.Println("[CH-MIGRATE] Schema ready")
 }
 
 func (ch *CHClient) Close() error                   { return ch.db.Close() }
@@ -120,6 +307,29 @@ func chWhere(days int, repoSource string, extras ...string) (string, []interface
 	return strings.Join(parts, " AND "), args
 }
 
+// chSinceDate returns the date for filtering materialized views (Date column, not DateTime64).
+func chSinceDate(days int) string {
+	if days == 1 {
+		return time.Now().UTC().Truncate(24 * time.Hour).Format("2006-01-02")
+	}
+	return time.Now().UTC().AddDate(0, 0, -(days - 1)).Truncate(24 * time.Hour).Format("2006-01-02")
+}
+
+// chMVWhere builds a WHERE clause for materialized view tables (uses "day" Date column).
+func chMVWhere(days int, repoSource string) (string, []interface{}) {
+	parts := []string{"1=1"}
+	var args []interface{}
+	if days > 0 {
+		parts = append(parts, "day >= ?")
+		args = append(args, chSinceDate(days))
+	}
+	if repoSource != "" {
+		parts = append(parts, "repo_source = ?")
+		args = append(args, repoSource)
+	}
+	return strings.Join(parts, " AND "), args
+}
+
 // scanRecords reads TelemetryRecord rows from a *sql.Rows.
 func scanRecords(rows *sql.Rows) []TelemetryRecord {
 	var out []TelemetryRecord
@@ -171,18 +381,15 @@ const recordSelectCols = `nsapp, type, status, method,
 
 func (ch *CHClient) FetchDashboardData(ctx context.Context, days int, repoSource string) (*DashboardData, error) {
 	data := &DashboardData{}
+	mw, ma := chMVWhere(days, repoSource)
 	tw, ta := chWhere(days, repoSource, "status IN ('success','failed','aborted','unknown')")
 
-	// ── 1. Main counts ──
+	// ── 1. Main counts (from materialized view) ──
 	var total, sc, fc, ac uint64
-	var avgDur float64
 	err := ch.db.QueryRowContext(ctx, fmt.Sprintf(`
-		SELECT count(), countIf(status='success'), countIf(status='failed'),
-			countIf(status='aborted'),
-			if(countIf(install_duration>0)>0,
-				toFloat64(sumIf(install_duration, install_duration>0))/countIf(install_duration>0), 0)
-		FROM telemetry_db.telemetry WHERE %s`, tw), ta...,
-	).Scan(&total, &sc, &fc, &ac, &avgDur)
+		SELECT sum(total), sum(success), sum(failed), sum(aborted)
+		FROM telemetry_db.mv_daily_stats WHERE %s`, mw), ma...,
+	).Scan(&total, &sc, &fc, &ac)
 	if err != nil {
 		return nil, fmt.Errorf("CH dashboard counts: %w", err)
 	}
@@ -190,20 +397,28 @@ func (ch *CHClient) FetchDashboardData(ctx context.Context, days int, repoSource
 	data.SuccessCount = int(sc)
 	data.FailedCount = int(fc)
 	data.AbortedCount = int(ac)
-	data.AvgInstallDuration = avgDur
 	if sc+fc > 0 {
 		data.SuccessRate = float64(sc) / float64(sc+fc) * 100
 	}
 
-	// Total all-time (for UI display)
+	// Avg install duration (needs raw table — only non-zero durations)
+	var avgDur float64
+	_ = ch.db.QueryRowContext(ctx, fmt.Sprintf(`
+		SELECT if(countIf(install_duration>0)>0,
+			toFloat64(sumIf(install_duration, install_duration>0))/countIf(install_duration>0), 0)
+		FROM telemetry_db.telemetry WHERE %s`, tw), ta...,
+	).Scan(&avgDur)
+	data.AvgInstallDuration = avgDur
+
+	// Total all-time (from MV, no filter)
 	var tat uint64
 	_ = ch.db.QueryRowContext(ctx,
-		"SELECT count() FROM telemetry_db.telemetry WHERE status IN ('success','failed','aborted','unknown')",
+		"SELECT sum(total) FROM telemetry_db.mv_daily_stats",
 	).Scan(&tat)
 	data.TotalAllTime = int(tat)
 	data.SampleSize = data.TotalInstalls
 
-	// ── 2. Installing count (active, no terminal follow-up within last 24h) ──
+	// ── 2. Installing count (needs raw table — execution_id subquery) ──
 	var ic uint64
 	_ = ch.db.QueryRowContext(ctx, `
 		SELECT count() FROM telemetry_db.telemetry
@@ -215,12 +430,23 @@ func (ch *CHClient) FetchDashboardData(ctx context.Context, days int, repoSource
 	`).Scan(&ic)
 	data.InstallingCount = int(ic)
 
-	// ── 3. Top apps ──
-	data.TopApps = chQueryAppCounts(ctx, ch, 20, tw, ta)
-
-	// ── 4. OS distribution ──
+	// ── 3. Top apps (from MV) ──
 	if rows, err := ch.db.QueryContext(ctx, fmt.Sprintf(
-		"SELECT os_type, count() c FROM telemetry_db.telemetry WHERE %s AND os_type!='' GROUP BY os_type ORDER BY c DESC LIMIT 15", tw), ta...); err == nil {
+		"SELECT nsapp, sum(total) c FROM telemetry_db.mv_daily_stats WHERE %s AND nsapp!='' GROUP BY nsapp ORDER BY c DESC LIMIT 20", mw), ma...); err == nil {
+		defer rows.Close()
+		for rows.Next() {
+			var a AppCount
+			var c uint64
+			if rows.Scan(&a.App, &c) == nil {
+				a.Count = int(c)
+				data.TopApps = append(data.TopApps, a)
+			}
+		}
+	}
+
+	// ── 4. OS distribution (from MV) ──
+	if rows, err := ch.db.QueryContext(ctx, fmt.Sprintf(
+		"SELECT os_type, sum(cnt) c FROM telemetry_db.mv_daily_os WHERE %s AND os_type!='' GROUP BY os_type ORDER BY c DESC LIMIT 15", mw), ma...); err == nil {
 		defer rows.Close()
 		for rows.Next() {
 			var o OsCount
@@ -232,9 +458,9 @@ func (ch *CHClient) FetchDashboardData(ctx context.Context, days int, repoSource
 		}
 	}
 
-	// ── 5. Method stats ──
+	// ── 5. Method stats (from MV) ──
 	if rows, err := ch.db.QueryContext(ctx, fmt.Sprintf(
-		"SELECT method, count() c FROM telemetry_db.telemetry WHERE %s AND method!='' GROUP BY method ORDER BY c DESC LIMIT 10", tw), ta...); err == nil {
+		"SELECT method, sum(cnt) c FROM telemetry_db.mv_daily_method WHERE %s AND method!='' GROUP BY method ORDER BY c DESC LIMIT 10", mw), ma...); err == nil {
 		defer rows.Close()
 		for rows.Next() {
 			var m MethodCount
@@ -246,9 +472,9 @@ func (ch *CHClient) FetchDashboardData(ctx context.Context, days int, repoSource
 		}
 	}
 
-	// ── 6. PVE versions ──
+	// ── 6. PVE versions (from MV) ──
 	if rows, err := ch.db.QueryContext(ctx, fmt.Sprintf(
-		"SELECT pve_version, count() c FROM telemetry_db.telemetry WHERE %s AND pve_version!='' GROUP BY pve_version ORDER BY c DESC LIMIT 15", tw), ta...); err == nil {
+		"SELECT pve_version, sum(cnt) c FROM telemetry_db.mv_daily_pve WHERE %s AND pve_version!='' GROUP BY pve_version ORDER BY c DESC LIMIT 15", mw), ma...); err == nil {
 		defer rows.Close()
 		for rows.Next() {
 			var p PveCount
@@ -260,9 +486,9 @@ func (ch *CHClient) FetchDashboardData(ctx context.Context, days int, repoSource
 		}
 	}
 
-	// ── 7. Type stats ──
+	// ── 7. Type stats (from MV) ──
 	if rows, err := ch.db.QueryContext(ctx, fmt.Sprintf(
-		"SELECT type, count() c FROM telemetry_db.telemetry WHERE %s AND type!='' GROUP BY type ORDER BY c DESC LIMIT 10", tw), ta...); err == nil {
+		"SELECT type, sum(total) c FROM telemetry_db.mv_daily_stats WHERE %s AND type!='' GROUP BY type ORDER BY c DESC LIMIT 10", mw), ma...); err == nil {
 		defer rows.Close()
 		for rows.Next() {
 			var t TypeCount
@@ -274,7 +500,7 @@ func (ch *CHClient) FetchDashboardData(ctx context.Context, days int, repoSource
 		}
 	}
 
-	// ── 8. Error analysis (top patterns) ──
+	// ── 8. Error analysis (needs raw table — text pattern matching) ──
 	fwErr, faErr := chWhere(days, repoSource, "status='failed'", "error!=''")
 	if rows, err := ch.db.QueryContext(ctx, fmt.Sprintf(`
 		SELECT
@@ -309,7 +535,7 @@ func (ch *CHClient) FetchDashboardData(ctx context.Context, days int, repoSource
 		}
 	}
 
-	// ── 9. Failed apps with failure rates ──
+	// ── 9. Failed apps with failure rates (from MV) ──
 	minInstalls := 10
 	switch {
 	case days <= 1:
@@ -322,12 +548,12 @@ func (ch *CHClient) FetchDashboardData(ctx context.Context, days int, repoSource
 		minInstalls = 100
 	}
 	if rows, err := ch.db.QueryContext(ctx, fmt.Sprintf(`
-		SELECT nsapp, type, count() t, countIf(status='failed') f
-		FROM telemetry_db.telemetry
+		SELECT nsapp, anyLast(type), sum(total) t, sum(failed) f
+		FROM telemetry_db.mv_daily_stats
 		WHERE %s AND nsapp!=''
-		GROUP BY nsapp, type
+		GROUP BY nsapp
 		HAVING f > 0 AND t >= %d
-		ORDER BY toFloat64(f)/t DESC LIMIT 50`, tw, minInstalls), ta...); err == nil {
+		ORDER BY toFloat64(f)/t DESC LIMIT 50`, mw, minInstalls), ma...); err == nil {
 		defer rows.Close()
 		appTotal := make(map[string]int)
 		appFailed := make(map[string]int)
@@ -343,12 +569,11 @@ func (ch *CHClient) FetchDashboardData(ctx context.Context, days int, repoSource
 		data.FailedApps = buildFailedApps(appTotal, appFailed, 16, minInstalls)
 	}
 
-	// ── 10. Daily stats ──
+	// ── 10. Daily stats (from MV) ──
 	if rows, err := ch.db.QueryContext(ctx, fmt.Sprintf(`
-		SELECT toString(toDate(created)) d,
-			countIf(status='success') s, countIf(status='failed') f
-		FROM telemetry_db.telemetry WHERE %s
-		GROUP BY d ORDER BY d`, tw), ta...); err == nil {
+		SELECT toString(day) d, sum(success) s, sum(failed) f
+		FROM telemetry_db.mv_daily_stats WHERE %s
+		GROUP BY day ORDER BY day`, mw), ma...); err == nil {
 		defer rows.Close()
 		sMap := make(map[string]int)
 		fMap := make(map[string]int)
@@ -367,7 +592,7 @@ func (ch *CHClient) FetchDashboardData(ctx context.Context, days int, repoSource
 		data.DailyStats = buildDailyStats(sMap, fMap, actualDays)
 	}
 
-	// ── 11. GPU stats ──
+	// ── 11. GPU stats (raw table — not materialized, low volume) ──
 	gpuW, gpuA := chWhere(days, repoSource, "status IN ('success','failed','aborted','unknown')", "gpu_vendor!=''", "gpu_vendor!='unknown'")
 	if rows, err := ch.db.QueryContext(ctx, fmt.Sprintf(
 		"SELECT gpu_vendor, gpu_passthrough, count() c FROM telemetry_db.telemetry WHERE %s GROUP BY gpu_vendor, gpu_passthrough ORDER BY c DESC", gpuW), gpuA...); err == nil {
@@ -382,7 +607,7 @@ func (ch *CHClient) FetchDashboardData(ctx context.Context, days int, repoSource
 		}
 	}
 
-	// ── 12. Error categories ──
+	// ── 12. Error categories (raw table — needs error_category field) ──
 	catW, catA := chWhere(days, repoSource, "status='failed'", "error_category!=''")
 	if rows, err := ch.db.QueryContext(ctx, fmt.Sprintf(
 		"SELECT error_category, count() c FROM telemetry_db.telemetry WHERE %s GROUP BY error_category ORDER BY c DESC", catW), catA...); err == nil {
@@ -397,10 +622,9 @@ func (ch *CHClient) FetchDashboardData(ctx context.Context, days int, repoSource
 		}
 	}
 
-	// ── 13. Top tools (type=pve) ──
-	toolW, toolA := chWhere(days, repoSource, "status IN ('success','failed','aborted','unknown')", "type='pve'", "nsapp!=''")
+	// ── 13. Top tools (from MV, type=pve) ──
 	if rows, err := ch.db.QueryContext(ctx, fmt.Sprintf(
-		"SELECT nsapp, count() c FROM telemetry_db.telemetry WHERE %s GROUP BY nsapp ORDER BY c DESC LIMIT 15", toolW), toolA...); err == nil {
+		"SELECT nsapp, sum(total) c FROM telemetry_db.mv_daily_stats WHERE %s AND type='pve' AND nsapp!='' GROUP BY nsapp ORDER BY c DESC LIMIT 15", mw), ma...); err == nil {
 		defer rows.Close()
 		for rows.Next() {
 			var t ToolCount
@@ -413,10 +637,9 @@ func (ch *CHClient) FetchDashboardData(ctx context.Context, days int, repoSource
 		}
 	}
 
-	// ── 14. Top addons ──
-	addonW, addonA := chWhere(days, repoSource, "status IN ('success','failed','aborted','unknown')", "type='addon'")
+	// ── 14. Top addons (from MV, type=addon) ──
 	if rows, err := ch.db.QueryContext(ctx, fmt.Sprintf(
-		"SELECT nsapp, count() c FROM telemetry_db.telemetry WHERE %s GROUP BY nsapp ORDER BY c DESC LIMIT 15", addonW), addonA...); err == nil {
+		"SELECT nsapp, sum(total) c FROM telemetry_db.mv_daily_stats WHERE %s AND type='addon' AND nsapp!='' GROUP BY nsapp ORDER BY c DESC LIMIT 15", mw), ma...); err == nil {
 		defer rows.Close()
 		for rows.Next() {
 			var a AddonCount
@@ -429,7 +652,7 @@ func (ch *CHClient) FetchDashboardData(ctx context.Context, days int, repoSource
 		}
 	}
 
-	// ── 15. Recent records ──
+	// ── 15. Recent records (raw table — needs full row data) ──
 	recentW, recentA := chWhere(days, repoSource)
 	if rows, err := ch.db.QueryContext(ctx, fmt.Sprintf(
 		"SELECT %s FROM telemetry_db.telemetry WHERE %s ORDER BY created DESC LIMIT 20",
@@ -441,41 +664,21 @@ func (ch *CHClient) FetchDashboardData(ctx context.Context, days int, repoSource
 	return data, nil
 }
 
-func chQueryAppCounts(ctx context.Context, ch *CHClient, limit int, where string, args []interface{}) []AppCount {
-	rows, err := ch.db.QueryContext(ctx, fmt.Sprintf(
-		"SELECT nsapp, count() c FROM telemetry_db.telemetry WHERE %s AND nsapp!='' GROUP BY nsapp ORDER BY c DESC LIMIT %d",
-		where, limit), args...)
-	if err != nil {
-		return nil
-	}
-	defer rows.Close()
-	var out []AppCount
-	for rows.Next() {
-		var a AppCount
-		var c uint64
-		if rows.Scan(&a.App, &c) == nil {
-			a.Count = int(c)
-			out = append(out, a)
-		}
-	}
-	return out
-}
-
 // ══════════════════════════════════════════════════════════════
 //  SCRIPT STATS (serves /api/scripts + frontend /api/stats)
 // ══════════════════════════════════════════════════════════════
 
 func (ch *CHClient) FetchScriptStats(ctx context.Context, days int, repoSource string, knownScripts map[string]ScriptInfo) (*ScriptAnalysisData, error) {
-	w, a := chWhere(days, repoSource, "status IN ('success','failed','aborted','unknown')")
+	mw, ma := chMVWhere(days, repoSource)
 
 	rows, err := ch.db.QueryContext(ctx, fmt.Sprintf(`
 		SELECT nsapp, anyLast(type) as typ,
-			count() as total,
-			countIf(status='success') as sc,
-			countIf(status='failed') as fc,
-			countIf(status='aborted') as ac
-		FROM telemetry_db.telemetry WHERE %s
-		GROUP BY nsapp ORDER BY total DESC`, w), a...)
+			sum(total) as total,
+			sum(success) as sc,
+			sum(failed) as fc,
+			sum(aborted) as ac
+		FROM telemetry_db.mv_daily_stats WHERE %s
+		GROUP BY nsapp ORDER BY total DESC`, mw), ma...)
 	if err != nil {
 		return nil, fmt.Errorf("CH script stats: %w", err)
 	}
@@ -492,7 +695,7 @@ func (ch *CHClient) FetchScriptStats(ctx context.Context, days int, repoSource s
 			continue
 		}
 		// Filter to known scripts if provided
-		if knownScripts != nil && len(knownScripts) > 0 {
+		if len(knownScripts) > 0 {
 			if _, ok := knownScripts[nsapp]; !ok {
 				continue
 			}
@@ -561,18 +764,15 @@ func (ch *CHClient) FetchScriptStats(ctx context.Context, days int, repoSource s
 func (ch *CHClient) FetchErrorAnalysisData(ctx context.Context, days int, repoSource string) (*ErrorAnalysisData, error) {
 	data := &ErrorAnalysisData{}
 
-	tw, ta := chWhere(days, repoSource, "status IN ('success','failed','aborted','unknown')")
+	mw, ma := chMVWhere(days, repoSource)
 
-	// Total installs
-	var ti uint64
-	_ = ch.db.QueryRowContext(ctx, fmt.Sprintf("SELECT count() FROM telemetry_db.telemetry WHERE %s", tw), ta...).Scan(&ti)
+	// Total installs (from MV)
+	var ti, tf, tab uint64
+	_ = ch.db.QueryRowContext(ctx, fmt.Sprintf(
+		"SELECT sum(total), sum(failed), sum(aborted) FROM telemetry_db.mv_daily_stats WHERE %s", mw), ma...,
+	).Scan(&ti, &tf, &tab)
 	data.TotalInstalls = int(ti)
-
-	// Total errors (failed + aborted)
-	ew, ea := chWhere(days, repoSource, "status IN ('failed','aborted')")
-	var te uint64
-	_ = ch.db.QueryRowContext(ctx, fmt.Sprintf("SELECT count() FROM telemetry_db.telemetry WHERE %s", ew), ea...).Scan(&te)
-	data.TotalErrors = int(te)
+	data.TotalErrors = int(tf + tab)
 
 	if data.TotalInstalls > 0 {
 		data.OverallFailRate = float64(data.TotalErrors) / float64(data.TotalInstalls) * 100
