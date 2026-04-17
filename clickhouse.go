@@ -20,6 +20,7 @@ type CHClient struct {
 
 // NewCHClient connects to ClickHouse using a DSN like
 // "clickhouse://user:pass@host:9000/telemetry_db".
+// Retries with exponential backoff for up to ~60s to handle container startup ordering.
 func NewCHClient(dsn string) (*CHClient, error) {
 	db, err := sql.Open("clickhouse", dsn)
 	if err != nil {
@@ -28,9 +29,22 @@ func NewCHClient(dsn string) (*CHClient, error) {
 	db.SetMaxOpenConns(20)
 	db.SetMaxIdleConns(10)
 	db.SetConnMaxLifetime(time.Hour)
-	if err := db.PingContext(context.Background()); err != nil {
-		return nil, fmt.Errorf("clickhouse ping: %w", err)
+
+	// Retry ping with exponential backoff (containers may start before ClickHouse is ready)
+	backoff := []time.Duration{1, 2, 4, 8, 16, 30}
+	var pingErr error
+	for i, wait := range backoff {
+		if pingErr = db.PingContext(context.Background()); pingErr == nil {
+			break
+		}
+		log.Printf("[CH] ping attempt %d/%d failed: %v (retry in %ds)", i+1, len(backoff), pingErr, wait)
+		time.Sleep(wait * time.Second)
 	}
+	if pingErr != nil {
+		db.Close()
+		return nil, fmt.Errorf("clickhouse ping (after %d retries): %w", len(backoff), pingErr)
+	}
+
 	log.Println("[CH] Connected to ClickHouse")
 	ch := &CHClient{db: db}
 	ch.migrate()
