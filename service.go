@@ -14,6 +14,7 @@ import (
 	"net/http"
 	"os"
 	"regexp"
+	"strconv"
 	"strings"
 	"sync"
 	"time"
@@ -773,14 +774,25 @@ func sanitizeRawJSON(raw []byte) []byte {
 	raw = hexEscapeRe.ReplaceAll(raw, []byte(`\u00$1`))
 
 	// 3. Replace literal control characters inside strings with safe alternatives
-	// (tab=0x09, vertical tab=0x0B, form feed=0x0C, etc. â€” only valid if escaped in JSON)
+	// AND fix invalid escape sequences (e.g. \_ \G \P -> \\_ \\G \\P)
+	// Valid JSON escapes: \" \\ \/ \b \f \n \r \t \uXXXX
 	inString := false
 	escaped := false
 	cleaned := make([]byte, 0, len(raw))
 	for _, b := range raw {
 		if escaped {
 			escaped = false
-			cleaned = append(cleaned, b)
+			// Check if this is a valid JSON escape character
+			switch b {
+			case '"', '\\', '/', 'b', 'f', 'n', 'r', 't':
+				cleaned = append(cleaned, b)
+			case 'u':
+				// \uXXXX: pass through (hex digits validated by JSON decoder)
+				cleaned = append(cleaned, b)
+			default:
+				// Invalid escape like \_ or \G: double the backslash so \G -> \\G
+				cleaned = append(cleaned, '\\', b)
+			}
 			continue
 		}
 		if b == '\\' && inString {
@@ -810,6 +822,113 @@ func sanitizeRawJSON(raw []byte) []byte {
 		cleaned = append(cleaned, b)
 	}
 	return cleaned
+}
+
+// rescueBrokenJSON is the last-resort handler for telemetry payloads where the error
+// field contains unescaped characters (typically " from awk/mawk gsub inconsistencies)
+// that broke JSON parsing and couldn't be fixed by sanitizeRawJSON.
+//
+// Strategy: extract all simple/numeric fields via regex (they're always clean),
+// then find the error field boundaries and properly re-encode its content.
+func rescueBrokenJSON(raw []byte) (TelemetryIn, error) {
+	var in TelemetryIn
+	s := string(raw)
+
+	// Helper: extract a simple JSON string value (no escaped quotes in value)
+	strField := func(name string) string {
+		re := regexp.MustCompile(`"` + regexp.QuoteMeta(name) + `"\s*:\s*"([^"]*)"`)
+		m := re.FindStringSubmatch(s)
+		if len(m) >= 2 {
+			return m[1]
+		}
+		return ""
+	}
+
+	// Helper: extract a JSON integer value
+	intField := func(name string) int {
+		re := regexp.MustCompile(`"` + regexp.QuoteMeta(name) + `"\s*:\s*(-?\d+)`)
+		m := re.FindStringSubmatch(s)
+		if len(m) >= 2 {
+			n, _ := strconv.Atoi(m[1])
+			return n
+		}
+		return 0
+	}
+
+	// Extract simple fields (these never contain problematic characters)
+	in.RandomID = strField("random_id")
+	in.ExecutionID = strField("execution_id")
+	in.Type = strField("type")
+	in.NSAPP = strField("nsapp")
+	in.Status = strField("status")
+	in.OsType = strField("os_type")
+	in.OsVersion = strField("os_version")
+	in.PveVer = strField("pve_version")
+	in.Method = strField("method")
+	in.ErrorCategory = strField("error_category")
+	in.RepoSource = strField("repo_source")
+	in.GPUVendor = strField("gpu_vendor")
+	in.GPUModel = strField("gpu_model")
+	in.GPUPassthrough = strField("gpu_passthrough")
+	in.CPUVendor = strField("cpu_vendor")
+	in.CPUModel = strField("cpu_model")
+	in.RAMSpeed = strField("ram_speed")
+
+	in.CTType = intField("ct_type")
+	in.DiskSize = intField("disk_size")
+	in.CoreCount = intField("core_count")
+	in.RAMSize = intField("ram_size")
+	in.ExitCode = intField("exit_code")
+	in.InstallDuration = intField("install_duration")
+
+	// Validate that we got the minimum required fields
+	if in.RandomID == "" || in.NSAPP == "" || in.Status == "" {
+		return in, fmt.Errorf("rescue failed: missing required fields (random_id=%q, nsapp=%q, status=%q)", in.RandomID, in.NSAPP, in.Status)
+	}
+
+	// Extract the error field: the one with broken escaping.
+	// Find "error": " and then locate the boundary by searching for the next
+	// known field pattern: ",\n followed by "error_category" or similar.
+	errorRe := regexp.MustCompile(`"error"\s*:\s*"`)
+	eloc := errorRe.FindStringIndex(s)
+	if eloc != nil {
+		valueStart := eloc[1]
+		// Find the boundary: the next known field after "error"
+		// Pattern in the JSON: ...error content...",\n    "error_category": "..."
+		boundaryFields := []string{"error_category", "install_duration", "cpu_vendor", "gpu_vendor", "ram_speed", "repo_source"}
+		endPos := -1
+		for _, field := range boundaryFields {
+			re := regexp.MustCompile(`",?\s*\n\s*"` + regexp.QuoteMeta(field) + `"`)
+			m := re.FindStringIndex(s[valueStart:])
+			if m != nil && (endPos < 0 || m[0] < endPos) {
+				endPos = m[0]
+			}
+		}
+		// Also check for end-of-object after error (in minimal payloads)
+		if endPos < 0 {
+			re := regexp.MustCompile(`",?\s*\n?\s*}`)
+			m := re.FindStringIndex(s[valueStart:])
+			if m != nil {
+				endPos = m[0]
+			}
+		}
+
+		if endPos > 0 {
+			rawError := s[valueStart : valueStart+endPos]
+			// Truncate to 16KB to keep it manageable (the full log was likely 120KB)
+			if len(rawError) > 16384 {
+				rawError = rawError[:16384] + "... [truncated by server rescue]"
+			}
+			// The raw error has broken escaping: unescape what we can, then store as plain text
+			rawError = strings.ReplaceAll(rawError, "\\n", "\n")
+			rawError = strings.ReplaceAll(rawError, "\\t", "\t")
+			rawError = strings.ReplaceAll(rawError, `\\`, `\`)
+			rawError = strings.ReplaceAll(rawError, `\"`, `"`)
+			in.Error = rawError
+		}
+	}
+
+	return in, nil
 }
 
 // sanitizeIPs anonymizes IPv4 addresses in log text for GDPR compliance.
@@ -1710,22 +1829,29 @@ func main() {
 			var in2 TelemetryIn
 			dec2 := json.NewDecoder(bytes.NewReader(sanitized))
 			if err2 := dec2.Decode(&in2); err2 != nil {
-				// Both attempts failed â€” log the original error
-				snippet := string(raw)
-				if len(snippet) > 2000 {
-					snippet = snippet[:2000] + "..."
+				// Both sanitize attempts failed. Last resort: extract fields manually.
+				// This handles cases where the error field has unescaped quotes (mawk gsub issue).
+				in3, err3 := rescueBrokenJSON(raw)
+				if err3 != nil {
+					snippet := string(raw)
+					if len(snippet) > 2000 {
+						snippet = snippet[:2000] + "..."
+					}
+					var syntaxErr *json.SyntaxError
+					if errors.As(err, &syntaxErr) {
+						log.Printf("[REJECT] json decode: %v (offset %d) | body=%s", err, syntaxErr.Offset, snippet)
+					} else {
+						log.Printf("[REJECT] json decode: %v | body=%s", err, snippet)
+					}
+					http.Error(w, "invalid json", http.StatusBadRequest)
+					return
 				}
-				var syntaxErr *json.SyntaxError
-				if errors.As(err, &syntaxErr) {
-					log.Printf("[REJECT] json decode: %v (offset %d) | body=%s", err, syntaxErr.Offset, snippet)
-				} else {
-					log.Printf("[REJECT] json decode: %v | body=%s", err, snippet)
-				}
-				http.Error(w, "invalid json", http.StatusBadRequest)
-				return
+				in = in3
+				log.Printf("[WARN] json rescued: nsapp=%s exec=%s (original error: %v)", in.NSAPP, in.ExecutionID, err)
+			} else {
+				in = in2
+				log.Printf("[WARN] json sanitized: nsapp=%s exec=%s (original error: %v)", in.NSAPP, in.ExecutionID, err)
 			}
-			in = in2
-			log.Printf("[WARN] json sanitized: nsapp=%s exec=%s (original error: %v)", in.NSAPP, in.ExecutionID, err)
 		}
 		if err := validate(&in); err != nil {
 			log.Printf("[REJECT] validation: %v | nsapp=%s status=%s", err, in.NSAPP, in.Status)
