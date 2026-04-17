@@ -169,6 +169,37 @@ func (ch *CHClient) migrate() {
 		FROM telemetry_db.telemetry
 		WHERE pve_version != '' AND status IN ('success','failed','aborted','unknown')
 		GROUP BY day, repo_source, pve_version`,
+
+		// ── Materialized view: daily errors (excludes user_aborted) ──
+		// Pre-aggregates real failures per (date, app, exit_code, error_category).
+		// user_aborted (SIGHUP/SIGINT from closed terminals) is noise, not errors.
+		`CREATE TABLE IF NOT EXISTS telemetry_db.mv_daily_errors (
+			day            Date,
+			nsapp          String,
+			type           String,
+			exit_code      Int16,
+			error_category String,
+			repo_source    String,
+			cnt            UInt64
+		) ENGINE = SummingMergeTree()
+		ORDER BY (day, nsapp, exit_code, error_category, repo_source)
+		PARTITION BY toYYYYMM(day)`,
+
+		`CREATE MATERIALIZED VIEW IF NOT EXISTS telemetry_db.mv_daily_errors_view
+		TO telemetry_db.mv_daily_errors AS
+		SELECT
+			toDate(created) AS day,
+			nsapp,
+			type,
+			exit_code,
+			error_category,
+			repo_source,
+			count() AS cnt
+		FROM telemetry_db.telemetry
+		WHERE status = 'failed'
+		  AND error_category != 'user_aborted'
+		  AND exit_code != 0
+		GROUP BY day, nsapp, type, exit_code, error_category, repo_source`,
 	}
 
 	for _, s := range stmts {
@@ -217,6 +248,27 @@ func (ch *CHClient) migrate() {
 				}
 			}
 			log.Println("[CH-MIGRATE] Backfill complete")
+		}
+	}
+
+	// Backfill mv_daily_errors separately (may be added after initial deploy)
+	var errMVCount uint64
+	_ = ch.db.QueryRowContext(ctx, "SELECT count() FROM telemetry_db.mv_daily_errors").Scan(&errMVCount)
+	if errMVCount == 0 {
+		var srcCount uint64
+		_ = ch.db.QueryRowContext(ctx, "SELECT count() FROM telemetry_db.telemetry WHERE status='failed' AND error_category!='user_aborted' AND exit_code!=0").Scan(&srcCount)
+		if srcCount > 0 {
+			log.Printf("[CH-MIGRATE] Backfilling mv_daily_errors from %d error rows...", srcCount)
+			_, err := ch.db.ExecContext(ctx, `INSERT INTO telemetry_db.mv_daily_errors
+				SELECT toDate(created), nsapp, type, exit_code, error_category, repo_source, count()
+				FROM telemetry_db.telemetry
+				WHERE status = 'failed' AND error_category != 'user_aborted' AND exit_code != 0
+				GROUP BY toDate(created), nsapp, type, exit_code, error_category, repo_source`)
+			if err != nil {
+				log.Printf("[CH-MIGRATE] mv_daily_errors backfill error: %v", err)
+			} else {
+				log.Println("[CH-MIGRATE] mv_daily_errors backfill complete")
+			}
 		}
 	}
 	log.Println("[CH-MIGRATE] Schema ready")
@@ -500,8 +552,8 @@ func (ch *CHClient) FetchDashboardData(ctx context.Context, days int, repoSource
 		}
 	}
 
-	// ── 8. Error analysis (needs raw table — text pattern matching) ──
-	fwErr, faErr := chWhere(days, repoSource, "status='failed'", "error!=''")
+	// ── 8. Error analysis (needs raw table — text pattern matching, excludes user_aborted) ──
+	fwErr, faErr := chWhere(days, repoSource, "status='failed'", "error!=''", "error_category!='user_aborted'")
 	if rows, err := ch.db.QueryContext(ctx, fmt.Sprintf(`
 		SELECT
 			multiIf(
@@ -607,8 +659,8 @@ func (ch *CHClient) FetchDashboardData(ctx context.Context, days int, repoSource
 		}
 	}
 
-	// ── 12. Error categories (raw table — needs error_category field) ──
-	catW, catA := chWhere(days, repoSource, "status='failed'", "error_category!=''")
+	// ── 12. Error categories (raw table — excludes user_aborted) ──
+	catW, catA := chWhere(days, repoSource, "status='failed'", "error_category NOT IN ('','user_aborted')")
 	if rows, err := ch.db.QueryContext(ctx, fmt.Sprintf(
 		"SELECT error_category, count() c FROM telemetry_db.telemetry WHERE %s GROUP BY error_category ORDER BY c DESC", catW), catA...); err == nil {
 		defer rows.Close()
@@ -767,12 +819,18 @@ func (ch *CHClient) FetchErrorAnalysisData(ctx context.Context, days int, repoSo
 	mw, ma := chMVWhere(days, repoSource)
 
 	// Total installs (from MV)
-	var ti, tf, tab uint64
+	var ti uint64
 	_ = ch.db.QueryRowContext(ctx, fmt.Sprintf(
-		"SELECT sum(total), sum(failed), sum(aborted) FROM telemetry_db.mv_daily_stats WHERE %s", mw), ma...,
-	).Scan(&ti, &tf, &tab)
+		"SELECT sum(total) FROM telemetry_db.mv_daily_stats WHERE %s", mw), ma...,
+	).Scan(&ti)
 	data.TotalInstalls = int(ti)
-	data.TotalErrors = int(tf + tab)
+
+	// Total real errors (from MV — excludes user_aborted)
+	var te uint64
+	_ = ch.db.QueryRowContext(ctx, fmt.Sprintf(
+		"SELECT sum(cnt) FROM telemetry_db.mv_daily_errors WHERE %s", mw), ma...,
+	).Scan(&te)
+	data.TotalErrors = int(te)
 
 	if data.TotalInstalls > 0 {
 		data.OverallFailRate = float64(data.TotalErrors) / float64(data.TotalInstalls) * 100
@@ -790,10 +848,9 @@ func (ch *CHClient) FetchErrorAnalysisData(ctx context.Context, days int, repoSo
 	`).Scan(&si)
 	data.StuckInstalling = int(si)
 
-	// Exit code stats
-	fw, fa := chWhere(days, repoSource, "status='failed'", "exit_code!=0")
+	// Exit code stats (from MV — excludes user_aborted)
 	if rows, err := ch.db.QueryContext(ctx, fmt.Sprintf(
-		"SELECT exit_code, count() c FROM telemetry_db.telemetry WHERE %s GROUP BY exit_code ORDER BY c DESC LIMIT 30", fw), fa...); err == nil {
+		"SELECT exit_code, sum(cnt) c FROM telemetry_db.mv_daily_errors WHERE %s GROUP BY exit_code ORDER BY c DESC LIMIT 30", mw), ma...); err == nil {
 		defer rows.Close()
 		for rows.Next() {
 			var code int16
@@ -812,8 +869,8 @@ func (ch *CHClient) FetchErrorAnalysisData(ctx context.Context, days int, repoSo
 		}
 	}
 
-	// Category stats
-	cw, ca := chWhere(days, repoSource, "status IN ('failed','aborted')", "error_category!=''")
+	// Category stats (excludes user_aborted)
+	cw, ca := chWhere(days, repoSource, "status='failed'", "error_category NOT IN ('','user_aborted')")
 	if rows, err := ch.db.QueryContext(ctx, fmt.Sprintf(`
 		SELECT error_category, count() c,
 			arrayStringConcat(arraySlice(groupUniqArray(nsapp),1,5),', ') apps
@@ -833,14 +890,15 @@ func (ch *CHClient) FetchErrorAnalysisData(ctx context.Context, days int, repoSo
 		}
 	}
 
-	// App errors
+	// App errors (excludes user_aborted)
 	aw, aa := chWhere(days, repoSource, "status IN ('success','failed','aborted','unknown')")
 	if rows, err := ch.db.QueryContext(ctx, fmt.Sprintf(`
 		SELECT nsapp, anyLast(type), count() t,
-			countIf(status='failed') f, countIf(status='aborted') ab,
-			topKIf(1)(exit_code, status='failed' AND exit_code!=0) topec,
-			anyIf(error, status='failed' AND error!='') toperr,
-			anyIf(error_category, status='failed' AND error_category!='' AND error_category!='uncategorized') topcat
+			countIf(status='failed' AND error_category!='user_aborted') f,
+			countIf(status='aborted' AND error_category!='user_aborted') ab,
+			topKIf(1)(exit_code, status='failed' AND error_category!='user_aborted' AND exit_code!=0) topec,
+			anyIf(error, status='failed' AND error_category!='user_aborted' AND error!='') toperr,
+			anyIf(error_category, status='failed' AND error_category NOT IN ('','uncategorized','user_aborted')) topcat
 		FROM telemetry_db.telemetry WHERE %s AND nsapp!=''
 		GROUP BY nsapp
 		HAVING f+ab > 0
@@ -865,22 +923,18 @@ func (ch *CHClient) FetchErrorAnalysisData(ctx context.Context, days int, repoSo
 		}
 	}
 
-	// Error timeline
-	tlw, tla := chWhere(days, repoSource, "status IN ('failed','aborted')")
+	// Error timeline (from MV — excludes user_aborted)
 	if rows, err := ch.db.QueryContext(ctx, fmt.Sprintf(`
-		SELECT toString(toDate(created)) d,
-			countIf(status='failed') f, countIf(status='aborted') ab
-		FROM telemetry_db.telemetry WHERE %s
-		GROUP BY d ORDER BY d`, tlw), tla...); err == nil {
+		SELECT toString(day) d, sum(cnt) f
+		FROM telemetry_db.mv_daily_errors WHERE %s
+		GROUP BY day ORDER BY day`, mw), ma...); err == nil {
 		defer rows.Close()
 		dailyF := make(map[string]int)
-		dailyA := make(map[string]int)
 		for rows.Next() {
 			var d string
-			var f, ab uint64
-			if rows.Scan(&d, &f, &ab) == nil {
+			var f uint64
+			if rows.Scan(&d, &f) == nil {
 				dailyF[d] = int(f)
-				dailyA[d] = int(ab)
 			}
 		}
 		actualDays := days
@@ -890,15 +944,14 @@ func (ch *CHClient) FetchErrorAnalysisData(ctx context.Context, days int, repoSo
 		for i := actualDays - 1; i >= 0; i-- {
 			date := time.Now().AddDate(0, 0, -i).Format("2006-01-02")
 			data.ErrorTimeline = append(data.ErrorTimeline, ErrorTimelinePoint{
-				Date:    date,
-				Failed:  dailyF[date],
-				Aborted: dailyA[date],
+				Date:   date,
+				Failed: dailyF[date],
 			})
 		}
 	}
 
-	// Recent errors
-	rw, ra := chWhere(days, repoSource, "status IN ('failed','aborted')")
+	// Recent errors (excludes user_aborted)
+	rw, ra := chWhere(days, repoSource, "status='failed'", "error_category!='user_aborted'")
 	if rows, err := ch.db.QueryContext(ctx, fmt.Sprintf(`
 		SELECT nsapp, type, status, exit_code, error, error_category,
 			os_type, os_version, toString(created)
