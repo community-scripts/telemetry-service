@@ -19,9 +19,16 @@ type CHClient struct {
 }
 
 // NewCHClient connects to ClickHouse using a DSN like
-// "clickhouse://user:pass@host:9000/telemetry_db".
+// "clickhouse://user:pass@host:9000/telemetry_db" or "http://user:pass@host:8123/telemetry_db".
+// Automatically converts clickhouse:// to http:// with port 8123 for better compatibility.
 // Retries with exponential backoff for up to ~60s to handle container startup ordering.
 func NewCHClient(dsn string) (*CHClient, error) {
+	// Convert native protocol DSN to HTTP for better compatibility
+	if strings.HasPrefix(dsn, "clickhouse://") {
+		dsn = convertToHTTPDSN(dsn)
+		log.Printf("[CH] Converted DSN to HTTP protocol")
+	}
+
 	db, err := sql.Open("clickhouse", dsn)
 	if err != nil {
 		return nil, fmt.Errorf("clickhouse open: %w", err)
@@ -49,6 +56,19 @@ func NewCHClient(dsn string) (*CHClient, error) {
 	ch := &CHClient{db: db}
 	ch.migrate()
 	return ch, nil
+}
+
+// convertToHTTPDSN converts a clickhouse:// native protocol DSN to http:// protocol DSN
+// Example: "clickhouse://admin:pass@10.0.1.11:9000/db" → "http://admin:pass@10.0.1.11:8123/db"
+func convertToHTTPDSN(dsn string) string {
+	// Replace clickhouse:// with http://
+	dsn = strings.Replace(dsn, "clickhouse://", "http://", 1)
+	
+	// Replace :9000 with :8123 (native protocol port to HTTP port)
+	// Be careful to only replace the port after the host, not in any other field
+	dsn = strings.Replace(dsn, ":9000/", ":8123/", 1)
+	
+	return dsn
 }
 
 // migrate creates the database, tables, and materialized views if they don't exist.
