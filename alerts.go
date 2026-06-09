@@ -71,7 +71,7 @@ type Alerter struct {
 	lastAlertAt      time.Time
 	lastWeeklyReport time.Time
 	mu               sync.Mutex
-	pb               *PBClient
+	pb               *CHClient
 	lastStats        alertStats
 	alertHistory     []AlertEvent
 }
@@ -91,7 +91,7 @@ type AlertEvent struct {
 }
 
 // NewAlerter creates a new alerter instance
-func NewAlerter(cfg AlertConfig, pb *PBClient) *Alerter {
+func NewAlerter(cfg AlertConfig, pb *CHClient) *Alerter {
 	return &Alerter{
 		cfg:          cfg,
 		pb:           pb,
