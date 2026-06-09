@@ -63,11 +63,11 @@ func NewCHClient(dsn string) (*CHClient, error) {
 func convertToHTTPDSN(dsn string) string {
 	// Replace clickhouse:// with http://
 	dsn = strings.Replace(dsn, "clickhouse://", "http://", 1)
-	
+
 	// Replace :9000 with :8123 (native protocol port to HTTP port)
 	// Be careful to only replace the port after the host, not in any other field
 	dsn = strings.Replace(dsn, ":9000/", ":8123/", 1)
-	
+
 	return dsn
 }
 
