@@ -5,6 +5,7 @@ import (
 	"crypto/rand"
 	"database/sql"
 	"encoding/hex"
+	"encoding/json"
 	"fmt"
 	"log"
 	"strings"
@@ -959,13 +960,9 @@ func (ch *CHClient) FetchDashboardData(ctx context.Context, days int, repoSource
 		}
 	}
 
-	// ── 15. Recent records (raw table — needs full row data) ──
-	recentW, recentA := chWhere(days, repoSource, repoSlug)
-	if rows, err := ch.db.QueryContext(ctx, fmt.Sprintf(
-		"SELECT %s FROM telemetry_db.telemetry WHERE %s ORDER BY created DESC LIMIT 20",
-		recordSelectCols, recentW), recentA...); err == nil {
-		defer rows.Close()
-		data.RecentRecords = scanRecords(rows)
+	// ── 15. Recent records (one row per execution_id, with pipeline) ──
+	if recs, _, err := ch.FetchRecordsPaginated(ctx, 1, 20, "", "", "", "", "-created", repoSource, repoSlug, days); err == nil {
+		data.RecentRecords = recs
 	}
 
 	// ── 16. Repository slug breakdown (owner/repo forks) ──
@@ -1311,26 +1308,30 @@ func (ch *CHClient) FetchErrorAnalysisData(ctx context.Context, days int, repoSo
 //  PAGINATED RECORDS (/api/records)
 // ══════════════════════════════════════════════════════════════
 
-func (ch *CHClient) FetchRecordsPaginated(ctx context.Context, page, limit int,
-	status, app, osType, typeFilter, sortField, repoSource, repoSlug string, days int,
-) ([]TelemetryRecord, int, error) {
+// statusRankSQL orders rows when collapsing multiple telemetry events per
+// execution_id: terminal states win over in-progress heartbeats; richer rows
+// (error text / hardware fields) win within the same rank.
+const statusRankSQL = `multiIf(
+	status IN ('success','failed','aborted','unknown'), 0,
+	status = 'configuring', 1,
+	status = 'validation', 2,
+	status = 'installing', 3, 4)`
+
+const statusRankOrderSQL = statusRankSQL + `, if(status IN ('success','failed','aborted','unknown'), length(error) + toUInt64(disk_size), 0) DESC, created DESC`
+
+type pipelineStep struct {
+	S string `json:"s"`
+	T string `json:"t"`
+}
+
+// recordsBaseWhere builds shared filters for the records API. Status is applied
+// after collapsing to the latest row per execution_id (see latestStatusSQL).
+func recordsBaseWhere(days int, repoSource, repoSlug, app, osType, typeFilter string) (string, []interface{}) {
 	parts := []string{"1=1"}
 	var args []interface{}
-
 	if days > 0 {
 		parts = append(parts, "created >= ?")
 		args = append(args, chSinceTime(days))
-	}
-	if status != "" {
-		switch status {
-		case "aborted":
-			parts = append(parts, "(status='aborted' OR (status='failed' AND (exit_code IN (129,130) OR positionCaseInsensitive(error,'SIGINT')>0 OR positionCaseInsensitive(error,'SIGHUP')>0 OR positionCaseInsensitive(error,'Ctrl+C')>0 OR positionCaseInsensitive(error,'Ctrl-C')>0)))")
-		case "failed":
-			parts = append(parts, "(status='failed' AND exit_code NOT IN (129,130) AND positionCaseInsensitive(error,'SIGINT')=0 AND positionCaseInsensitive(error,'SIGHUP')=0 AND positionCaseInsensitive(error,'Ctrl+C')=0 AND positionCaseInsensitive(error,'Ctrl-C')=0)")
-		default:
-			parts = append(parts, "status = ?")
-			args = append(args, status)
-		}
 	}
 	if app != "" {
 		parts = append(parts, "positionCaseInsensitive(nsapp, ?) > 0")
@@ -1352,10 +1353,128 @@ func (ch *CHClient) FetchRecordsPaginated(ctx context.Context, page, limit int,
 		parts = append(parts, "repo_slug = ?")
 		args = append(args, repoSlug)
 	}
+	return strings.Join(parts, " AND "), args
+}
 
-	where := strings.Join(parts, " AND ")
+// latestStatusSQL filters on the collapsed (current) status of each installation.
+func latestStatusSQL(status string) (string, []interface{}) {
+	if status == "" {
+		return "", nil
+	}
+	switch status {
+	case "aborted":
+		return `(status='aborted' OR (status='failed' AND (exit_code IN (129,130)
+			OR positionCaseInsensitive(error,'SIGINT')>0 OR positionCaseInsensitive(error,'SIGHUP')>0
+			OR positionCaseInsensitive(error,'Ctrl+C')>0 OR positionCaseInsensitive(error,'Ctrl-C')>0)))`, nil
+	case "failed":
+		return `(status='failed' AND exit_code NOT IN (129,130)
+			AND positionCaseInsensitive(error,'SIGINT')=0 AND positionCaseInsensitive(error,'SIGHUP')=0
+			AND positionCaseInsensitive(error,'Ctrl+C')=0 AND positionCaseInsensitive(error,'Ctrl-C')=0)`, nil
+	default:
+		return "status = ?", []interface{}{status}
+	}
+}
 
-	// Sort
+func (ch *CHClient) attachPipelines(ctx context.Context, records []TelemetryRecord) {
+	if len(records) == 0 {
+		return
+	}
+	eids := make([]string, 0, len(records))
+	for _, r := range records {
+		if r.ExecutionID != "" {
+			eids = append(eids, r.ExecutionID)
+		}
+	}
+	if len(eids) == 0 {
+		return
+	}
+
+	placeholders := strings.TrimRight(strings.Repeat("?,", len(eids)), ",")
+	args := make([]interface{}, len(eids))
+	for i, e := range eids {
+		args[i] = e
+	}
+
+	q := fmt.Sprintf(`
+		SELECT execution_id, status, toString(created) AS t
+		FROM telemetry_db.telemetry
+		WHERE execution_id IN (%s)
+		  AND status IN ('installing','validation','configuring','success','failed','aborted','unknown')
+		ORDER BY execution_id, created ASC`, placeholders)
+
+	rows, err := ch.db.QueryContext(ctx, q, args...)
+	if err != nil {
+		log.Printf("[CH] pipeline fetch: %v", err)
+		return
+	}
+	defer rows.Close()
+
+	type step struct {
+		s, t string
+	}
+	stepsByEID := make(map[string][]step)
+	for rows.Next() {
+		var eid, st, ts string
+		if rows.Scan(&eid, &st, &ts) != nil {
+			continue
+		}
+		prev := stepsByEID[eid]
+		// Collapse consecutive duplicate statuses (retry noise).
+		if len(prev) > 0 && prev[len(prev)-1].s == st {
+			continue
+		}
+		stepsByEID[eid] = append(stepsByEID[eid], step{s: st, t: ts})
+	}
+
+	for i := range records {
+		eid := records[i].ExecutionID
+		raw, ok := stepsByEID[eid]
+		if !ok || len(raw) == 0 {
+			continue
+		}
+		out := make([]pipelineStep, len(raw))
+		for j, s := range raw {
+			out[j] = pipelineStep{S: s.s, T: s.t}
+		}
+		if b, err := json.Marshal(out); err == nil {
+			records[i].Pipeline = string(b)
+		}
+	}
+}
+
+func (ch *CHClient) FetchRecordsPaginated(ctx context.Context, page, limit int,
+	status, app, osType, typeFilter, sortField, repoSource, repoSlug string, days int,
+) ([]TelemetryRecord, int, error) {
+	baseWhere, baseArgs := recordsBaseWhere(days, repoSource, repoSlug, app, osType, typeFilter)
+	statusPred, statusArgs := latestStatusSQL(status)
+
+	latestWhere := "rn = 1"
+	var outerArgs []interface{}
+	if statusPred != "" {
+		latestWhere += " AND " + statusPred
+		outerArgs = append(outerArgs, statusArgs...)
+	}
+
+	// Count distinct installations (not raw event rows).
+	countQ := fmt.Sprintf(`
+		WITH ranked AS (
+			SELECT status, exit_code, error,
+				row_number() OVER (
+					PARTITION BY if(execution_id = '', random_id, execution_id)
+					ORDER BY %s
+				) AS rn
+			FROM telemetry_db.telemetry
+			WHERE %s
+		)
+		SELECT count() FROM ranked WHERE %s`, statusRankOrderSQL, baseWhere, latestWhere)
+
+	countArgs := append(append([]interface{}{}, baseArgs...), outerArgs...)
+	var totalU uint64
+	if err := ch.db.QueryRowContext(ctx, countQ, countArgs...).Scan(&totalU); err != nil {
+		return nil, 0, fmt.Errorf("CH records count: %w", err)
+	}
+	total := int(totalU)
+
 	sort := "created DESC"
 	allowed := map[string]string{
 		"created": "created", "-created": "created DESC",
@@ -1370,22 +1489,30 @@ func (ch *CHClient) FetchRecordsPaginated(ctx context.Context, page, limit int,
 		sort = s
 	}
 
-	// Total count
-	var totalU uint64
-	_ = ch.db.QueryRowContext(ctx, fmt.Sprintf("SELECT count() FROM telemetry_db.telemetry WHERE %s", where), args...).Scan(&totalU)
-	total := int(totalU)
-
-	// Fetch page
 	offset := (page - 1) * limit
-	q := fmt.Sprintf("SELECT %s FROM telemetry_db.telemetry WHERE %s ORDER BY %s LIMIT %d OFFSET %d",
-		recordSelectCols, where, sort, limit, offset)
+	q := fmt.Sprintf(`
+		WITH ranked AS (
+			SELECT %s,
+				row_number() OVER (
+					PARTITION BY if(execution_id = '', random_id, execution_id)
+					ORDER BY %s
+				) AS rn
+			FROM telemetry_db.telemetry
+			WHERE %s
+		)
+		SELECT %s FROM ranked WHERE %s
+		ORDER BY %s
+		LIMIT %d OFFSET %d`,
+		recordSelectCols, statusRankOrderSQL, baseWhere, recordSelectCols, latestWhere, sort, limit, offset)
 
-	rows, err := ch.db.QueryContext(ctx, q, args...)
+	fetchArgs := append(append([]interface{}{}, baseArgs...), outerArgs...)
+	rows, err := ch.db.QueryContext(ctx, q, fetchArgs...)
 	if err != nil {
 		return nil, 0, fmt.Errorf("CH records: %w", err)
 	}
 	defer rows.Close()
 	records := scanRecords(rows)
+	ch.attachPipelines(ctx, records)
 	return records, total, nil
 }
 

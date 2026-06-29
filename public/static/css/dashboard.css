@@ -583,6 +583,12 @@ tr.clickable-row {
   border-color: rgba(59, 130, 246, 0.3);
 }
 
+.status-badge.validation {
+  background: rgba(34, 211, 238, 0.15);
+  color: var(--accent-cyan);
+  border-color: rgba(34, 211, 238, 0.3);
+}
+
 .status-badge.aborted {
   background: rgba(168, 85, 247, 0.15);
   color: var(--accent-purple);

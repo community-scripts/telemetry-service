@@ -150,6 +150,9 @@ type TelemetryOut struct {
 
 	// Dynamic repository slug "owner/repo"
 	RepoSlug string `json:"repo_slug,omitempty"`
+
+	// Installation pipeline: JSON array [{s:"installing",t:"..."}, ...] (server-built for API responses)
+	Pipeline string `json:"pipeline,omitempty"`
 }
 
 // TelemetryStatusUpdate contains only fields needed for status updates
@@ -168,9 +171,6 @@ type TelemetryStatusUpdate struct {
 	RAMSpeed        string `json:"ram_speed,omitempty"`
 	RepoSource      string `json:"repo_source,omitempty"`
 	RepoSlug        string `json:"repo_slug,omitempty"`
-
-	// Installation pipeline: JSON array [{s:"installing",t:"..."}, ...] built server-side
-	Pipeline string `json:"pipeline,omitempty"`
 }
 
 // Allowed values for 'repo_source' field
