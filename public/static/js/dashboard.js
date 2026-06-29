@@ -612,11 +612,13 @@ function renderTableRows(records) {
       exitCodeCell = '<span class="exit-code-badge aborted">' + r.exit_code + '</span>';
     }
 
-    return '<tr class="clickable-row" onclick="showRecordDetail(' + index + ')">' +
+    const armBadge = r.has_arm ? ' <span class="arm-badge" title="Installed on ARM64 hardware">ARM</span>' : '';
+
+    return '<tr class="clickable-row' + (r.has_arm ? ' arm-row' : '') + '" onclick="showRecordDetail(' + index + ')">' +
       '<td><span class="status-badge ' + statusClass + '">' + escapeHtml(r.status || 'unknown') + '</span></td>' +
       '<td>' + exitCodeCell + '</td>' +
       '<td><span class="type-badge ' + typeClass + '">' + escapeHtml((r.type || '-').toUpperCase()) + '</span></td>' +
-      '<td><strong>' + escapeHtml(r.nsapp || '-') + '</strong></td>' +
+      '<td><strong>' + escapeHtml(r.nsapp || '-') + '</strong>' + armBadge + '</td>' +
       '<td class="repo-slug-cell" title="' + escapeAttr(repoDisplay) + '">' + escapeHtml(repoDisplay) + '</td>' +
       '<td>' + escapeHtml(osDisplay) + '</td>' +
       '<td>' + diskSize + '</td>' +
@@ -697,6 +699,7 @@ function showRecordDetail(index) {
   html += buildDetailItem('OS Type', record.os_type);
   html += buildDetailItem('OS Version', record.os_version);
   html += buildDetailItem('PVE Version', record.pve_version);
+  html += buildDetailItem('Architecture', record.has_arm ? 'ARM64' : 'amd64');
   html += '</div></div>';
 
   // ── Hardware Section ──

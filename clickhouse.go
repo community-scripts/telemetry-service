@@ -106,7 +106,8 @@ func (ch *CHClient) migrate() {
 			gpu_model        String,
 			gpu_passthrough  String,
 			ram_speed        String,
-			install_duration UInt32
+			install_duration UInt32,
+			has_arm          UInt8
 		) ENGINE = MergeTree()
 		ORDER BY (created, nsapp)
 		PARTITION BY toYYYYMM(created)`,
@@ -247,6 +248,7 @@ func (ch *CHClient) migrate() {
 	// Additive column migrations for tables that predate the column (idempotent).
 	alters := []string{
 		`ALTER TABLE telemetry_db.telemetry ADD COLUMN IF NOT EXISTS repo_slug String`,
+		`ALTER TABLE telemetry_db.telemetry ADD COLUMN IF NOT EXISTS has_arm UInt8`,
 	}
 	for _, s := range alters {
 		if _, err := ch.db.ExecContext(ctx, s); err != nil {
@@ -342,7 +344,7 @@ func (ch *CHClient) InsertTelemetry(ctx context.Context, p TelemetryOut) error {
 		random_id, execution_id, repo_source, repo_slug,
 		cpu_vendor, cpu_model,
 		gpu_vendor, gpu_model, gpu_passthrough,
-		ram_speed, install_duration
+		ram_speed, install_duration, has_arm
 	) VALUES (
 		?, ?, ?, ?, ?, now64(3),
 		?, ?, ?, ?,
@@ -351,7 +353,7 @@ func (ch *CHClient) InsertTelemetry(ctx context.Context, p TelemetryOut) error {
 		?, ?, ?, ?,
 		?, ?,
 		?, ?, ?,
-		?, ?
+		?, ?, ?
 	)`
 	_, err := ch.db.ExecContext(ctx, q,
 		generateRecordID(), p.NSAPP, p.Type, p.Status, p.Method,
@@ -361,9 +363,17 @@ func (ch *CHClient) InsertTelemetry(ctx context.Context, p TelemetryOut) error {
 		p.RandomID, p.ExecutionID, p.RepoSource, p.RepoSlug,
 		p.CPUVendor, p.CPUModel,
 		p.GPUVendor, p.GPUModel, p.GPUPassthrough,
-		p.RAMSpeed, uint32(p.InstallDuration),
+		p.RAMSpeed, uint32(p.InstallDuration), boolToUint8(p.HasArm),
 	)
 	return err
+}
+
+// boolToUint8 maps a Go bool to ClickHouse's UInt8 (0/1) representation.
+func boolToUint8(b bool) uint8 {
+	if b {
+		return 1
+	}
+	return 0
 }
 
 // HasTerminalExecutionID reports whether a terminal-status row already exists for
@@ -472,7 +482,7 @@ func scanRecords(rows *sql.Rows) []TelemetryRecord {
 	var out []TelemetryRecord
 	for rows.Next() {
 		var r TelemetryRecord
-		var coreCount, ctType uint8
+		var coreCount, ctType, hasArm uint8
 		var diskSize, ramSize, installDur uint32
 		var exitCode int16
 		err := rows.Scan(
@@ -483,7 +493,7 @@ func scanRecords(rows *sql.Rows) []TelemetryRecord {
 			&r.RandomID, &r.ExecutionID, &r.RepoSource, &r.RepoSlug,
 			&r.CPUVendor, &r.CPUModel,
 			&r.GPUVendor, &r.GPUModel, &r.GPUPassthrough,
-			&r.RAMSpeed, &installDur,
+			&r.RAMSpeed, &installDur, &hasArm,
 			&r.Created,
 		)
 		if err != nil {
@@ -496,6 +506,7 @@ func scanRecords(rows *sql.Rows) []TelemetryRecord {
 		r.RAMSize = int(ramSize)
 		r.ExitCode = int(exitCode)
 		r.InstallDuration = int(installDur)
+		r.HasArm = hasArm != 0
 		out = append(out, r)
 	}
 	return out
@@ -509,7 +520,7 @@ const recordSelectCols = `nsapp, type, status, method,
 	random_id, execution_id, repo_source, repo_slug,
 	cpu_vendor, cpu_model,
 	gpu_vendor, gpu_model, gpu_passthrough,
-	ram_speed, install_duration,
+	ram_speed, install_duration, has_arm,
 	toString(created)`
 
 // ══════════════════════════════════════════════════════════════

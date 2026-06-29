@@ -3,7 +3,6 @@ package main
 import (
 	"context"
 	"encoding/json"
-	"fmt"
 	"log"
 	"sync"
 	"time"
@@ -30,8 +29,8 @@ type Cache struct {
 	memData map[string]cacheEntry
 
 	// Refresh tracking: prevents multiple concurrent refreshes for the same key
-	refreshMu   sync.Mutex
-	refreshing  map[string]bool
+	refreshMu  sync.Mutex
+	refreshing map[string]bool
 }
 
 type cacheEntry struct {
@@ -217,8 +216,4 @@ func (c *Cache) InvalidateDashboard(ctx context.Context) {
 		}
 	}
 	c.mu.Unlock()
-}
-
-func dashboardCacheKey(days int, repoSource string) string {
-	return fmt.Sprintf("dashboard:%d:%s", days, repoSource)
 }

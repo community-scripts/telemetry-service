@@ -13,10 +13,13 @@ import (
 	"net"
 	"net/http"
 	"os"
+	"os/signal"
 	"regexp"
 	"strconv"
 	"strings"
 	"sync"
+	"sync/atomic"
+	"syscall"
 	"time"
 )
 
@@ -115,6 +118,10 @@ type TelemetryIn struct {
 
 	// Dynamic repository slug "owner/repo" (e.g. "community-scripts/ProxmoxVE", "MickLesk/ProxmoxVE")
 	RepoSlug string `json:"repo_slug,omitempty"`
+
+	// HasArm is true when the install actually ran on arm64 hardware (only
+	// possible for scripts that declare var_arm64=yes).
+	HasArm bool `json:"has_arm,omitempty"`
 }
 
 // TelemetryOut is the output shape for telemetry records
@@ -150,6 +157,9 @@ type TelemetryOut struct {
 
 	// Dynamic repository slug "owner/repo"
 	RepoSlug string `json:"repo_slug,omitempty"`
+
+	// HasArm is true when the install ran on arm64 hardware.
+	HasArm bool `json:"has_arm,omitempty"`
 
 	// Installation pipeline: JSON array [{s:"installing",t:"..."}, ...] (server-built for API responses)
 	Pipeline string `json:"pipeline,omitempty"`
@@ -198,6 +208,7 @@ type WriteQueue struct {
 	workers  int
 	maxRetry int
 	index    *ExecIndex // in-memory execution_id dedup
+	inFlight atomic.Int64
 }
 
 // NewWriteQueue creates a buffered write queue with the given capacity and worker count.
@@ -235,8 +246,30 @@ func (wq *WriteQueue) Len() int {
 	return len(wq.ch)
 }
 
+// Stop blocks until the queue is fully drained (buffer empty and no in-flight
+// writes) or the timeout elapses. Call it after the HTTP server has stopped
+// accepting new requests so a deploy/restart doesn't silently lose queued
+// telemetry. The channel is intentionally left open so in-flight retries can
+// re-enqueue without panicking on a closed channel.
+func (wq *WriteQueue) Stop(timeout time.Duration) {
+	deadline := time.Now().Add(timeout)
+	for time.Now().Before(deadline) {
+		if wq.Len() == 0 && wq.inFlight.Load() == 0 {
+			log.Printf("[QUEUE] drained cleanly")
+			return
+		}
+		time.Sleep(100 * time.Millisecond)
+	}
+	log.Printf("[QUEUE] drain timed out after %v (qlen=%d, in-flight=%d) — remaining writes lost",
+		timeout, wq.Len(), wq.inFlight.Load())
+}
+
 func (wq *WriteQueue) worker(id int) {
 	for item := range wq.ch {
+		// inFlight stays incremented for the entire iteration (including retry
+		// backoff and re-enqueue) so Stop() never reports "drained" while a
+		// worker is still about to put an item back on the queue.
+		wq.inFlight.Add(1)
 		ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
 		err := wq.processItem(ctx, item)
 		cancel()
@@ -259,6 +292,7 @@ func (wq *WriteQueue) worker(id int) {
 					id, item.Payload.NSAPP, item.Payload.Status, item.Payload.ExecutionID, err)
 			}
 		}
+		wq.inFlight.Add(-1)
 	}
 }
 
@@ -454,13 +488,6 @@ func (r *RateLimiter) Allow(key string) bool {
 	return true
 }
 
-func min(a, b int) int {
-	if a < b {
-		return a
-	}
-	return b
-}
-
 // -------- Utility: GDPR-safe key extraction --------
 
 type ProxyTrust struct {
@@ -574,7 +601,7 @@ var (
 		"timeout": true, "config": true, "resource": true, "unknown": true, "": true,
 		"user_aborted": true, "apt": true, "command_not_found": true,
 		"service": true, "database": true, "signal": true, "proxmox": true,
-		"shell": true, "build": true, "preflight": true,
+		"shell": true, "build": true, "preflight": true, "runtime": true,
 	}
 
 	// exitCodeInfo consolidates description and category for all known exit codes.
@@ -847,6 +874,20 @@ func deriveErrorCategory(code int, errText string) string {
 		return "database"
 	}
 	return "unknown"
+}
+
+// isAbortSignal reports whether a "failed" outcome is really a user-initiated
+// abort (Ctrl+C / SIGINT, terminal close / SIGHUP, or an explicit user-cancel
+// message) and should be reclassified as "aborted" rather than counted as a
+// failure. Used both at ingest time and when reading records back, so the two
+// paths can never diverge.
+func isAbortSignal(exitCode int, errText string) bool {
+	if exitCode == 129 || exitCode == 130 {
+		return true
+	}
+	e := strings.ToLower(errText)
+	return containsAny(e, "sigint", "ctrl+c", "ctrl-c", "sighup",
+		"aborted by user", "user abort", "cancelled by user", "no changes have been made")
 }
 
 // parseRepoFilters reads repo_source (repo) and repo_slug (slug) query parameters.
@@ -1353,16 +1394,17 @@ func main() {
 			"time":   time.Now().UTC().Format(time.RFC3339),
 		}
 
+		// Header values must be set before WriteHeader, otherwise they are dropped.
+		w.Header().Set("Content-Type", "application/json")
 		if err := ch.Ping(ctx); err != nil {
 			status["status"] = "degraded"
 			status["clickhouse"] = "disconnected"
-			w.WriteHeader(503)
+			w.WriteHeader(http.StatusServiceUnavailable)
 		} else {
 			status["clickhouse"] = "connected"
-			w.WriteHeader(200)
+			w.WriteHeader(http.StatusOK)
 		}
 
-		w.Header().Set("Content-Type", "application/json")
 		json.NewEncoder(w).Encode(status)
 	})
 
@@ -1547,12 +1589,9 @@ func main() {
 			return
 		}
 
-		// Auto-reclassify old records that have status=failed but are actually SIGINT aborts
+		// Auto-reclassify old records that have status=failed but are actually user aborts
 		for i := range records {
-			if records[i].Status == "failed" && (records[i].ExitCode == 130 ||
-				strings.Contains(strings.ToLower(records[i].Error), "sigint") ||
-				strings.Contains(strings.ToLower(records[i].Error), "ctrl+c") ||
-				strings.Contains(strings.ToLower(records[i].Error), "ctrl-c")) {
+			if records[i].Status == "failed" && isAbortSignal(records[i].ExitCode, records[i].Error) {
 				records[i].Status = "aborted"
 			}
 		}
@@ -2053,16 +2092,7 @@ func main() {
 
 		// Auto-reclassify: clients still send status="failed" for SIGINT/Ctrl+C and SIGHUP,
 		// detect and reclassify as "aborted" server-side.
-		errorLower := strings.ToLower(in.Error)
-		if in.Status == "failed" && (in.ExitCode == 129 || in.ExitCode == 130 ||
-			strings.Contains(errorLower, "sigint") ||
-			strings.Contains(errorLower, "ctrl+c") ||
-			strings.Contains(errorLower, "ctrl-c") ||
-			strings.Contains(errorLower, "sighup") ||
-			strings.Contains(errorLower, "aborted by user") ||
-			strings.Contains(errorLower, "user abort") ||
-			strings.Contains(errorLower, "cancelled by user") ||
-			strings.Contains(errorLower, "no changes have been made")) {
+		if in.Status == "failed" && isAbortSignal(in.ExitCode, in.Error) {
 			in.Status = "aborted"
 			if in.ErrorCategory == "" || in.ErrorCategory == "unknown" {
 				in.ErrorCategory = "user_aborted"
@@ -2117,6 +2147,7 @@ func main() {
 			ErrorCategory:   in.ErrorCategory,
 			RepoSource:      in.RepoSource,
 			RepoSlug:        in.RepoSlug,
+			HasArm:          in.HasArm,
 		}
 
 		// Enqueue for async PB write (decoupled from HTTP response)
@@ -2174,7 +2205,29 @@ func main() {
 	}
 
 	log.Printf("telemetry-ingest listening on %s", cfg.ListenAddr)
-	log.Fatal(srv.ListenAndServe())
+
+	// Serve in the background so the main goroutine can wait for shutdown signals.
+	go func() {
+		if err := srv.ListenAndServe(); err != nil && !errors.Is(err, http.ErrServerClosed) {
+			log.Fatalf("server error: %v", err)
+		}
+	}()
+
+	// Graceful shutdown: stop accepting requests, then drain the write queue so a
+	// deploy/restart doesn't lose telemetry that was accepted but not yet written.
+	stop := make(chan os.Signal, 1)
+	signal.Notify(stop, os.Interrupt, syscall.SIGTERM)
+	<-stop
+	log.Printf("shutdown signal received — draining (qlen=%d)", writeQueue.Len())
+
+	shutdownCtx, cancel := context.WithTimeout(context.Background(), 25*time.Second)
+	defer cancel()
+	if err := srv.Shutdown(shutdownCtx); err != nil {
+		log.Printf("graceful HTTP shutdown failed: %v", err)
+	}
+
+	writeQueue.Stop(20 * time.Second)
+	log.Printf("shutdown complete")
 }
 
 func securityHeaders(next http.Handler) http.Handler {
@@ -2240,13 +2293,6 @@ func env(k, def string) string {
 	v := os.Getenv(k)
 	if v == "" {
 		return def
-	}
-	return v
-}
-func mustEnv(k string) string {
-	v := os.Getenv(k)
-	if v == "" {
-		log.Fatalf("missing env %s", k)
 	}
 	return v
 }
