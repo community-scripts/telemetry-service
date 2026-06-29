@@ -398,6 +398,27 @@ func chSinceTime(days int) time.Time {
 	return time.Now().UTC().AddDate(0, 0, -(days - 1)).Truncate(24 * time.Hour)
 }
 
+// repoSourcePred returns a SQL predicate (and args) for a repo_source filter.
+//
+// Legacy rows created before repo_source existed have an empty repo_source.
+// Since the production client's fallback is "ProxmoxVE" (CI rewrites
+// ProxmoxVED→ProxmoxVE on promotion), those untagged historical installs are
+// overwhelmingly production traffic. The "ProxmoxVE" filter therefore also
+// includes empty repo_source so the count reflects real production volume
+// instead of dropping ~70% of historical records into an invisible bucket.
+//
+// An empty repoSource means "all" (no predicate). Other values match exactly.
+func repoSourcePred(repoSource string) (string, []interface{}) {
+	switch repoSource {
+	case "":
+		return "", nil
+	case "ProxmoxVE":
+		return "repo_source IN ('ProxmoxVE','')", nil
+	default:
+		return "repo_source = ?", []interface{}{repoSource}
+	}
+}
+
 // chWhere builds a WHERE clause from days, repoSource, optional repoSlug, and extra predicates.
 // Always starts with "1=1" so callers can freely AND-chain.
 func chWhere(days int, repoSource, repoSlug string, extras ...string) (string, []interface{}) {
@@ -408,9 +429,9 @@ func chWhere(days int, repoSource, repoSlug string, extras ...string) (string, [
 		parts = append(parts, "created >= ?")
 		args = append(args, chSinceTime(days))
 	}
-	if repoSource != "" {
-		parts = append(parts, "repo_source = ?")
-		args = append(args, repoSource)
+	if pred, pArgs := repoSourcePred(repoSource); pred != "" {
+		parts = append(parts, pred)
+		args = append(args, pArgs...)
 	}
 	if repoSlug != "" {
 		parts = append(parts, "repo_slug = ?")
@@ -438,9 +459,9 @@ func chMVWhere(days int, repoSource string) (string, []interface{}) {
 		parts = append(parts, "day >= ?")
 		args = append(args, chSinceDate(days))
 	}
-	if repoSource != "" {
-		parts = append(parts, "repo_source = ?")
-		args = append(args, repoSource)
+	if pred, pArgs := repoSourcePred(repoSource); pred != "" {
+		parts = append(parts, pred)
+		args = append(args, pArgs...)
 	}
 	return strings.Join(parts, " AND "), args
 }
@@ -1323,9 +1344,9 @@ func (ch *CHClient) FetchRecordsPaginated(ctx context.Context, page, limit int,
 		parts = append(parts, "type = ?")
 		args = append(args, typeFilter)
 	}
-	if repoSource != "" {
-		parts = append(parts, "repo_source = ?")
-		args = append(args, repoSource)
+	if pred, pArgs := repoSourcePred(repoSource); pred != "" {
+		parts = append(parts, pred)
+		args = append(args, pArgs...)
 	}
 	if repoSlug != "" {
 		parts = append(parts, "repo_slug = ?")

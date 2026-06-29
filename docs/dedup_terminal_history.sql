@@ -192,6 +192,22 @@ WHERE status = 'failed'
 GROUP BY day, nsapp, type, exit_code, error_category, repo_source;
 
 
+-- =============================================================================
+-- IMPORTANT — empty repo_source is the main reason "ProxmoxVE" looked too small
+-- (e.g. ProxmoxVE 3364 vs. All 11277). ~70% of historical rows were written
+-- before the repo_source field existed, so they are stored as '' and were
+-- excluded by the dashboard's repo_source='ProxmoxVE' filter.
+--
+-- The Go service now FOLDS empty repo_source into the "ProxmoxVE" view at query
+-- time (see repoSourcePred / pbRepoSourceFilter), so the dashboard already shows
+-- the correct number WITHOUT running anything here.
+--
+-- STEP 5 below is the OPTIONAL permanent cleanup: it physically backfills the
+-- empty rows so the raw table and materialized views are also correct for any
+-- direct queries / future tooling. Safe to skip if you rely on the query-time
+-- fold above.
+-- =============================================================================
+
 -- -----------------------------------------------------------------------------
 -- STEP 5 (OPTIONAL) — Backfill empty repo_source for legacy rows.
 --   Older clients did not send repo_source. The vast majority of historical

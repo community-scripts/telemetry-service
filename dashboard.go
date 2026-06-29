@@ -190,6 +190,21 @@ type ScriptInfo struct {
 }
 
 // type relation ID -> display type mapping
+// pbRepoSourceFilter mirrors repoSourcePred (ClickHouse) for the PocketBase
+// filter syntax. Legacy rows have an empty repo_source; since the production
+// fallback is "ProxmoxVE", the "ProxmoxVE" filter folds in those untagged rows
+// so historical production installs aren't dropped from alert baselines.
+func pbRepoSourceFilter(repoSource string) string {
+	switch repoSource {
+	case "":
+		return ""
+	case "ProxmoxVE":
+		return "(repo_source = 'ProxmoxVE' || repo_source = '')"
+	default:
+		return fmt.Sprintf("repo_source = '%s'", repoSource)
+	}
+}
+
 var scriptTypeIDMap = map[string]string{
 	"nm9bra8mzye2scg": "ct",
 	"lte524abgx960bd": "vm",
@@ -486,7 +501,7 @@ func (s *ScriptStatsStore) Rebuild(ctx context.Context, repoSource string) error
 	var filterParts []string
 	filterParts = append(filterParts, fmt.Sprintf("created >= '%s 00:00:00'", since))
 	if repoSource != "" {
-		filterParts = append(filterParts, fmt.Sprintf("repo_source = '%s'", repoSource))
+		filterParts = append(filterParts, pbRepoSourceFilter(repoSource))
 	}
 	filter := url.QueryEscape(strings.Join(filterParts, " && "))
 
@@ -543,7 +558,7 @@ func (s *ScriptStatsStore) Bootstrap(ctx context.Context, repoSource string) err
 
 	var filterParts []string
 	if repoSource != "" {
-		filterParts = append(filterParts, fmt.Sprintf("repo_source = '%s'", repoSource))
+		filterParts = append(filterParts, pbRepoSourceFilter(repoSource))
 	}
 	var filter string
 	if len(filterParts) > 0 {
@@ -591,7 +606,7 @@ func (s *ScriptStatsStore) IncrementalUpdate(ctx context.Context, repoSource str
 	var filterParts []string
 	filterParts = append(filterParts, fmt.Sprintf("created >= '%s 00:00:00'", lastDate))
 	if repoSource != "" {
-		filterParts = append(filterParts, fmt.Sprintf("repo_source = '%s'", repoSource))
+		filterParts = append(filterParts, pbRepoSourceFilter(repoSource))
 	}
 	filter := url.QueryEscape(strings.Join(filterParts, " && "))
 
@@ -823,7 +838,7 @@ func (p *PBClient) FetchScriptAnalysisData(ctx context.Context, days int, repoSo
 		filterParts = append(filterParts, fmt.Sprintf("created >= '%s'", since))
 	}
 	if repoSource != "" {
-		filterParts = append(filterParts, fmt.Sprintf("repo_source = '%s'", repoSource))
+		filterParts = append(filterParts, pbRepoSourceFilter(repoSource))
 	}
 
 	var filter string
@@ -1010,7 +1025,7 @@ func (p *PBClient) FetchErrorAnalysisData(ctx context.Context, days int, repoSou
 		filterParts = append(filterParts, fmt.Sprintf("created >= '%s'", since))
 	}
 	if repoSource != "" {
-		filterParts = append(filterParts, fmt.Sprintf("repo_source = '%s'", repoSource))
+		filterParts = append(filterParts, pbRepoSourceFilter(repoSource))
 	}
 
 	var filter string
@@ -1630,7 +1645,7 @@ func (p *PBClient) FetchDashboardData(ctx context.Context, days int, repoSource,
 
 	// Repo source filter
 	if repoSource != "" {
-		filterParts = append(filterParts, fmt.Sprintf("repo_source = '%s'", repoSource))
+		filterParts = append(filterParts, pbRepoSourceFilter(repoSource))
 	}
 
 	var filter string
