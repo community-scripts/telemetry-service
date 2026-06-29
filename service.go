@@ -168,6 +168,9 @@ type TelemetryStatusUpdate struct {
 	RAMSpeed        string `json:"ram_speed,omitempty"`
 	RepoSource      string `json:"repo_source,omitempty"`
 	RepoSlug        string `json:"repo_slug,omitempty"`
+
+	// Installation pipeline: JSON array [{s:"installing",t:"..."}, ...] built server-side
+	Pipeline string `json:"pipeline,omitempty"`
 }
 
 // Allowed values for 'repo_source' field
@@ -840,8 +843,8 @@ func deriveErrorCategory(code int, errText string) string {
 		return "command_not_found"
 	case containsAny(e, "timed out", "timeout"):
 		return "timeout"
-	case containsAny(e, "failed to start", "systemctl", "service unit"):
-		return "service"
+	case containsAny(e, "prisma", "migration.sql", "datasource", "sqlite database", "could not find the migration"):
+		return "database"
 	}
 	return "unknown"
 }
