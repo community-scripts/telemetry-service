@@ -37,11 +37,43 @@ function formatTimestamp(ts) {
   return new Date(ts).toLocaleDateString('en-US', { month: 'short', day: 'numeric', year: 'numeric', hour: 'numeric', minute: '2-digit', hour12: true });
 }
 
-async function fetchData() {
+function getActiveFilters() {
   const days = document.querySelector('.filter-btn.active')?.dataset.days || '1';
   const repo = document.querySelector('.source-btn.active')?.dataset.repo || 'ProxmoxVE';
+  const slug = document.getElementById('filterSlug')?.value || '';
+  return { days, repo, slug };
+}
+
+async function loadRepoSlugOptions() {
+  const select = document.getElementById('filterSlug');
+  if (!select) return;
+  const { days, repo, slug } = getActiveFilters();
   try {
-    const resp = await fetch('/api/errors?days=' + days + '&repo=' + repo);
+    const resp = await fetch('/api/repo-slugs?days=' + days + '&repo=' + encodeURIComponent(repo));
+    if (!resp.ok) return;
+    const data = await resp.json();
+    const slugs = data.repo_slugs || [];
+    const prev = slug;
+    select.innerHTML = '<option value="">All repositories</option>' +
+      slugs.map(s => '<option value="' + escapeAttr(s.slug) + '">' + escapeHtml(s.slug) + ' (' + s.count.toLocaleString() + ')</option>').join('');
+    if (prev && slugs.some(s => s.slug === prev)) {
+      select.value = prev;
+    }
+  } catch (e) {
+    console.log('Could not load repo slugs');
+  }
+}
+
+function onSlugFilterChange() {
+  refreshData();
+}
+
+async function fetchData() {
+  const { days, repo, slug } = getActiveFilters();
+  try {
+    let url = '/api/errors?days=' + days + '&repo=' + repo;
+    if (slug) url += '&slug=' + encodeURIComponent(slug);
+    const resp = await fetch(url);
     if (!resp.ok) throw new Error('Fetch failed');
     return await resp.json();
   } catch (e) {
@@ -308,6 +340,7 @@ async function runCleanup() {
 }
 
 async function refreshData() {
+  await loadRepoSlugOptions();
   const data = await fetchData();
   if (!data) return;
   currentData = data;
@@ -331,6 +364,8 @@ document.querySelectorAll('.source-btn').forEach(btn => {
   btn.addEventListener('click', function() {
     document.querySelectorAll('.source-btn').forEach(b => b.classList.remove('active'));
     this.classList.add('active');
+    const slugSelect = document.getElementById('filterSlug');
+    if (slugSelect) slugSelect.value = '';
     refreshData();
   });
 });

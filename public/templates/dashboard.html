@@ -74,6 +74,13 @@
             </div>
             <div class="filter-divider"></div>
             <div class="filter-group">
+                <label>Repository:</label>
+                <select id="filterSlug" class="filter-select" onchange="onSlugFilterChange()">
+                    <option value="">All repositories</option>
+                </select>
+            </div>
+            <div class="filter-divider"></div>
+            <div class="filter-group">
                 <label>Period:</label>
                 <div class="quickfilter">
                     <button class="filter-btn active" data-days="1">Today</button>
@@ -177,6 +184,17 @@
                     </div>
                 </div>
             </div>
+        </div>
+        
+        <!-- Repository fork breakdown (owner/repo) -->
+        <div class="section-card" id="repoSlugsSection" style="margin-bottom: 24px; display: none;">
+            <div class="section-header">
+                <div>
+                    <h2>Repository Forks</h2>
+                    <p>Installations grouped by owner/repo — click to filter.</p>
+                </div>
+            </div>
+            <div id="repoSlugsList" class="repo-slugs-grid"></div>
         </div>
         
         <!-- Top Applications Section -->
@@ -304,6 +322,7 @@
                             <th data-sort="exit_code" class="sortable">Exit Code</th>
                             <th data-sort="type" class="sortable">Type</th>
                             <th data-sort="nsapp" class="sortable">Application</th>
+                            <th>Repository</th>
                             <th data-sort="os_type" class="sortable">OS</th>
                             <th>Disk Size</th>
                             <th>Core Count</th>

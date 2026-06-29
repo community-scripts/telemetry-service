@@ -846,6 +846,27 @@ func deriveErrorCategory(code int, errText string) string {
 	return "unknown"
 }
 
+// parseRepoFilters reads repo_source (repo) and repo_slug (slug) query parameters.
+func parseRepoFilters(r *http.Request) (repoSource, repoSlug string) {
+	repoSource = r.URL.Query().Get("repo")
+	if repoSource == "" {
+		repoSource = "ProxmoxVE"
+	}
+	if repoSource == "all" {
+		repoSource = ""
+	}
+	repoSlug = strings.TrimSpace(r.URL.Query().Get("slug"))
+	return
+}
+
+func telemetryCacheKey(prefix string, days int, repoSource, repoSlug string) string {
+	key := fmt.Sprintf("%s:%d:%s", prefix, days, repoSource)
+	if repoSlug != "" {
+		key += ":" + repoSlug
+	}
+	return key
+}
+
 func sanitizeShort(s string, max int) string {
 	s = strings.TrimSpace(s)
 	if s == "" {
@@ -1361,7 +1382,7 @@ func main() {
 		ctx, cancel := context.WithTimeout(r.Context(), 5*time.Second)
 		defer cancel()
 
-		data, err := ch.FetchDashboardData(ctx, 1, "ProxmoxVE") // Last 24h, production only for metrics
+		data, err := ch.FetchDashboardData(ctx, 1, "ProxmoxVE", "") // Last 24h, production only for metrics
 		if err != nil {
 			http.Error(w, "failed to fetch metrics", http.StatusInternalServerError)
 			return
@@ -1402,22 +1423,15 @@ func main() {
 			}
 		}
 
-		// repo_source filter (default: ProxmoxVE)
-		repoSource := r.URL.Query().Get("repo")
-		if repoSource == "" {
-			repoSource = "ProxmoxVE"
-		}
-		// "all" means no filter
-		if repoSource == "all" {
-			repoSource = ""
-		}
+		// repo_source + optional repo_slug filter
+		repoSource, repoSlug := parseRepoFilters(r)
 
 		// Increase timeout for large datasets (dashboard aggregation takes time)
 		ctx, cancel := context.WithTimeout(r.Context(), 120*time.Second)
 		defer cancel()
 
 		// Try cache first (stale-while-revalidate)
-		cacheKey := fmt.Sprintf("dashboard:%d:%s", days, repoSource)
+		cacheKey := telemetryCacheKey("dashboard", days, repoSource, repoSlug)
 		var data *DashboardData
 		if cfg.CacheEnabled && cache.Get(ctx, cacheKey, &data) {
 			// Serve cached data immediately
@@ -1432,7 +1446,7 @@ func main() {
 						defer cache.FinishRefresh(cacheKey)
 						refreshCtx, cancel := context.WithTimeout(context.Background(), 120*time.Second)
 						defer cancel()
-						freshData, err := ch.FetchDashboardData(refreshCtx, days, repoSource)
+						freshData, err := ch.FetchDashboardData(refreshCtx, days, repoSource, repoSlug)
 						if err != nil {
 							log.Printf("[CACHE] background refresh failed for %s: %v", cacheKey, err)
 							return
@@ -1447,7 +1461,7 @@ func main() {
 			return
 		}
 
-		data, err := ch.FetchDashboardData(ctx, days, repoSource)
+		data, err := ch.FetchDashboardData(ctx, days, repoSource, repoSlug)
 		if err != nil {
 			log.Printf("dashboard fetch failed: %v", err)
 			http.Error(w, "failed to fetch data", http.StatusInternalServerError)
@@ -1490,13 +1504,7 @@ func main() {
 		osType := r.URL.Query().Get("os")
 		typeFilter := r.URL.Query().Get("type")
 		sort := r.URL.Query().Get("sort")
-		repoSource := r.URL.Query().Get("repo")
-		if repoSource == "" {
-			repoSource = "ProxmoxVE" // Default filter: production data
-		}
-		if repoSource == "all" {
-			repoSource = ""
-		}
+		repoSource, repoSlug := parseRepoFilters(r)
 
 		// Days filter for Installation Log (default: 1 = today)
 		days := 1
@@ -1529,7 +1537,7 @@ func main() {
 		ctx, cancel := context.WithTimeout(r.Context(), 10*time.Second)
 		defer cancel()
 
-		records, total, err := ch.FetchRecordsPaginated(ctx, page, limit, status, app, osType, typeFilter, sort, repoSource, days)
+		records, total, err := ch.FetchRecordsPaginated(ctx, page, limit, status, app, osType, typeFilter, sort, repoSource, repoSlug, days)
 		if err != nil {
 			log.Printf("records fetch failed: %v", err)
 			http.Error(w, "failed to fetch records", http.StatusInternalServerError)
@@ -1675,13 +1683,7 @@ func main() {
 			}
 		}
 
-		repoSource := r.URL.Query().Get("repo")
-		if repoSource == "" {
-			repoSource = "ProxmoxVE"
-		}
-		if repoSource == "all" {
-			repoSource = ""
-		}
+		repoSource, repoSlug := parseRepoFilters(r)
 
 		// Scale timeout by data volume
 		timeout := 120 * time.Second
@@ -1695,7 +1697,7 @@ func main() {
 		ctx, cancel := context.WithTimeout(r.Context(), timeout)
 		defer cancel()
 
-		cacheKey := fmt.Sprintf("errors:%d:%s", days, repoSource)
+		cacheKey := telemetryCacheKey("errors", days, repoSource, repoSlug)
 		var data *ErrorAnalysisData
 		if cfg.CacheEnabled && cache.Get(ctx, cacheKey, &data) {
 			w.Header().Set("Content-Type", "application/json")
@@ -1714,7 +1716,7 @@ func main() {
 						}
 						refreshCtx, cancel := context.WithTimeout(context.Background(), refreshTimeout)
 						defer cancel()
-						freshData, err := ch.FetchErrorAnalysisData(refreshCtx, days, repoSource)
+						freshData, err := ch.FetchErrorAnalysisData(refreshCtx, days, repoSource, repoSlug)
 						if err != nil {
 							log.Printf("[CACHE] background refresh failed for %s: %v", cacheKey, err)
 							return
@@ -1731,7 +1733,7 @@ func main() {
 			return
 		}
 
-		data, err := ch.FetchErrorAnalysisData(ctx, days, repoSource)
+		data, err := ch.FetchErrorAnalysisData(ctx, days, repoSource, repoSlug)
 		if err != nil {
 			log.Printf("error analysis fetch failed: %v", err)
 			http.Error(w, "failed to fetch error data", http.StatusInternalServerError)
@@ -1749,6 +1751,36 @@ func main() {
 		w.Header().Set("Content-Type", "application/json")
 		w.Header().Set("X-Cache", "MISS")
 		json.NewEncoder(w).Encode(data)
+	})
+
+	// Repository slug list for fork-specific filtering (owner/repo)
+	mux.HandleFunc("/api/repo-slugs", func(w http.ResponseWriter, r *http.Request) {
+		days := 30
+		if d := r.URL.Query().Get("days"); d != "" {
+			fmt.Sscanf(d, "%d", &days)
+			if days < 1 {
+				days = 1
+			}
+			if days > 365 {
+				days = 365
+			}
+		}
+		repoSource, _ := parseRepoFilters(r)
+
+		ctx, cancel := context.WithTimeout(r.Context(), 30*time.Second)
+		defer cancel()
+
+		slugs, err := ch.FetchRepoSlugs(ctx, days, repoSource)
+		if err != nil {
+			log.Printf("repo-slugs fetch failed: %v", err)
+			http.Error(w, "failed to fetch repo slugs", http.StatusInternalServerError)
+			return
+		}
+
+		w.Header().Set("Content-Type", "application/json")
+		json.NewEncoder(w).Encode(map[string]interface{}{
+			"repo_slugs": slugs,
+		})
 	})
 
 	// API: Get exit code descriptions (static reference data)
@@ -2341,7 +2373,7 @@ func warmupCaches(ch *CHClient, cache *Cache, cfg Config, todayOnly bool) {
 				cacheKey := fmt.Sprintf("dashboard:%d:%s", days, repo)
 				if cache.TryStartRefresh(cacheKey) {
 					ctx, cancel := context.WithTimeout(context.Background(), timeout)
-					data, err := ch.FetchDashboardData(ctx, days, repo)
+					data, err := ch.FetchDashboardData(ctx, days, repo, "")
 					cancel()
 					cache.FinishRefresh(cacheKey)
 					if err != nil {
@@ -2379,7 +2411,7 @@ func warmupCaches(ch *CHClient, cache *Cache, cfg Config, todayOnly bool) {
 				cacheKey := fmt.Sprintf("errors:%d:%s", days, repo)
 				if cache.TryStartRefresh(cacheKey) {
 					ctx, cancel := context.WithTimeout(context.Background(), timeout)
-					data, err := ch.FetchErrorAnalysisData(ctx, days, repo)
+					data, err := ch.FetchErrorAnalysisData(ctx, days, repo, "")
 					cancel()
 					cache.FinishRefresh(cacheKey)
 					if err != nil {
@@ -2420,7 +2452,7 @@ func warmupHeavyDashboard(ch *CHClient, cache *Cache, cfg Config) {
 			func() {
 				ctx, cancel := context.WithTimeout(context.Background(), timeout)
 				defer cancel()
-				data, err := ch.FetchDashboardData(ctx, days, repo)
+				data, err := ch.FetchDashboardData(ctx, days, repo, "")
 				if err != nil {
 					log.Printf("[CACHE] Heavy warmup dashboard:%d failed: %v", days, err)
 					failed++
@@ -2438,7 +2470,7 @@ func warmupHeavyDashboard(ch *CHClient, cache *Cache, cfg Config) {
 			func() {
 				ctx, cancel := context.WithTimeout(context.Background(), timeout)
 				defer cancel()
-				data, err := ch.FetchErrorAnalysisData(ctx, days, repo)
+				data, err := ch.FetchErrorAnalysisData(ctx, days, repo, "")
 				if err != nil {
 					log.Printf("[CACHE] Heavy warmup errors:%d failed: %v", days, err)
 					failed++

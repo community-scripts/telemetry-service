@@ -42,6 +42,13 @@
             </div>
             <div class="filter-divider"></div>
             <div class="filter-group">
+                <label>Repository:</label>
+                <select id="filterSlug" class="filter-select" onchange="onSlugFilterChange()">
+                    <option value="">All repositories</option>
+                </select>
+            </div>
+            <div class="filter-divider"></div>
+            <div class="filter-group">
                 <label>Period:</label>
                 <div class="quickfilter">
                     <button class="filter-btn active" data-days="1">Today</button>

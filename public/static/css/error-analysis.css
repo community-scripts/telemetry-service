@@ -724,3 +724,14 @@ textarea.form-input {
     padding: 16px;
   }
 }
+
+.filter-select {
+  background: var(--bg-tertiary);
+  color: var(--text-primary);
+  border: 1px solid var(--border-color);
+  border-radius: 8px;
+  padding: 8px 12px;
+  font-size: 13px;
+  min-width: 220px;
+  max-width: 320px;
+}

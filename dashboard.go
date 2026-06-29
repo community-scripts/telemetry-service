@@ -40,6 +40,7 @@ type DashboardData struct {
 	AvgInstallDuration float64         `json:"avg_install_duration"` // seconds
 	TotalTools         int             `json:"total_tools"`
 	TotalAddons        int             `json:"total_addons"`
+	RepoSlugs          []RepoSlugCount `json:"repo_slugs"`
 }
 
 type AppCount struct {
@@ -107,6 +108,11 @@ type ToolCount struct {
 
 type AddonCount struct {
 	Addon string `json:"addon"`
+	Count int    `json:"count"`
+}
+
+type RepoSlugCount struct {
+	Slug  string `json:"slug"`
 	Count int    `json:"count"`
 }
 
@@ -987,7 +993,7 @@ func (p *PBClient) FetchScriptAnalysisData(ctx context.Context, days int, repoSo
 }
 
 // FetchErrorAnalysisData retrieves detailed error analysis from PocketBase
-func (p *PBClient) FetchErrorAnalysisData(ctx context.Context, days int, repoSource string) (*ErrorAnalysisData, error) {
+func (p *PBClient) FetchErrorAnalysisData(ctx context.Context, days int, repoSource, repoSlug string) (*ErrorAnalysisData, error) {
 	if err := p.ensureAuth(ctx); err != nil {
 		return nil, err
 	}
@@ -1599,7 +1605,7 @@ func sortAppErrors(s []AppErrorDetail) {
 
 // FetchDashboardData retrieves aggregated data from PocketBase
 // repoSource filters by repo_source field ("ProxmoxVE", "ProxmoxVED", "external", or "" for all)
-func (p *PBClient) FetchDashboardData(ctx context.Context, days int, repoSource string) (*DashboardData, error) {
+func (p *PBClient) FetchDashboardData(ctx context.Context, days int, repoSource, repoSlug string) (*DashboardData, error) {
 	if err := p.ensureAuth(ctx); err != nil {
 		return nil, err
 	}

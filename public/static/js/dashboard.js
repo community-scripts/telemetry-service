@@ -8,6 +8,66 @@ let perPage = 25;
 let currentTheme = localStorage.getItem('theme') || 'dark';
 let currentSort = { field: 'created', dir: 'desc' };
 
+function getActiveFilters() {
+  const days = document.querySelector('.filter-btn.active')?.dataset.days || '1';
+  const repo = document.querySelector('.source-btn.active')?.dataset.repo || 'ProxmoxVE';
+  const slug = document.getElementById('filterSlug')?.value || '';
+  return { days, repo, slug };
+}
+
+function escapeAttr(str) {
+  if (!str) return '';
+  return str.replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/>/g, '&gt;').replace(/"/g, '&quot;').replace(/'/g, '&#39;');
+}
+
+async function loadRepoSlugOptions() {
+  const select = document.getElementById('filterSlug');
+  if (!select) return;
+  const { days, repo, slug } = getActiveFilters();
+  try {
+    const resp = await fetch('/api/repo-slugs?days=' + days + '&repo=' + encodeURIComponent(repo));
+    if (!resp.ok) return;
+    const data = await resp.json();
+    const slugs = data.repo_slugs || [];
+    const prev = slug;
+    select.innerHTML = '<option value="">All repositories</option>' +
+      slugs.map(s => '<option value="' + escapeAttr(s.slug) + '">' + escapeHtml(s.slug) + ' (' + s.count.toLocaleString() + ')</option>').join('');
+    if (prev && slugs.some(s => s.slug === prev)) {
+      select.value = prev;
+    }
+  } catch (e) {
+    console.log('Could not load repo slugs');
+  }
+}
+
+function onSlugFilterChange() {
+  refreshData();
+}
+
+function selectRepoSlug(slug) {
+  const select = document.getElementById('filterSlug');
+  if (select) {
+    select.value = slug;
+    refreshData();
+  }
+}
+
+function updateRepoSlugs(slugs) {
+  const section = document.getElementById('repoSlugsSection');
+  const list = document.getElementById('repoSlugsList');
+  if (!section || !list) return;
+  const activeSlug = document.getElementById('filterSlug')?.value || '';
+  if (!slugs || slugs.length <= 1 || activeSlug) {
+    section.style.display = 'none';
+    return;
+  }
+  section.style.display = 'block';
+  list.innerHTML = slugs.map(s =>
+    '<button type="button" class="repo-slug-chip" onclick="selectRepoSlug(\'' + escapeAttr(s.slug) + '\')">' +
+    escapeHtml(s.slug) + ' <span class="count">' + s.count.toLocaleString() + '</span></button>'
+  ).join('');
+}
+
 // Auto-refresh state
 let autoRefreshEnabled = localStorage.getItem('autoRefresh') === 'true';
 let autoRefreshInterval = 15000; // 15 seconds
@@ -97,9 +157,7 @@ const chartDefaults = {
 };
 
 async function fetchData() {
-  const activeBtn = document.querySelector('.filter-btn.active');
-  const days = activeBtn ? activeBtn.dataset.days : '1';
-  const repo = document.querySelector('.source-btn.active')?.dataset.repo || 'ProxmoxVE';
+  const { days, repo, slug } = getActiveFilters();
 
   // Show loading indicator
   document.getElementById('loadingIndicator').style.display = 'flex';
@@ -108,7 +166,9 @@ async function fetchData() {
   try {
     // Add cache-busting timestamp for filter changes to ensure fresh data
     const cacheBuster = '&_t=' + Date.now();
-    const response = await fetch('/api/dashboard?days=' + days + '&repo=' + repo + cacheBuster);
+    let url = '/api/dashboard?days=' + days + '&repo=' + repo + cacheBuster;
+    if (slug) url += '&slug=' + encodeURIComponent(slug);
+    const response = await fetch(url);
     if (!response.ok) throw new Error('Failed to fetch data');
 
     // Check cache status from header
@@ -176,6 +236,9 @@ function updateStats(data) {
 
   // Failed Apps
   updateFailedApps(data.failed_apps || []);
+
+  // Repository fork breakdown
+  updateRepoSlugs(data.repo_slugs || []);
 }
 
 function updateErrorAnalysis(errors) {
@@ -478,11 +541,10 @@ async function fetchPaginatedRecords() {
   const type = document.getElementById('filterType').value;
 
   try {
-    const activeBtn = document.querySelector('.filter-btn.active');
-    const days = activeBtn ? activeBtn.dataset.days : '1';
-    const repo = document.querySelector('.source-btn.active')?.dataset.repo || 'ProxmoxVE';
+    const { days, repo, slug } = getActiveFilters();
 
     let url = '/api/records?page=' + currentPage + '&limit=' + perPage + '&days=' + days + '&repo=' + encodeURIComponent(repo);
+    if (slug) url += '&slug=' + encodeURIComponent(slug);
     if (status) url += '&status=' + encodeURIComponent(status);
     if (app) url += '&app=' + encodeURIComponent(app);
     if (os) url += '&os=' + encodeURIComponent(os);
@@ -528,7 +590,7 @@ function renderTableRows(records) {
   currentRecords = records;
 
   if (records.length === 0) {
-    tbody.innerHTML = '<tr><td colspan="9"><div class="loading" style="padding: 40px;">No records found</div></td></tr>';
+    tbody.innerHTML = '<tr><td colspan="10"><div class="loading" style="padding: 40px;">No records found</div></td></tr>';
     return;
   }
 
@@ -540,6 +602,7 @@ function renderTableRows(records) {
     const ramSize = r.ram_size ? r.ram_size + 'MB' : '-';
     const created = r.created ? formatTimestamp(r.created) : '-';
     const osDisplay = r.os_type ? (r.os_type + (r.os_version ? ' ' + r.os_version : '')) : '-';
+    const repoDisplay = r.repo_slug || r.repo_source || '-';
 
     // Exit code column: show badge for failed, dash for success/running
     let exitCodeCell = '-';
@@ -554,6 +617,7 @@ function renderTableRows(records) {
       '<td>' + exitCodeCell + '</td>' +
       '<td><span class="type-badge ' + typeClass + '">' + escapeHtml((r.type || '-').toUpperCase()) + '</span></td>' +
       '<td><strong>' + escapeHtml(r.nsapp || '-') + '</strong></td>' +
+      '<td class="repo-slug-cell" title="' + escapeAttr(repoDisplay) + '">' + escapeHtml(repoDisplay) + '</td>' +
       '<td>' + escapeHtml(osDisplay) + '</td>' +
       '<td>' + diskSize + '</td>' +
       '<td style="text-align: center;">' + coreCount + '</td>' +
@@ -654,6 +718,8 @@ function showRecordDetail(index) {
   html += '<div class="detail-section">';
   html += '<div class="detail-section-header"><svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><circle cx="12" cy="12" r="10"/><polyline points="12 6 12 12 16 14"/></svg> Metadata</div>';
   html += '<div class="detail-grid">';
+  html += buildDetailItem('Repo Source', record.repo_source);
+  html += buildDetailItem('Repository', record.repo_slug);
   html += buildDetailItem('Random ID', record.random_id, 'mono');
   if (record.execution_id) {
     html += buildDetailItem('Execution ID', record.execution_id, 'mono');
@@ -720,10 +786,6 @@ function renderErrorSection(record) {
   }
 
   return html;
-}
-
-function escapeAttr(s) {
-  return s.replace(/&/g, '&amp;').replace(/"/g, '&quot;').replace(/</g, '&lt;').replace(/>/g, '&gt;');
 }
 
 function copyErrorTrace(btn) {
@@ -907,10 +969,11 @@ function exportCSV() {
     return;
   }
 
-  const headers = ['App', 'Status', 'OS Type', 'OS Version', 'Type', 'Method', 'Cores', 'RAM (MB)', 'Disk (GB)', 'Exit Code', 'Error', 'PVE Version'];
+  const headers = ['App', 'Status', 'Repository', 'OS Type', 'OS Version', 'Type', 'Method', 'Cores', 'RAM (MB)', 'Disk (GB)', 'Exit Code', 'Error', 'PVE Version'];
   const rows = allRecords.map(r => [
     r.nsapp || '',
     r.status || '',
+    r.repo_slug || r.repo_source || '',
     r.os_type || '',
     r.os_version || '',
     r.type || '',
@@ -981,6 +1044,7 @@ function closeHealthModal(event) {
 
 async function refreshData() {
   try {
+    await loadRepoSlugOptions();
     const data = await fetchData();
     updateStats(data);
     updateCharts(data);
@@ -1001,6 +1065,8 @@ document.querySelectorAll('.source-btn').forEach(btn => {
   btn.addEventListener('click', function() {
     document.querySelectorAll('.source-btn').forEach(b => b.classList.remove('active'));
     this.classList.add('active');
+    const slugSelect = document.getElementById('filterSlug');
+    if (slugSelect) slugSelect.value = '';
     refreshData();
   });
 });
