@@ -98,6 +98,7 @@ func (ch *CHClient) migrate() {
 			random_id        String,
 			execution_id     String,
 			repo_source      String,
+			repo_slug        String,
 			cpu_vendor       String,
 			cpu_model        String,
 			gpu_vendor       String,
@@ -242,6 +243,16 @@ func (ch *CHClient) migrate() {
 		}
 	}
 
+	// Additive column migrations for tables that predate the column (idempotent).
+	alters := []string{
+		`ALTER TABLE telemetry_db.telemetry ADD COLUMN IF NOT EXISTS repo_slug String`,
+	}
+	for _, s := range alters {
+		if _, err := ch.db.ExecContext(ctx, s); err != nil {
+			log.Printf("[CH-MIGRATE] alter: %v", err)
+		}
+	}
+
 	// Backfill materialized views from existing data if they're empty
 	var mvCount uint64
 	_ = ch.db.QueryRowContext(ctx, "SELECT count() FROM telemetry_db.mv_daily_stats").Scan(&mvCount)
@@ -327,7 +338,7 @@ func (ch *CHClient) InsertTelemetry(ctx context.Context, p TelemetryOut) error {
 		core_count, ct_type, disk_size, ram_size,
 		exit_code, error, error_category,
 		os_type, os_version, pve_version,
-		random_id, execution_id, repo_source,
+		random_id, execution_id, repo_source, repo_slug,
 		cpu_vendor, cpu_model,
 		gpu_vendor, gpu_model, gpu_passthrough,
 		ram_speed, install_duration
@@ -336,7 +347,7 @@ func (ch *CHClient) InsertTelemetry(ctx context.Context, p TelemetryOut) error {
 		?, ?, ?, ?,
 		?, ?, ?,
 		?, ?, ?,
-		?, ?, ?,
+		?, ?, ?, ?,
 		?, ?,
 		?, ?, ?,
 		?, ?
@@ -346,12 +357,26 @@ func (ch *CHClient) InsertTelemetry(ctx context.Context, p TelemetryOut) error {
 		uint8(p.CoreCount), uint8(p.CTType), uint32(p.DiskSize), uint32(p.RAMSize),
 		int16(p.ExitCode), p.Error, p.ErrorCategory,
 		p.OsType, p.OsVersion, p.PveVer,
-		p.RandomID, p.ExecutionID, p.RepoSource,
+		p.RandomID, p.ExecutionID, p.RepoSource, p.RepoSlug,
 		p.CPUVendor, p.CPUModel,
 		p.GPUVendor, p.GPUModel, p.GPUPassthrough,
 		p.RAMSpeed, uint32(p.InstallDuration),
 	)
 	return err
+}
+
+// HasTerminalExecutionID reports whether a terminal-status row already exists for
+// the given execution_id. Used by the write queue to deduplicate the multiple
+// failure reports a single bash execution can emit.
+func (ch *CHClient) HasTerminalExecutionID(ctx context.Context, eid string) (bool, error) {
+	if eid == "" {
+		return false, nil
+	}
+	var cnt uint64
+	err := ch.db.QueryRowContext(ctx,
+		"SELECT count() FROM telemetry_db.telemetry WHERE execution_id = ? AND status IN ('success','failed','aborted','unknown')", eid,
+	).Scan(&cnt)
+	return cnt > 0, err
 }
 
 func (ch *CHClient) HasExecutionID(ctx context.Context, eid string) (bool, error) {
@@ -429,7 +454,7 @@ func scanRecords(rows *sql.Rows) []TelemetryRecord {
 			&coreCount, &ctType, &diskSize, &ramSize,
 			&exitCode, &r.Error, &r.ErrorCategory,
 			&r.OsType, &r.OsVersion, &r.PveVer,
-			&r.RandomID, &r.ExecutionID, &r.RepoSource,
+			&r.RandomID, &r.ExecutionID, &r.RepoSource, &r.RepoSlug,
 			&r.CPUVendor, &r.CPUModel,
 			&r.GPUVendor, &r.GPUModel, &r.GPUPassthrough,
 			&r.RAMSpeed, &installDur,
@@ -455,7 +480,7 @@ const recordSelectCols = `nsapp, type, status, method,
 	core_count, ct_type, disk_size, ram_size,
 	exit_code, error, error_category,
 	os_type, os_version, pve_version,
-	random_id, execution_id, repo_source,
+	random_id, execution_id, repo_source, repo_slug,
 	cpu_vendor, cpu_model,
 	gpu_vendor, gpu_model, gpu_passthrough,
 	ram_speed, install_duration,

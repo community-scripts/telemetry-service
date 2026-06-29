@@ -112,6 +112,9 @@ type TelemetryIn struct {
 
 	// Repository source for collection routing
 	RepoSource string `json:"repo_source,omitempty"` // "ProxmoxVE", "ProxmoxVED", or "external"
+
+	// Dynamic repository slug "owner/repo" (e.g. "community-scripts/ProxmoxVE", "MickLesk/ProxmoxVE")
+	RepoSlug string `json:"repo_slug,omitempty"`
 }
 
 // TelemetryOut is the output shape for telemetry records
@@ -144,6 +147,9 @@ type TelemetryOut struct {
 
 	// Repository source: "ProxmoxVE", "ProxmoxVED", or "external"
 	RepoSource string `json:"repo_source,omitempty"`
+
+	// Dynamic repository slug "owner/repo"
+	RepoSlug string `json:"repo_slug,omitempty"`
 }
 
 // TelemetryStatusUpdate contains only fields needed for status updates
@@ -161,6 +167,7 @@ type TelemetryStatusUpdate struct {
 	CPUModel        string `json:"cpu_model,omitempty"`
 	RAMSpeed        string `json:"ram_speed,omitempty"`
 	RepoSource      string `json:"repo_source,omitempty"`
+	RepoSlug        string `json:"repo_slug,omitempty"`
 }
 
 // Allowed values for 'repo_source' field
@@ -252,9 +259,24 @@ func (wq *WriteQueue) worker(id int) {
 	}
 }
 
+// isTerminalStatus reports whether a status represents a final outcome of an execution.
+func isTerminalStatus(status string) bool {
+	switch status {
+	case "success", "failed", "aborted", "unknown":
+		return true
+	}
+	return false
+}
+
 // processItem performs the ClickHouse INSERT.
 // Every event is a new row in ClickHouse (append-only). There is no find+update â€” every event is a new row.
-// The stats MV only counts terminal statuses, so "installing" events don't inflate counts.
+//
+// Deduplication strategy (prevents the over-counting that inflates failure rates):
+//   - "installing": only the first event per execution_id is written.
+//   - terminal events (success/failed/aborted/unknown): only the FIRST terminal
+//     event per execution_id is written. The bash client legitimately reports the
+//     same failure multiple times (host trap + EXIT trap + container abort), so
+//     without this guard every failure was counted 2-4Ã—.
 func (wq *WriteQueue) processItem(ctx context.Context, item WriteItem) error {
 	payload := item.Payload
 
@@ -265,8 +287,26 @@ func (wq *WriteQueue) processItem(ctx context.Context, item WriteItem) error {
 		}
 	}
 
+	// Dedup: only the first terminal event per execution_id is persisted.
+	terminalMarked := false
+	if isTerminalStatus(payload.Status) && payload.ExecutionID != "" {
+		// Atomic check-and-set in memory (handles concurrent workers).
+		if !wq.index.MarkTerminalIfAbsent(payload.ExecutionID) {
+			return nil // a terminal event for this execution was already handled
+		}
+		terminalMarked = true
+		// In-memory miss: also check the DB (covers process restarts / multi-instance).
+		if has, err := wq.client.HasTerminalExecutionID(ctx, payload.ExecutionID); err == nil && has {
+			return nil // a terminal row already exists in ClickHouse â€” keep it marked
+		}
+	}
+
 	// INSERT into ClickHouse (all events â€” installing, configuring, success, failed, etc.)
 	if err := wq.client.InsertTelemetry(ctx, payload); err != nil {
+		// Roll back the terminal mark so a retry can still write the row.
+		if terminalMarked {
+			wq.index.UnmarkTerminal(payload.ExecutionID)
+		}
 		return err
 	}
 
@@ -286,7 +326,8 @@ func (wq *WriteQueue) processItem(ctx context.Context, item WriteItem) error {
 // Maps execution_id â†’ PB record_id to avoid repeated FindRecord calls.
 
 type ExecIndex struct {
-	m sync.Map
+	m        sync.Map // execution_id -> record_id (tracks active "installing" executions)
+	terminal sync.Map // execution_id -> time.Time (tracks executions that already got a terminal row)
 }
 
 func NewExecIndex() *ExecIndex {
@@ -309,6 +350,43 @@ func (idx *ExecIndex) Set(executionID, recordID string) {
 
 func (idx *ExecIndex) Delete(executionID string) {
 	idx.m.Delete(executionID)
+}
+
+// MarkTerminalIfAbsent atomically records that a terminal event for executionID
+// is being handled. It returns true if this caller is the first (i.e. the event
+// should be written) and false if a terminal event was already seen.
+func (idx *ExecIndex) MarkTerminalIfAbsent(executionID string) bool {
+	if executionID == "" {
+		return true
+	}
+	_, loaded := idx.terminal.LoadOrStore(executionID, time.Now())
+	return !loaded
+}
+
+// UnmarkTerminal removes a terminal mark (used to roll back after a failed write).
+func (idx *ExecIndex) UnmarkTerminal(executionID string) {
+	if executionID != "" {
+		idx.terminal.Delete(executionID)
+	}
+}
+
+// StartJanitor periodically evicts old terminal marks to bound memory usage.
+// Duplicate terminal events for one execution always arrive within seconds, so a
+// generous window is safe; anything older is covered by the ClickHouse fallback check.
+func (idx *ExecIndex) StartJanitor() {
+	go func() {
+		t := time.NewTicker(1 * time.Hour)
+		defer t.Stop()
+		for range t.C {
+			cutoff := time.Now().Add(-48 * time.Hour)
+			idx.terminal.Range(func(k, v interface{}) bool {
+				if ts, ok := v.(time.Time); ok && ts.Before(cutoff) {
+					idx.terminal.Delete(k)
+				}
+				return true
+			})
+		}
+	}()
 }
 
 // -------- Rate limiter (token bucket / minute window, simple) --------
@@ -726,6 +804,48 @@ func getExitCodeCategory(code int) string {
 	return "unknown"
 }
 
+func containsAny(haystack string, needles ...string) bool {
+	for _, n := range needles {
+		if strings.Contains(haystack, n) {
+			return true
+		}
+	}
+	return false
+}
+
+// deriveErrorCategory is the authoritative server-side error categorization.
+// It first trusts the exit code (single source of truth via exitCodeInfo). For
+// generic codes (1/2/exit-from-set-e) where the exit code says "unknown", it
+// inspects the error text for well-known root causes so that exit_code=1 failures
+// don't all collapse into the meaningless "unknown" bucket.
+func deriveErrorCategory(code int, errText string) string {
+	if cat := getExitCodeCategory(code); cat != "unknown" && cat != "" {
+		return cat
+	}
+	e := strings.ToLower(errText)
+	switch {
+	case containsAny(e, "out of memory", "oom-kill", "cannot allocate memory", "killed process", "memory exhausted"):
+		return "resource"
+	case containsAny(e, "no space left", "disk full", "quota exceeded", "write error"):
+		return "storage"
+	case containsAny(e, "could not resolve", "connection refused", "connection timed out", "network is unreachable",
+		"temporary failure in name resolution", "failed to connect", "tls handshake", "ssl certificate", "curl:", "wget:"):
+		return "network"
+	case containsAny(e, "permission denied", "operation not permitted", "eacces", "must be run as root"):
+		return "permission"
+	case containsAny(e, "unable to locate package", "broken packages", "unmet dependencies", "dpkg was interrupted",
+		"held broken packages", "e: package", "apt-get", "dpkg:"):
+		return "apt"
+	case containsAny(e, "command not found"):
+		return "command_not_found"
+	case containsAny(e, "timed out", "timeout"):
+		return "timeout"
+	case containsAny(e, "failed to start", "systemctl", "service unit"):
+		return "service"
+	}
+	return "unknown"
+}
+
 func sanitizeShort(s string, max int) string {
 	s = strings.TrimSpace(s)
 	if s == "" {
@@ -867,6 +987,7 @@ func rescueBrokenJSON(raw []byte) (TelemetryIn, error) {
 	in.Method = strField("method")
 	in.ErrorCategory = strField("error_category")
 	in.RepoSource = strField("repo_source")
+	in.RepoSlug = strField("repo_slug")
 	in.GPUVendor = strField("gpu_vendor")
 	in.GPUModel = strField("gpu_model")
 	in.GPUPassthrough = strField("gpu_passthrough")
@@ -961,8 +1082,22 @@ func validate(in *TelemetryIn) error {
 	in.RAMSpeed = sanitizeShort(in.RAMSpeed, 16)
 	in.ErrorCategory = strings.ToLower(sanitizeShort(in.ErrorCategory, 32))
 
-	// Sanitize repo_source (routing field)
+	// Sanitize repo_source (routing field) and repo_slug ("owner/repo")
 	in.RepoSource = sanitizeShort(in.RepoSource, 64)
+	in.RepoSlug = sanitizeShort(in.RepoSlug, 128)
+
+	// Safety net: derive repo_source from repo_slug when the routing field is
+	// missing, so older/partial clients still land in the right bucket.
+	if in.RepoSource == "" && in.RepoSlug != "" {
+		switch {
+		case strings.HasSuffix(in.RepoSlug, "/ProxmoxVE"):
+			in.RepoSource = "ProxmoxVE"
+		case strings.HasSuffix(in.RepoSlug, "/ProxmoxVED"):
+			in.RepoSource = "ProxmoxVED"
+		default:
+			in.RepoSource = "external"
+		}
+	}
 
 	// Default empty values to "unknown" for consistency
 	if in.GPUVendor == "" {
@@ -1143,6 +1278,7 @@ func main() {
 
 	// Write-ahead queue: decouples HTTP accept from CH writes
 	execIndex := NewExecIndex()
+	execIndex.StartJanitor()
 	writeQueue := NewWriteQueue(ch, envInt("WRITE_QUEUE_SIZE", 10000), envInt("WRITE_WORKERS", 4), execIndex)
 	writeQueue.Start()
 
@@ -1901,10 +2037,16 @@ func main() {
 			}
 		}
 
-		// Auto-categorize errors based on exit code when no category provided
-		if in.Status == "failed" && (in.ErrorCategory == "" || in.ErrorCategory == "unknown") {
-			if cat := getExitCodeCategory(in.ExitCode); cat != "unknown" {
-				in.ErrorCategory = cat
+		// Authoritative error categorization: the server is the single source of
+		// truth. When the server can confidently derive a category (from exit code
+		// or error text), it overrides whatever the client sent so that client/server
+		// mappings can never diverge. Only when the server is unsure do we keep the
+		// client's category (it may have had extra local context).
+		if in.Status == "failed" {
+			if serverCat := deriveErrorCategory(in.ExitCode, in.Error); serverCat != "unknown" && serverCat != "" {
+				in.ErrorCategory = serverCat
+			} else if in.ErrorCategory == "" {
+				in.ErrorCategory = "unknown"
 			}
 		}
 
@@ -1939,6 +2081,7 @@ func main() {
 			InstallDuration: in.InstallDuration,
 			ErrorCategory:   in.ErrorCategory,
 			RepoSource:      in.RepoSource,
+			RepoSlug:        in.RepoSlug,
 		}
 
 		// Enqueue for async PB write (decoupled from HTTP response)
