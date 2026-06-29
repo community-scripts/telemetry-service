@@ -1490,9 +1490,12 @@ func (ch *CHClient) FetchRecordsPaginated(ctx context.Context, page, limit int,
 	}
 
 	offset := (page - 1) * limit
+	// SELECT * in the CTE keeps the raw columns (incl. the DateTime `created`),
+	// so the outer recordSelectCols (which calls toString(created)) and the
+	// status/sort predicates all resolve against real columns.
 	q := fmt.Sprintf(`
 		WITH ranked AS (
-			SELECT %s,
+			SELECT *,
 				row_number() OVER (
 					PARTITION BY if(execution_id = '', random_id, execution_id)
 					ORDER BY %s
@@ -1503,7 +1506,7 @@ func (ch *CHClient) FetchRecordsPaginated(ctx context.Context, page, limit int,
 		SELECT %s FROM ranked WHERE %s
 		ORDER BY %s
 		LIMIT %d OFFSET %d`,
-		recordSelectCols, statusRankOrderSQL, baseWhere, recordSelectCols, latestWhere, sort, limit, offset)
+		statusRankOrderSQL, baseWhere, recordSelectCols, latestWhere, sort, limit, offset)
 
 	fetchArgs := append(append([]interface{}{}, baseArgs...), outerArgs...)
 	rows, err := ch.db.QueryContext(ctx, q, fetchArgs...)
