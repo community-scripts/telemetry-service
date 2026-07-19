@@ -612,13 +612,15 @@ function renderTableRows(records) {
       exitCodeCell = '<span class="exit-code-badge aborted">' + r.exit_code + '</span>';
     }
 
-    const armBadge = r.has_arm ? ' <span class="arm-badge" title="Installed on ARM64 hardware">ARM</span>' : '';
+    const archBadge = r.has_arm
+      ? '<span class="arm-badge" title="Installiert auf ARM64-Hardware">ARM64</span>'
+      : '<span class="arch-badge" title="Installiert auf amd64/x86_64-Hardware">amd64</span>';
 
     return '<tr class="clickable-row' + (r.has_arm ? ' arm-row' : '') + '" onclick="showRecordDetail(' + index + ')">' +
       '<td><span class="status-badge ' + statusClass + '">' + escapeHtml(r.status || 'unknown') + '</span></td>' +
       '<td>' + exitCodeCell + '</td>' +
       '<td><span class="type-badge ' + typeClass + '">' + escapeHtml((r.type || '-').toUpperCase()) + '</span></td>' +
-      '<td><strong>' + escapeHtml(r.nsapp || '-') + '</strong>' + armBadge + '</td>' +
+      '<td><strong>' + escapeHtml(r.nsapp || '-') + '</strong> ' + archBadge + '</td>' +
       '<td class="repo-slug-cell" title="' + escapeAttr(repoDisplay) + '">' + escapeHtml(repoDisplay) + '</td>' +
       '<td>' + escapeHtml(osDisplay) + '</td>' +
       '<td>' + diskSize + '</td>' +
@@ -699,7 +701,9 @@ function showRecordDetail(index) {
   html += buildDetailItem('OS Type', record.os_type);
   html += buildDetailItem('OS Version', record.os_version);
   html += buildDetailItem('PVE Version', record.pve_version);
-  html += buildDetailItem('Architecture', record.has_arm ? 'ARM64' : 'amd64');
+  html += buildDetailItem('Architecture', record.has_arm
+    ? '<span class="arm-badge">ARM64</span>'
+    : '<span class="arch-badge">amd64</span>', null, true);
   html += '</div></div>';
 
   // ── Hardware Section ──
@@ -801,12 +805,13 @@ function copyErrorTrace(btn) {
   });
 }
 
-function buildDetailItem(label, value, extraClass) {
+function buildDetailItem(label, value, extraClass, allowHtml) {
   if (value === null || value === undefined || value === '') {
     return '<div class="detail-item"><div class="label">' + escapeHtml(label) + '</div><div class="value" style="color: var(--text-secondary);">—</div></div>';
   }
   const valueClass = extraClass ? 'value ' + extraClass : 'value';
-  return '<div class="detail-item"><div class="label">' + escapeHtml(label) + '</div><div class="' + valueClass + '">' + escapeHtml(String(value)) + '</div></div>';
+  const rendered = allowHtml ? String(value) : escapeHtml(String(value));
+  return '<div class="detail-item"><div class="label">' + escapeHtml(label) + '</div><div class="' + valueClass + '">' + rendered + '</div></div>';
 }
 
 // renderPipeline renders the installation pipeline as a visual step indicator.
