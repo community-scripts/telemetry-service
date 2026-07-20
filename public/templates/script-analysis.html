@@ -5,7 +5,8 @@
     <meta name="viewport" content="width=device-width, initial-scale=1.0">
     <title>Script Analysis - Proxmox VE Helper-Scripts</title>
     <link rel="icon" type="image/png" href="/static/img/logo.png">
-    <link rel="stylesheet" href="/static/css/script-analysis.css">
+    <script src="https://cdn.jsdelivr.net/npm/chart.js"></script>
+    <link rel="stylesheet" href="/static/css/script-analysis.css?v=3">
 </head>
 <body>
     <nav class="navbar">
@@ -164,6 +165,19 @@
         </div>
     </div>
 
-    <script src="/static/js/script-analysis.js"></script>
+    <!-- Script Detail Modal (per-script daily drill-down) -->
+    <div class="modal-overlay" id="scriptDetailModal" onclick="if(event.target===this)closeScriptDetail()">
+        <div class="modal-content script-detail-modal" onclick="event.stopPropagation()">
+            <div class="modal-header">
+                <h2 id="scriptDetailTitle">Script Details</h2>
+                <button class="modal-close" onclick="closeScriptDetail()">&times;</button>
+            </div>
+            <div class="modal-body" id="scriptDetailBody">
+                <div class="loading">Loading...</div>
+            </div>
+        </div>
+    </div>
+
+    <script src="/static/js/script-analysis.js?v=3"></script>
 </body>
 </html>

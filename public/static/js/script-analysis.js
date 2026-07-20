@@ -68,7 +68,7 @@ function renderTopTable() {
     const pctInstalling = total > 0 ? (s.installing / total * 100) : 0;
     const ipd = (s.installs_per_day || 0).toFixed(2);
     const ipdColor = s.installs_per_day >= 10 ? 'var(--accent-green)' : s.installs_per_day >= 1 ? 'var(--accent-cyan)' : 'var(--text-muted)';
-    return '<tr>' +
+    return '<tr' + scriptRowAttrs(s.app) + '>' +
       '<td style="color:var(--text-muted);font-weight:600;">' + (idx + 1) + '</td>' +
       '<td><strong>' + escapeHtml(s.app) + '</strong></td>' +
       '<td><span class="type-badge ' + typeClass + '">' + (s.type || '-').toUpperCase() + '</span></td>' +
@@ -117,7 +117,7 @@ function renderBottomTable() {
     const pctInstalling = total > 0 ? (s.installing / total * 100) : 0;
     const ipd = (s.installs_per_day || 0).toFixed(2);
     const ipdColor = s.installs_per_day >= 10 ? 'var(--accent-green)' : s.installs_per_day >= 1 ? 'var(--accent-cyan)' : 'var(--text-muted)';
-    return '<tr>' +
+    return '<tr' + scriptRowAttrs(s.app) + '>' +
       '<td style="color:var(--text-muted);font-weight:600;">' + (totalScripts - idx) + '</td>' +
       '<td><strong>' + escapeHtml(s.app) + '</strong></td>' +
       '<td><span class="type-badge ' + typeClass + '">' + (s.type || '-').toUpperCase() + '</span></td>' +
@@ -174,6 +174,150 @@ function renderRecentTable() {
 
   document.getElementById('expandRecentBtn').textContent = expandRecent ? 'Show Last 10' : 'Show All (' + scripts.length + ')';
 }
+
+// ── Per-script drill-down (daily chart + errors + recent installs) ──
+let detailChart = null;
+
+function scriptRowAttrs(app) {
+  return ' class="clickable-row" style="cursor:pointer;" onclick="openScriptDetail(\'' + escapeHtml(app).replace(/'/g, "\\'") + '\')"';
+}
+
+async function openScriptDetail(app) {
+  const modal = document.getElementById('scriptDetailModal');
+  const body = document.getElementById('scriptDetailBody');
+  document.getElementById('scriptDetailTitle').textContent = app;
+  body.innerHTML = '<div class="loading" style="padding:40px;text-align:center;color:var(--text-muted);">Loading ' + escapeHtml(app) + '…</div>';
+  modal.classList.add('active');
+
+  // Drill-down window: per-day analysis needs a real range.
+  // Today → 30d, All Time → 90d, otherwise the page period.
+  const pageDays = parseInt(document.querySelector('.filter-btn.active')?.dataset.days || '30', 10);
+  const days = pageDays === 0 ? 90 : (pageDays < 7 ? 30 : pageDays);
+  const repo = document.querySelector('.source-btn.active')?.dataset.repo || 'all';
+  const platform = document.querySelector('.platform-btn.active')?.dataset.platform || '';
+
+  try {
+    let url = '/api/script-detail?app=' + encodeURIComponent(app) + '&days=' + days + '&repo=' + encodeURIComponent(repo);
+    if (platform) url += '&platform=' + encodeURIComponent(platform);
+    const resp = await fetch(url);
+    if (!resp.ok) throw new Error('HTTP ' + resp.status);
+    renderScriptDetail(await resp.json(), days);
+  } catch (e) {
+    body.innerHTML = '<div style="padding:24px;color:var(--accent-red);">Failed to load: ' + escapeHtml(e.message) + '</div>';
+  }
+}
+
+function closeScriptDetail() {
+  document.getElementById('scriptDetailModal').classList.remove('active');
+  if (detailChart) { detailChart.destroy(); detailChart = null; }
+}
+
+function renderScriptDetail(d, days) {
+  const body = document.getElementById('scriptDetailBody');
+  const rate = (d.success_rate || 0).toFixed(1);
+  const rateColor = d.success_rate >= 90 ? 'var(--accent-green)' : d.success_rate >= 70 ? 'var(--accent-yellow)' : 'var(--accent-red)';
+  const avgDur = d.avg_duration ? Math.round(d.avg_duration) : 0;
+  const avgDurStr = avgDur ? (avgDur < 60 ? avgDur + 's' : Math.floor(avgDur / 60) + 'm ' + (avgDur % 60) + 's') : '—';
+
+  let html = '';
+
+  // Summary chips
+  html += '<div class="sd-chips">';
+  html += '<span class="type-badge ' + (d.type || '').toLowerCase() + '">' + (d.type || '-').toUpperCase() + '</span>';
+  html += '<div class="sd-chip"><span class="sd-label">Installs (' + days + 'd)</span><strong>' + (d.total || 0).toLocaleString() + '</strong></div>';
+  html += '<div class="sd-chip"><span class="sd-label">Success Rate</span><strong style="color:' + rateColor + ';">' + rate + '%</strong></div>';
+  html += '<div class="sd-chip"><span class="sd-label">Failed</span><strong style="color:var(--accent-red);">' + (d.failed || 0).toLocaleString() + '</strong></div>';
+  html += '<div class="sd-chip"><span class="sd-label">Aborted</span><strong style="color:var(--accent-purple);">' + (d.aborted || 0).toLocaleString() + '</strong></div>';
+  html += '<div class="sd-chip"><span class="sd-label">Ø Duration</span><strong>' + avgDurStr + '</strong></div>';
+  (d.platform_stats || []).forEach(p => {
+    if (p.platform !== 'unknown') {
+      html += '<div class="sd-chip">' + platformBadge(p.platform) + '<strong>' + p.count.toLocaleString() + '</strong></div>';
+    }
+  });
+  html += '</div>';
+
+  // Daily chart
+  html += '<div class="sd-section"><h3>Installations per Day</h3><div style="height:220px;"><canvas id="sdDailyChart"></canvas></div></div>';
+
+  // Two-column: exit codes + OS
+  html += '<div class="sd-grid">';
+  html += '<div class="sd-section"><h3>Top Exit Codes</h3>';
+  if (d.exit_codes && d.exit_codes.length) {
+    html += '<table class="sd-table"><thead><tr><th>Code</th><th>Description</th><th>Count</th></tr></thead><tbody>';
+    d.exit_codes.forEach(ec => {
+      html += '<tr><td><span class="exit-code err">' + ec.exit_code + '</span></td><td>' + escapeHtml(ec.description) + '</td><td><strong>' + ec.count + '</strong></td></tr>';
+    });
+    html += '</tbody></table>';
+  } else {
+    html += '<div class="sd-empty">No failures in this period 🎉</div>';
+  }
+  html += '</div>';
+  html += '<div class="sd-section"><h3>OS Distribution</h3>';
+  if (d.os_distribution && d.os_distribution.length) {
+    const osMax = Math.max(...d.os_distribution.map(o => o.count));
+    d.os_distribution.forEach(o => {
+      const w = (o.count / osMax * 100).toFixed(0);
+      html += '<div class="sd-bar-row"><span class="sd-bar-label">' + escapeHtml(o.os) + '</span>' +
+        '<div class="sd-bar"><div class="sd-bar-fill" style="width:' + w + '%"></div></div>' +
+        '<span class="sd-bar-count">' + o.count.toLocaleString() + '</span></div>';
+    });
+  } else {
+    html += '<div class="sd-empty">No OS data</div>';
+  }
+  html += '</div></div>';
+
+  // Recent installations
+  html += '<div class="sd-section"><h3>Recent Installations</h3>';
+  if (d.recent && d.recent.length) {
+    html += '<table class="sd-table"><thead><tr><th>Status</th><th>Platform</th><th>Exit</th><th>OS</th><th>Duration</th><th>Time</th></tr></thead><tbody>';
+    d.recent.forEach(r => {
+      const dur = r.install_duration ? (r.install_duration < 60 ? r.install_duration + 's' : Math.floor(r.install_duration / 60) + 'm') : '-';
+      const os = r.os_type ? r.os_type + (r.os_version ? ' ' + r.os_version : '') : '-';
+      html += '<tr>' +
+        '<td><span class="status-badge ' + (r.status || 'unknown') + '">' + escapeHtml(r.status) + '</span></td>' +
+        '<td>' + platformBadge(r.platform) + '</td>' +
+        '<td>' + (r.exit_code ? '<span class="exit-code err">' + r.exit_code + '</span>' : '<span class="exit-code ok">0</span>') + '</td>' +
+        '<td>' + escapeHtml(os) + '</td>' +
+        '<td>' + dur + '</td>' +
+        '<td style="white-space:nowrap;">' + formatTimestamp(r.created) + '</td>' +
+        '</tr>';
+    });
+    html += '</tbody></table>';
+  } else {
+    html += '<div class="sd-empty">No installations in this period</div>';
+  }
+  html += '</div>';
+
+  body.innerHTML = html;
+
+  // Render the stacked daily chart
+  const daily = d.daily || [];
+  if (detailChart) detailChart.destroy();
+  if (typeof Chart !== 'undefined' && daily.length) {
+    detailChart = new Chart(document.getElementById('sdDailyChart'), {
+      type: 'bar',
+      data: {
+        labels: daily.map(x => x.date.slice(5)),
+        datasets: [
+          { label: 'Success', data: daily.map(x => x.success), backgroundColor: '#22c55e', stack: 's' },
+          { label: 'Failed', data: daily.map(x => x.failed), backgroundColor: '#ef4444', stack: 's' },
+          { label: 'Aborted', data: daily.map(x => x.aborted), backgroundColor: '#a855f7', stack: 's' }
+        ]
+      },
+      options: {
+        responsive: true,
+        maintainAspectRatio: false,
+        plugins: { legend: { labels: { color: '#8b949e', usePointStyle: true } } },
+        scales: {
+          x: { stacked: true, ticks: { color: '#8b949e', maxRotation: 45 }, grid: { display: false } },
+          y: { stacked: true, beginAtZero: true, ticks: { color: '#8b949e', precision: 0 }, grid: { color: '#2d3748' } }
+        }
+      }
+    });
+  }
+}
+
+document.addEventListener('keydown', e => { if (e.key === 'Escape') closeScriptDetail(); });
 
 function toggleExpand(which) {
   if (which === 'top') {

@@ -1313,6 +1313,9 @@ func serveHTMLFile(w http.ResponseWriter, r *http.Request, filePath string) {
 		log.Printf("Error reading embedded file %s: %v", filePath, err)
 		return
 	}
+	// HTML must never be served stale: it carries the versioned asset links
+	// (?v=N) that bust CSS/JS caches after a deploy.
+	w.Header().Set("Cache-Control", "no-cache, must-revalidate")
 	w.Header().Set("Content-Type", "text/html; charset=utf-8")
 	w.Header().Set("Cache-Control", "no-cache, no-store, must-revalidate")
 	_, _ = w.Write(content)
@@ -1754,6 +1757,55 @@ func main() {
 		json.NewEncoder(w).Encode(data)
 	})
 
+	// Per-script drill-down: daily series, exit codes, OS/platform, recent installs
+	mux.HandleFunc("/api/script-detail", func(w http.ResponseWriter, r *http.Request) {
+		app := strings.TrimSpace(r.URL.Query().Get("app"))
+		if app == "" {
+			http.Error(w, "missing app parameter", http.StatusBadRequest)
+			return
+		}
+
+		days := 30
+		if d := r.URL.Query().Get("days"); d != "" {
+			fmt.Sscanf(d, "%d", &days)
+			if days < 1 {
+				days = 1
+			}
+			if days > 365 {
+				days = 365
+			}
+		}
+		repoSource, _ := parseRepoFilters(r)
+		platform := parsePlatform(r)
+
+		ctx, cancel := context.WithTimeout(r.Context(), 60*time.Second)
+		defer cancel()
+
+		cacheKey := fmt.Sprintf("scriptdetail:%s:%d:%s:p=%s", app, days, repoSource, platform)
+		var data *ScriptDetailData
+		if cfg.CacheEnabled && cache.Get(ctx, cacheKey, &data) {
+			w.Header().Set("Content-Type", "application/json")
+			w.Header().Set("X-Cache", "HIT")
+			json.NewEncoder(w).Encode(data)
+			return
+		}
+
+		data, err := ch.FetchScriptDetail(ctx, app, days, repoSource, platform)
+		if err != nil {
+			log.Printf("script detail fetch failed (app=%s): %v", app, err)
+			http.Error(w, "failed to fetch script detail", http.StatusInternalServerError)
+			return
+		}
+
+		if cfg.CacheEnabled {
+			_ = cache.Set(ctx, cacheKey, data, 2*time.Minute)
+		}
+
+		w.Header().Set("Content-Type", "application/json")
+		w.Header().Set("X-Cache", "MISS")
+		json.NewEncoder(w).Encode(data)
+	})
+
 	// Error Analysis API - detailed error data
 	mux.HandleFunc("/api/errors", func(w http.ResponseWriter, r *http.Request) {
 		days := 7
@@ -1879,13 +1931,25 @@ func main() {
 		json.NewEncoder(w).Encode(descs)
 	})
 
-	// Serve static files from the /public/static directory
-	// Serve embedded static files
+	// Serve static files from the /public/static directory.
+	// Short client cache + revalidation: templates reference assets with a
+	// version query (?v=N), so bumping the version busts stale browser caches
+	// after a deploy (previously users kept old CSS/JS indefinitely).
 	staticFS, err := fs.Sub(publicFS, "public/static")
 	if err != nil {
 		log.Fatalf("Failed to create static FS: %v", err)
 	}
-	mux.Handle("/static/", http.StripPrefix("/static/", http.FileServer(http.FS(staticFS))))
+	staticHandler := http.StripPrefix("/static/", http.FileServer(http.FS(staticFS)))
+	mux.Handle("/static/", http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.URL.Query().Get("v") != "" {
+			// Versioned asset: cache aggressively, version change busts it
+			w.Header().Set("Cache-Control", "public, max-age=86400, immutable")
+		} else {
+			// Unversioned: force revalidation so deploys reach browsers
+			w.Header().Set("Cache-Control", "no-cache, must-revalidate")
+		}
+		staticHandler.ServeHTTP(w, r)
+	}))
 
 	// Cleanup trigger & status API
 	mux.HandleFunc("/api/cleanup/status", func(w http.ResponseWriter, r *http.Request) {

@@ -238,6 +238,37 @@ type TelemetryRecord struct {
 }
 
 // ========================================================
+// Per-Script Detail (daily drill-down)
+// ========================================================
+
+// ScriptDetailData is the per-script drill-down: daily series, error
+// breakdown, OS/platform distribution, and recent installations.
+type ScriptDetailData struct {
+	App            string            `json:"app"`
+	Type           string            `json:"type"`
+	Total          int               `json:"total"`
+	Success        int               `json:"success"`
+	Failed         int               `json:"failed"`
+	Aborted        int               `json:"aborted"`
+	SuccessRate    float64           `json:"success_rate"`
+	AvgDuration    float64           `json:"avg_duration"` // seconds, successful installs
+	Daily          []ScriptDailyStat `json:"daily"`
+	ExitCodes      []ExitCodeStat    `json:"exit_codes"`
+	OsDistribution []OsCount         `json:"os_distribution"`
+	PlatformStats  []PlatformCount   `json:"platform_stats"`
+	Recent         []TelemetryRecord `json:"recent"`
+}
+
+// ScriptDailyStat is one day of installs for a single script.
+type ScriptDailyStat struct {
+	Date    string `json:"date"`
+	Total   int    `json:"total"`
+	Success int    `json:"success"`
+	Failed  int    `json:"failed"`
+	Aborted int    `json:"aborted"`
+}
+
+// ========================================================
 // Aggregation helpers (used by the ClickHouse dashboard build)
 // ========================================================
 
