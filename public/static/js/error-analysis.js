@@ -39,9 +39,26 @@ function formatTimestamp(ts) {
 
 function getActiveFilters() {
   const days = document.querySelector('.filter-btn.active')?.dataset.days || '1';
-  const repo = document.querySelector('.source-btn.active')?.dataset.repo || 'ProxmoxVE';
+  // Default: ALL sources
+  const repo = document.querySelector('.source-btn.active')?.dataset.repo || 'all';
+  const platform = document.querySelector('.platform-btn.active')?.dataset.platform || '';
   const slug = document.getElementById('filterSlug')?.value || '';
-  return { days, repo, slug };
+  return { days, repo, platform, slug };
+}
+
+function platformBadge(p) {
+  if (p === 'incus') return '<span class="platform-badge incus" title="Incus host">INCUS</span>';
+  if (p === 'pve') return '<span class="platform-badge pve" title="Proxmox VE host">PVE</span>';
+  return '<span class="platform-badge unknown">—</span>';
+}
+
+function formatDuration(seconds) {
+  if (!seconds) return '-';
+  if (seconds < 60) return seconds + 's';
+  const mins = Math.floor(seconds / 60);
+  const secs = seconds % 60;
+  if (mins < 60) return mins + 'm ' + secs + 's';
+  return Math.floor(mins / 60) + 'h ' + (mins % 60) + 'm';
 }
 
 async function loadRepoSlugOptions() {
@@ -69,9 +86,10 @@ function onSlugFilterChange() {
 }
 
 async function fetchData() {
-  const { days, repo, slug } = getActiveFilters();
+  const { days, repo, platform, slug } = getActiveFilters();
   try {
     let url = '/api/errors?days=' + days + '&repo=' + repo;
+    if (platform) url += '&platform=' + encodeURIComponent(platform);
     if (slug) url += '&slug=' + encodeURIComponent(slug);
     const resp = await fetch(url);
     if (!resp.ok) throw new Error('Fetch failed');
@@ -175,10 +193,59 @@ function filterAppTable() {
   }).join('');
 }
 
+// ── Recent Error Log: filterable table + detail modal ──
+let allRecentErrors = [];
+
 function updateRecentErrors(errors) {
+  allRecentErrors = errors || [];
+  filterRecentTable();
+}
+
+// parseErrorText splits the structured error format into {header, trace}.
+// Formats: "exit_code=N | desc | at line L: cmd\n---\n<trace>"  (host, v3)
+//          "exit_code=N | desc|---|line1|line2|..."             (legacy container)
+function parseErrorText(raw) {
+  raw = raw || '';
+  let header = '', trace = '';
+  const nlIdx = raw.indexOf('\n---\n');
+  if (nlIdx !== -1) {
+    header = raw.substring(0, nlIdx).trim();
+    trace = raw.substring(nlIdx + 5).trim();
+  } else {
+    const pipeIdx = raw.indexOf('|---|');
+    if (pipeIdx !== -1) {
+      header = raw.substring(0, pipeIdx).trim();
+      trace = raw.substring(pipeIdx + 5).replace(/\|/g, '\n').trim();
+    } else if (raw.indexOf('\n') !== -1) {
+      header = raw.substring(0, raw.indexOf('\n')).trim();
+      trace = raw.substring(raw.indexOf('\n') + 1).trim();
+    } else {
+      header = raw.trim();
+    }
+  }
+  return { header: header, trace: trace };
+}
+
+// errorSummary extracts the human-readable part of the header:
+// "exit_code=1 | General error | at line 42: npm run build" → "General error — at line 42: npm run build"
+function errorSummary(raw) {
+  const parsed = parseErrorText(raw);
+  if (!parsed.header) return '-';
+  const parts = parsed.header.split('|').map(function(s) { return s.trim(); });
+  // Drop the leading "exit_code=N" (the table already has an Exit Code column)
+  if (parts.length > 1 && /^exit_code=\d+$/.test(parts[0])) parts.shift();
+  return parts.join(' — ');
+}
+
+function filterRecentTable() {
+  const filter = (document.getElementById('recentFilter')?.value || '').toLowerCase();
+  const errors = filter
+    ? allRecentErrors.filter(e => (e.nsapp || '').toLowerCase().includes(filter) || (e.error || '').toLowerCase().includes(filter))
+    : allRecentErrors;
+
   const tbody = document.getElementById('recentErrorTable');
   if (!errors || errors.length === 0) {
-    tbody.innerHTML = '<tr><td colspan="9" style="text-align:center;color:var(--text-muted);padding:24px;">No recent errors</td></tr>';
+    tbody.innerHTML = '<tr><td colspan="11" style="text-align:center;color:var(--text-muted);padding:24px;">No recent errors</td></tr>';
     return;
   }
   tbody.innerHTML = errors.map((e, idx) => {
@@ -187,25 +254,80 @@ function updateRecentErrors(errors) {
     const codeClass = e.exit_code === 0 ? 'ok' : 'err';
     const catClass = (e.error_category || 'unknown').replace(/ /g, '_');
     const os = e.os_type ? e.os_type + (e.os_version ? ' ' + e.os_version : '') : '-';
-    const errorId = 'err-recent-' + idx;
-    const shortError = escapeHtml((e.error || '-').substring(0, 120));
-    const fullError = escapeHtml(e.error || '-');
-    const isLong = (e.error || '').length > 120;
-    return '<tr>' +
+    const summary = errorSummary(e.error);
+    const origIdx = allRecentErrors.indexOf(e);
+    return '<tr class="clickable-row" onclick="showErrorDetail(' + origIdx + ')" style="cursor:pointer;">' +
       '<td><span class="status-badge ' + statusClass + '">' + escapeHtml(e.status) + '</span></td>' +
+      '<td>' + platformBadge(e.platform) + '</td>' +
       '<td><span class="type-badge ' + typeClass + '">' + (e.type || '-').toUpperCase() + '</span></td>' +
       '<td><strong>' + escapeHtml(e.nsapp) + '</strong></td>' +
       '<td><span class="exit-code ' + codeClass + '">' + e.exit_code + '</span></td>' +
       '<td><span class="category-badge ' + catClass + '">' + escapeHtml(e.error_category || 'unknown') + '</span></td>' +
-      '<td class="error-text">' +
-      '<div id="' + errorId + '-short">' + shortError + (isLong ? ' <a href="#" onclick="toggleError(\'' + errorId + '\');return false;" style="color:var(--accent-blue);font-size:11px;">show more</a>' : '') + '</div>' +
-      (isLong ? '<div id="' + errorId + '-full" style="display:none;white-space:pre-wrap;word-break:break-all;max-height:600px;overflow-y:auto;">' + fullError + ' <a href="#" onclick="toggleError(\'' + errorId + '\');return false;" style="color:var(--accent-blue);font-size:11px;">show less</a></div>' : '') +
-      '</td>' +
+      '<td class="error-text" style="max-width:340px;overflow:hidden;text-overflow:ellipsis;white-space:nowrap;" title="' + escapeAttr(summary) + '">' + escapeHtml(summary) + '</td>' +
       '<td>' + escapeHtml(os) + '</td>' +
+      '<td>' + formatDuration(e.install_duration) + '</td>' +
       '<td style="white-space:nowrap;">' + formatTimestamp(e.created) + '</td>' +
-      '<td><button class="btn issue-btn" data-app="' + escapeAttr(e.nsapp) + '" data-exit="' + e.exit_code + '" data-error="' + escapeAttr(e.error || '') + '" data-rate="0">🐛</button></td>' +
+      '<td onclick="event.stopPropagation()"><button class="btn issue-btn" data-app="' + escapeAttr(e.nsapp) + '" data-exit="' + e.exit_code + '" data-error="' + escapeAttr(e.error || '') + '" data-rate="0">🐛</button></td>' +
       '</tr>';
   }).join('');
+}
+
+function showErrorDetail(idx) {
+  const e = allRecentErrors[idx];
+  if (!e) return;
+  const parsed = parseErrorText(e.error);
+  const os = e.os_type ? e.os_type + (e.os_version ? ' ' + e.os_version : '') : '—';
+
+  document.getElementById('errorDetailTitle').textContent = e.nsapp + ' — exit ' + e.exit_code;
+
+  let html = '<div class="detail-chips">';
+  html += '<span class="status-badge ' + (e.status || 'unknown') + '">' + escapeHtml(e.status) + '</span>';
+  html += platformBadge(e.platform);
+  html += '<span class="type-badge ' + (e.type || '').toLowerCase() + '">' + (e.type || '-').toUpperCase() + '</span>';
+  html += '<span class="category-badge ' + (e.error_category || 'unknown') + '">' + escapeHtml(e.error_category || 'unknown') + '</span>';
+  html += '</div>';
+
+  html += '<div class="detail-meta-grid">';
+  html += '<div><span class="dm-label">OS</span><span>' + escapeHtml(os) + '</span></div>';
+  html += '<div><span class="dm-label">' + (e.platform === 'incus' ? 'Incus' : 'PVE') + ' Version</span><span>' + escapeHtml(e.pve_version || '—') + '</span></div>';
+  html += '<div><span class="dm-label">Duration</span><span>' + formatDuration(e.install_duration) + '</span></div>';
+  html += '<div><span class="dm-label">Time</span><span>' + formatTimestamp(e.created) + '</span></div>';
+  if (e.execution_id) {
+    html += '<div style="grid-column:1/-1;"><span class="dm-label">Execution ID</span><span style="font-family:monospace;font-size:11px;">' + escapeHtml(e.execution_id) + '</span></div>';
+  }
+  html += '</div>';
+
+  if (parsed.header) {
+    html += '<div class="error-header-line">' + escapeHtml(parsed.header) + '</div>';
+  }
+
+  if (parsed.trace) {
+    html += '<div class="error-trace-header"><span>Error Trace</span>' +
+      '<button class="btn btn-sm" onclick="copyDetailTrace(this)">📋 Copy</button></div>';
+    html += '<pre class="error-trace-box" id="detailTraceBox" data-trace="' + escapeAttr(parsed.trace) + '">' + escapeHtml(parsed.trace) + '</pre>';
+  } else {
+    html += '<div style="color:var(--text-muted);padding:12px 0;">No error trace was captured for this record.</div>';
+  }
+
+  html += '<div style="display:flex;justify-content:flex-end;margin-top:16px;">' +
+    '<button class="btn issue-btn" data-app="' + escapeAttr(e.nsapp) + '" data-exit="' + e.exit_code + '" data-error="' + escapeAttr(e.error || '') + '" data-rate="0">🐛 Create GitHub Issue</button></div>';
+
+  document.getElementById('errorDetailBody').innerHTML = html;
+  document.getElementById('errorDetailModal').classList.add('active');
+}
+
+function closeErrorDetail() {
+  document.getElementById('errorDetailModal').classList.remove('active');
+}
+
+function copyDetailTrace(btn) {
+  const box = document.getElementById('detailTraceBox');
+  const text = box ? (box.getAttribute('data-trace') || box.textContent) : '';
+  navigator.clipboard.writeText(text).then(function() {
+    const orig = btn.textContent;
+    btn.textContent = '✅ Copied!';
+    setTimeout(function() { btn.textContent = orig; }, 1500);
+  });
 }
 
 function updateCharts(data) {
@@ -369,7 +491,14 @@ document.querySelectorAll('.source-btn').forEach(btn => {
     refreshData();
   });
 });
-document.addEventListener('keydown', e => { if (e.key === 'Escape') { closeIssueModal(); closeCleanupModal(); } });
+document.querySelectorAll('.platform-btn').forEach(btn => {
+  btn.addEventListener('click', function() {
+    document.querySelectorAll('.platform-btn').forEach(b => b.classList.remove('active'));
+    this.classList.add('active');
+    refreshData();
+  });
+});
+document.addEventListener('keydown', e => { if (e.key === 'Escape') { closeIssueModal(); closeCleanupModal(); closeErrorDetail(); } });
 
 // Event delegation for Issue buttons (avoids inline onclick escaping issues)
 document.addEventListener('click', function(e) {

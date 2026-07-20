@@ -132,7 +132,8 @@ body {
 }
 
 .filter-btn,
-.source-btn {
+.source-btn,
+.platform-btn {
   background: transparent;
   border: 1px solid var(--border-color);
   color: var(--text-secondary);
@@ -144,17 +145,48 @@ body {
 }
 
 .filter-btn:hover,
-.source-btn:hover {
+.source-btn:hover,
+.platform-btn:hover {
   border-color: var(--accent-cyan);
   color: var(--text-primary);
 }
 
 .filter-btn.active,
-.source-btn.active {
+.source-btn.active,
+.platform-btn.active {
   background: var(--accent-cyan);
   border-color: var(--accent-cyan);
   color: var(--bg-primary);
   font-weight: 600;
+}
+
+/* Platform badge: pve (Proxmox VE) vs incus */
+.platform-badge {
+  display: inline-flex;
+  align-items: center;
+  padding: 4px 10px;
+  border-radius: 6px;
+  font-size: 11px;
+  font-weight: 700;
+  text-transform: uppercase;
+  letter-spacing: 0.5px;
+}
+
+.platform-badge.pve {
+  background: rgba(230, 126, 34, 0.15);
+  color: #e67e22;
+  border: 1px solid rgba(230, 126, 34, 0.3);
+}
+
+.platform-badge.incus {
+  background: rgba(20, 184, 166, 0.15);
+  color: #14b8a6;
+  border: 1px solid rgba(20, 184, 166, 0.3);
+}
+
+.platform-badge.unknown {
+  color: var(--text-muted);
+  border: 1px solid var(--border-color);
 }
 
 .stats-grid {

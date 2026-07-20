@@ -35,9 +35,18 @@
             <div class="filter-group">
                 <label>Source:</label>
                 <div class="quickfilter">
-                    <button class="source-btn active" data-repo="ProxmoxVE">ProxmoxVE</button>
+                    <button class="source-btn active" data-repo="all">All</button>
+                    <button class="source-btn" data-repo="ProxmoxVE">ProxmoxVE</button>
                     <button class="source-btn" data-repo="ProxmoxVED">ProxmoxVED</button>
-                    <button class="source-btn" data-repo="all">All</button>
+                </div>
+            </div>
+            <div class="filter-divider"></div>
+            <div class="filter-group">
+                <label>Platform:</label>
+                <div class="quickfilter">
+                    <button class="platform-btn active" data-platform="">All</button>
+                    <button class="platform-btn" data-platform="pve">Proxmox</button>
+                    <button class="platform-btn" data-platform="incus">Incus</button>
                 </div>
             </div>
             <div class="filter-divider"></div>
@@ -200,7 +209,10 @@
             <div class="section-header">
                 <div>
                     <h2>Recent Error Log</h2>
-                    <p>Last 100 failed or aborted installations.</p>
+                    <p>Last 100 failed installations — click a row for the full error trace.</p>
+                </div>
+                <div style="display: flex; gap: 8px;">
+                    <input type="text" id="recentFilter" placeholder="Filter by app / error text..." style="background: var(--bg-secondary); border: 1px solid var(--border-color); color: var(--text-primary); padding: 8px 14px; border-radius: 8px; font-size: 13px; outline: none; width: 240px;" oninput="filterRecentTable()">
                 </div>
             </div>
             <div class="table-wrapper">
@@ -208,21 +220,34 @@
                     <thead>
                         <tr>
                             <th>Status</th>
+                            <th>Platform</th>
                             <th>Type</th>
                             <th>Application</th>
                             <th>Exit Code</th>
                             <th>Category</th>
-                            <th>Error</th>
+                            <th>Error Summary</th>
                             <th>OS</th>
+                            <th>Duration</th>
                             <th>Timestamp</th>
                             <th>Actions</th>
                         </tr>
                     </thead>
                     <tbody id="recentErrorTable">
-                        <tr><td colspan="9"><div class="loading"><div class="loading-spinner"></div>Loading...</div></td></tr>
+                        <tr><td colspan="11"><div class="loading"><div class="loading-spinner"></div>Loading...</div></td></tr>
                     </tbody>
                 </table>
             </div>
+        </div>
+    </div>
+
+    <!-- Error Detail Modal -->
+    <div class="modal-overlay" id="errorDetailModal" onclick="if(event.target===this)closeErrorDetail()">
+        <div class="modal-content error-detail-modal" onclick="event.stopPropagation()">
+            <div class="modal-header">
+                <h2 id="errorDetailTitle">Error Details</h2>
+                <button class="modal-close" onclick="closeErrorDetail()">&times;</button>
+            </div>
+            <div class="modal-body" id="errorDetailBody"></div>
         </div>
     </div>
 

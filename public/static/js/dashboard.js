@@ -10,9 +10,18 @@ let currentSort = { field: 'created', dir: 'desc' };
 
 function getActiveFilters() {
   const days = document.querySelector('.filter-btn.active')?.dataset.days || '1';
-  const repo = document.querySelector('.source-btn.active')?.dataset.repo || 'ProxmoxVE';
+  // Default: ALL sources, today
+  const repo = document.querySelector('.source-btn.active')?.dataset.repo || 'all';
+  const platform = document.querySelector('.platform-btn.active')?.dataset.platform || '';
   const slug = document.getElementById('filterSlug')?.value || '';
-  return { days, repo, slug };
+  return { days, repo, platform, slug };
+}
+
+// platformBadge renders a small pve/incus badge (empty string when unknown)
+function platformBadge(p) {
+  if (p === 'incus') return '<span class="platform-badge incus" title="Incus host">INCUS</span>';
+  if (p === 'pve') return '<span class="platform-badge pve" title="Proxmox VE host">PVE</span>';
+  return '<span class="platform-badge unknown">—</span>';
 }
 
 function escapeAttr(str) {
@@ -157,7 +166,7 @@ const chartDefaults = {
 };
 
 async function fetchData() {
-  const { days, repo, slug } = getActiveFilters();
+  const { days, repo, platform, slug } = getActiveFilters();
 
   // Show loading indicator
   document.getElementById('loadingIndicator').style.display = 'flex';
@@ -167,6 +176,7 @@ async function fetchData() {
     // Add cache-busting timestamp for filter changes to ensure fresh data
     const cacheBuster = '&_t=' + Date.now();
     let url = '/api/dashboard?days=' + days + '&repo=' + repo + cacheBuster;
+    if (platform) url += '&platform=' + encodeURIComponent(platform);
     if (slug) url += '&slug=' + encodeURIComponent(slug);
     const response = await fetch(url);
     if (!response.ok) throw new Error('Failed to fetch data');
@@ -539,11 +549,15 @@ async function fetchPaginatedRecords() {
   const app = document.getElementById('filterApp').value;
   const os = document.getElementById('filterOs').value;
   const type = document.getElementById('filterType').value;
+  const platformSel = document.getElementById('filterPlatform') ? document.getElementById('filterPlatform').value : '';
 
   try {
-    const { days, repo, slug } = getActiveFilters();
+    const { days, repo, platform, slug } = getActiveFilters();
+    // Table-local platform select overrides the global chip filter
+    const effPlatform = platformSel || platform;
 
     let url = '/api/records?page=' + currentPage + '&limit=' + perPage + '&days=' + days + '&repo=' + encodeURIComponent(repo);
+    if (effPlatform) url += '&platform=' + encodeURIComponent(effPlatform);
     if (slug) url += '&slug=' + encodeURIComponent(slug);
     if (status) url += '&status=' + encodeURIComponent(status);
     if (app) url += '&app=' + encodeURIComponent(app);
@@ -597,12 +611,18 @@ function renderTableRows(records) {
   tbody.innerHTML = records.map((r, index) => {
     const statusClass = r.status || 'unknown';
     const typeClass = (r.type || '').toLowerCase();
-    const diskSize = r.disk_size ? r.disk_size + 'GB' : '-';
-    const coreCount = r.core_count || '-';
-    const ramSize = r.ram_size ? r.ram_size + 'MB' : '-';
     const created = r.created ? formatTimestamp(r.created) : '-';
     const osDisplay = r.os_type ? (r.os_type + (r.os_version ? ' ' + r.os_version : '')) : '-';
     const repoDisplay = r.repo_slug || r.repo_source || '-';
+
+    // Compact resources column: "4C · 8GB · 20GB"
+    const resParts = [];
+    if (r.core_count) resParts.push(r.core_count + 'C');
+    if (r.ram_size) resParts.push((r.ram_size >= 1024 ? (r.ram_size / 1024).toFixed(0) + 'G' : r.ram_size + 'M'));
+    if (r.disk_size) resParts.push(r.disk_size + 'G');
+    const resources = resParts.length ? resParts.join(' · ') : '-';
+
+    const duration = r.install_duration ? formatDuration(r.install_duration) : '-';
 
     // Exit code column: show badge for failed, dash for success/running
     let exitCodeCell = '-';
@@ -613,19 +633,19 @@ function renderTableRows(records) {
     }
 
     const archBadge = r.has_arm
-      ? '<span class="arm-badge" title="Installiert auf ARM64-Hardware">ARM64</span>'
-      : '<span class="arch-badge" title="Installiert auf amd64/x86_64-Hardware">amd64</span>';
+      ? '<span class="arm-badge" title="Installed on ARM64 hardware">ARM64</span>'
+      : '';
 
     return '<tr class="clickable-row' + (r.has_arm ? ' arm-row' : '') + '" onclick="showRecordDetail(' + index + ')">' +
       '<td><span class="status-badge ' + statusClass + '">' + escapeHtml(r.status || 'unknown') + '</span></td>' +
       '<td>' + exitCodeCell + '</td>' +
       '<td><span class="type-badge ' + typeClass + '">' + escapeHtml((r.type || '-').toUpperCase()) + '</span></td>' +
+      '<td>' + platformBadge(r.platform) + '</td>' +
       '<td><strong>' + escapeHtml(r.nsapp || '-') + '</strong> ' + archBadge + '</td>' +
       '<td class="repo-slug-cell" title="' + escapeAttr(repoDisplay) + '">' + escapeHtml(repoDisplay) + '</td>' +
       '<td>' + escapeHtml(osDisplay) + '</td>' +
-      '<td>' + diskSize + '</td>' +
-      '<td style="text-align: center;">' + coreCount + '</td>' +
-      '<td>' + ramSize + '</td>' +
+      '<td style="white-space:nowrap;">' + resources + '</td>' +
+      '<td>' + duration + '</td>' +
       '<td>' + created + '</td>' +
       '</tr>';
   }).join('');
@@ -700,7 +720,8 @@ function showRecordDetail(index) {
   html += '<div class="detail-grid">';
   html += buildDetailItem('OS Type', record.os_type);
   html += buildDetailItem('OS Version', record.os_version);
-  html += buildDetailItem('PVE Version', record.pve_version);
+  html += buildDetailItem('Platform', platformBadge(record.platform), null, true);
+  html += buildDetailItem(record.platform === 'incus' ? 'Incus Version' : 'PVE Version', record.pve_version);
   html += buildDetailItem('Architecture', record.has_arm
     ? '<span class="arm-badge">ARM64</span>'
     : '<span class="arch-badge">amd64</span>', null, true);
@@ -977,10 +998,11 @@ function exportCSV() {
     return;
   }
 
-  const headers = ['App', 'Status', 'Repository', 'OS Type', 'OS Version', 'Type', 'Method', 'Cores', 'RAM (MB)', 'Disk (GB)', 'Exit Code', 'Error', 'PVE Version'];
+  const headers = ['App', 'Status', 'Platform', 'Repository', 'OS Type', 'OS Version', 'Type', 'Method', 'Cores', 'RAM (MB)', 'Disk (GB)', 'Exit Code', 'Duration (s)', 'Error', 'PVE Version'];
   const rows = allRecords.map(r => [
     r.nsapp || '',
     r.status || '',
+    r.platform || '',
     r.repo_slug || r.repo_source || '',
     r.os_type || '',
     r.os_version || '',
@@ -990,6 +1012,7 @@ function exportCSV() {
     r.ram_size || '',
     r.disk_size || '',
     r.exit_code || '',
+    r.install_duration || '',
     (r.error || '').replace(/,/g, ';'),
     r.pve_version || ''
   ]);
@@ -1084,6 +1107,18 @@ document.querySelectorAll('.filter-btn').forEach(btn => {
   btn.addEventListener('click', function() {
     document.querySelectorAll('.filter-btn').forEach(b => b.classList.remove('active'));
     this.classList.add('active');
+    refreshData();
+  });
+});
+
+// Platform filter button clicks (pve / incus / all)
+document.querySelectorAll('.platform-btn').forEach(btn => {
+  btn.addEventListener('click', function() {
+    document.querySelectorAll('.platform-btn').forEach(b => b.classList.remove('active'));
+    this.classList.add('active');
+    // Keep the table-local platform select in sync with the global chip
+    const sel = document.getElementById('filterPlatform');
+    if (sel) sel.value = this.dataset.platform || '';
     refreshData();
   });
 });

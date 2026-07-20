@@ -122,6 +122,10 @@ type TelemetryIn struct {
 	// HasArm is true when the install actually ran on arm64 hardware (only
 	// possible for scripts that declare var_arm64=yes).
 	HasArm bool `json:"has_arm,omitempty"`
+
+	// Platform is the virtualization platform: "pve" (Proxmox VE) or "incus".
+	// Derived from pve_version when the client doesn't send it.
+	Platform string `json:"platform,omitempty"`
 }
 
 // TelemetryOut is the output shape for telemetry records
@@ -160,6 +164,9 @@ type TelemetryOut struct {
 
 	// HasArm is true when the install ran on arm64 hardware.
 	HasArm bool `json:"has_arm,omitempty"`
+
+	// Platform is the virtualization platform: "pve" or "incus".
+	Platform string `json:"platform,omitempty"`
 
 	// Installation pipeline: JSON array [{s:"installing",t:"..."}, ...] (server-built for API responses)
 	Pipeline string `json:"pipeline,omitempty"`
@@ -892,10 +899,8 @@ func isAbortSignal(exitCode int, errText string) bool {
 
 // parseRepoFilters reads repo_source (repo) and repo_slug (slug) query parameters.
 func parseRepoFilters(r *http.Request) (repoSource, repoSlug string) {
+	// repo_source is OPTIONAL: no param (or "all") means all sources.
 	repoSource = r.URL.Query().Get("repo")
-	if repoSource == "" {
-		repoSource = "ProxmoxVE"
-	}
 	if repoSource == "all" {
 		repoSource = ""
 	}
@@ -903,10 +908,28 @@ func parseRepoFilters(r *http.Request) (repoSource, repoSlug string) {
 	return
 }
 
+// parsePlatform reads the optional platform filter ("pve" | "incus"), "" = all.
+func parsePlatform(r *http.Request) string {
+	p := strings.ToLower(strings.TrimSpace(r.URL.Query().Get("platform")))
+	if p == "pve" || p == "incus" {
+		return p
+	}
+	return ""
+}
+
 func telemetryCacheKey(prefix string, days int, repoSource, repoSlug string) string {
 	key := fmt.Sprintf("%s:%d:%s", prefix, days, repoSource)
 	if repoSlug != "" {
 		key += ":" + repoSlug
+	}
+	return key
+}
+
+// telemetryCacheKeyP extends the cache key with the platform filter.
+func telemetryCacheKeyP(prefix string, days int, repoSource, repoSlug, platform string) string {
+	key := telemetryCacheKey(prefix, days, repoSource, repoSlug)
+	if platform != "" {
+		key += ":p=" + platform
 	}
 	return key
 }
@@ -1059,6 +1082,7 @@ func rescueBrokenJSON(raw []byte) (TelemetryIn, error) {
 	in.CPUVendor = strField("cpu_vendor")
 	in.CPUModel = strField("cpu_model")
 	in.RAMSpeed = strField("ram_speed")
+	in.Platform = strField("platform")
 
 	in.CTType = intField("ct_type")
 	in.DiskSize = intField("disk_size")
@@ -1150,6 +1174,20 @@ func validate(in *TelemetryIn) error {
 	// Sanitize repo_source (routing field) and repo_slug ("owner/repo")
 	in.RepoSource = sanitizeShort(in.RepoSource, 64)
 	in.RepoSlug = sanitizeShort(in.RepoSlug, 128)
+
+	// Platform: allowlist "pve"/"incus"; derive from pve_version when missing
+	// (the client sends pve_version="incus-x.y" on Incus hosts).
+	in.Platform = strings.ToLower(sanitizeShort(in.Platform, 8))
+	if in.Platform != "pve" && in.Platform != "incus" {
+		switch {
+		case strings.HasPrefix(strings.ToLower(in.PveVer), "incus"):
+			in.Platform = "incus"
+		case in.PveVer != "":
+			in.Platform = "pve"
+		default:
+			in.Platform = ""
+		}
+	}
 
 	// Safety net: derive repo_source from repo_slug when the routing field is
 	// missing, so older/partial clients still land in the right bucket.
@@ -1427,7 +1465,7 @@ func main() {
 		ctx, cancel := context.WithTimeout(r.Context(), 5*time.Second)
 		defer cancel()
 
-		data, err := ch.FetchDashboardData(ctx, 1, "ProxmoxVE", "") // Last 24h, production only for metrics
+		data, err := ch.FetchDashboardData(ctx, 1, "ProxmoxVE", "", "") // Last 24h, production only for metrics
 		if err != nil {
 			http.Error(w, "failed to fetch metrics", http.StatusInternalServerError)
 			return
@@ -1468,15 +1506,16 @@ func main() {
 			}
 		}
 
-		// repo_source + optional repo_slug filter
+		// repo_source + optional repo_slug + optional platform filter
 		repoSource, repoSlug := parseRepoFilters(r)
+		platform := parsePlatform(r)
 
 		// Increase timeout for large datasets (dashboard aggregation takes time)
 		ctx, cancel := context.WithTimeout(r.Context(), 120*time.Second)
 		defer cancel()
 
 		// Try cache first (stale-while-revalidate)
-		cacheKey := telemetryCacheKey("dashboard", days, repoSource, repoSlug)
+		cacheKey := telemetryCacheKeyP("dashboard", days, repoSource, repoSlug, platform)
 		var data *DashboardData
 		if cfg.CacheEnabled && cache.Get(ctx, cacheKey, &data) {
 			// Serve cached data immediately
@@ -1491,7 +1530,7 @@ func main() {
 						defer cache.FinishRefresh(cacheKey)
 						refreshCtx, cancel := context.WithTimeout(context.Background(), 120*time.Second)
 						defer cancel()
-						freshData, err := ch.FetchDashboardData(refreshCtx, days, repoSource, repoSlug)
+						freshData, err := ch.FetchDashboardData(refreshCtx, days, repoSource, repoSlug, platform)
 						if err != nil {
 							log.Printf("[CACHE] background refresh failed for %s: %v", cacheKey, err)
 							return
@@ -1506,7 +1545,7 @@ func main() {
 			return
 		}
 
-		data, err := ch.FetchDashboardData(ctx, days, repoSource, repoSlug)
+		data, err := ch.FetchDashboardData(ctx, days, repoSource, repoSlug, platform)
 		if err != nil {
 			log.Printf("dashboard fetch failed: %v", err)
 			http.Error(w, "failed to fetch data", http.StatusInternalServerError)
@@ -1550,6 +1589,7 @@ func main() {
 		typeFilter := r.URL.Query().Get("type")
 		sort := r.URL.Query().Get("sort")
 		repoSource, repoSlug := parseRepoFilters(r)
+		platform := parsePlatform(r)
 
 		// Days filter for Installation Log (default: 1 = today)
 		days := 1
@@ -1582,7 +1622,7 @@ func main() {
 		ctx, cancel := context.WithTimeout(r.Context(), 10*time.Second)
 		defer cancel()
 
-		records, total, err := ch.FetchRecordsPaginated(ctx, page, limit, status, app, osType, typeFilter, sort, repoSource, repoSlug, days)
+		records, total, err := ch.FetchRecordsPaginated(ctx, page, limit, status, app, osType, typeFilter, sort, repoSource, repoSlug, platform, days)
 		if err != nil {
 			log.Printf("records fetch failed: %v", err)
 			http.Error(w, "failed to fetch records", http.StatusInternalServerError)
@@ -1656,18 +1696,20 @@ func main() {
 			}
 		}
 
+		// repo_source is optional (no param = all sources)
 		repoSource := r.URL.Query().Get("repo")
-		if repoSource == "" {
-			repoSource = "ProxmoxVE"
-		}
 		if repoSource == "all" {
 			repoSource = ""
 		}
+		platform := parsePlatform(r)
 
 		ctx, cancel := context.WithTimeout(r.Context(), 120*time.Second)
 		defer cancel()
 
 		cacheKey := fmt.Sprintf("scripts:%d:%s", days, repoSource)
+		if platform != "" {
+			cacheKey += ":p=" + platform
+		}
 		var data *ScriptAnalysisData
 		if cfg.CacheEnabled && cache.Get(ctx, cacheKey, &data) {
 			w.Header().Set("Content-Type", "application/json")
@@ -1679,7 +1721,7 @@ func main() {
 						defer cache.FinishRefresh(cacheKey)
 						refreshCtx, cancel := context.WithTimeout(context.Background(), 120*time.Second)
 						defer cancel()
-						freshData, err := ch.FetchScriptStats(refreshCtx, days, repoSource, nil)
+						freshData, err := ch.FetchScriptStats(refreshCtx, days, repoSource, platform, nil)
 						if err != nil {
 							log.Printf("[CACHE] background refresh failed for %s: %v", cacheKey, err)
 							return
@@ -1692,7 +1734,7 @@ func main() {
 			return
 		}
 
-		data, err := ch.FetchScriptStats(ctx, days, repoSource, nil)
+		data, err := ch.FetchScriptStats(ctx, days, repoSource, platform, nil)
 		if err != nil {
 			log.Printf("script stats fetch failed: %v", err)
 			http.Error(w, "failed to fetch script data", http.StatusInternalServerError)
@@ -1726,6 +1768,7 @@ func main() {
 		}
 
 		repoSource, repoSlug := parseRepoFilters(r)
+		platform := parsePlatform(r)
 
 		// Scale timeout by data volume
 		timeout := 120 * time.Second
@@ -1739,7 +1782,7 @@ func main() {
 		ctx, cancel := context.WithTimeout(r.Context(), timeout)
 		defer cancel()
 
-		cacheKey := telemetryCacheKey("errors", days, repoSource, repoSlug)
+		cacheKey := telemetryCacheKeyP("errors", days, repoSource, repoSlug, platform)
 		var data *ErrorAnalysisData
 		if cfg.CacheEnabled && cache.Get(ctx, cacheKey, &data) {
 			w.Header().Set("Content-Type", "application/json")
@@ -1758,7 +1801,7 @@ func main() {
 						}
 						refreshCtx, cancel := context.WithTimeout(context.Background(), refreshTimeout)
 						defer cancel()
-						freshData, err := ch.FetchErrorAnalysisData(refreshCtx, days, repoSource, repoSlug)
+						freshData, err := ch.FetchErrorAnalysisData(refreshCtx, days, repoSource, repoSlug, platform)
 						if err != nil {
 							log.Printf("[CACHE] background refresh failed for %s: %v", cacheKey, err)
 							return
@@ -1775,7 +1818,7 @@ func main() {
 			return
 		}
 
-		data, err := ch.FetchErrorAnalysisData(ctx, days, repoSource, repoSlug)
+		data, err := ch.FetchErrorAnalysisData(ctx, days, repoSource, repoSlug, platform)
 		if err != nil {
 			log.Printf("error analysis fetch failed: %v", err)
 			http.Error(w, "failed to fetch error data", http.StatusInternalServerError)
@@ -2148,6 +2191,7 @@ func main() {
 			RepoSource:      in.RepoSource,
 			RepoSlug:        in.RepoSlug,
 			HasArm:          in.HasArm,
+			Platform:        in.Platform,
 		}
 
 		// Enqueue for async PB write (decoupled from HTTP response)
@@ -2377,7 +2421,8 @@ func warmupCaches(ch *CHClient, cache *Cache, cfg Config, todayOnly bool) {
 	start := time.Now()
 
 	dayRanges := []int{1}
-	repos := []string{"ProxmoxVE"}
+	// Warm the DEFAULT view: all sources ("") — matches the new UI default.
+	repos := []string{""}
 
 	warmed := 0
 	failed := 0
@@ -2390,14 +2435,14 @@ func warmupCaches(ch *CHClient, cache *Cache, cfg Config, todayOnly bool) {
 			{7}, {30}, {0},
 		} {
 			ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
-			data, err := ch.FetchScriptStats(ctx, spec.days, "ProxmoxVE", nil)
+			data, err := ch.FetchScriptStats(ctx, spec.days, "", "", nil)
 			cancel()
 			if err != nil {
 				log.Printf("[CACHE] scripts:%d warmup failed: %v", spec.days, err)
 				failed++
 				continue
 			}
-			cacheKey := fmt.Sprintf("scripts:%d:ProxmoxVE", spec.days)
+			cacheKey := fmt.Sprintf("scripts:%d:", spec.days)
 			_ = cache.Set(context.Background(), cacheKey, data, 23*time.Hour)
 			warmed++
 			log.Printf("[CACHE] scripts:%d cache warmed from ClickHouse", spec.days)
@@ -2422,7 +2467,7 @@ func warmupCaches(ch *CHClient, cache *Cache, cfg Config, todayOnly bool) {
 				cacheKey := fmt.Sprintf("dashboard:%d:%s", days, repo)
 				if cache.TryStartRefresh(cacheKey) {
 					ctx, cancel := context.WithTimeout(context.Background(), timeout)
-					data, err := ch.FetchDashboardData(ctx, days, repo, "")
+					data, err := ch.FetchDashboardData(ctx, days, repo, "", "")
 					cancel()
 					cache.FinishRefresh(cacheKey)
 					if err != nil {
@@ -2441,7 +2486,7 @@ func warmupCaches(ch *CHClient, cache *Cache, cfg Config, todayOnly bool) {
 				cacheKey := fmt.Sprintf("scripts:%d:%s", days, repo)
 				if cache.TryStartRefresh(cacheKey) {
 					ctx, cancel := context.WithTimeout(context.Background(), timeout)
-					data, err := ch.FetchScriptStats(ctx, days, repo, nil)
+					data, err := ch.FetchScriptStats(ctx, days, repo, "", nil)
 					cancel()
 					cache.FinishRefresh(cacheKey)
 					if err != nil {
@@ -2460,7 +2505,7 @@ func warmupCaches(ch *CHClient, cache *Cache, cfg Config, todayOnly bool) {
 				cacheKey := fmt.Sprintf("errors:%d:%s", days, repo)
 				if cache.TryStartRefresh(cacheKey) {
 					ctx, cancel := context.WithTimeout(context.Background(), timeout)
-					data, err := ch.FetchErrorAnalysisData(ctx, days, repo, "")
+					data, err := ch.FetchErrorAnalysisData(ctx, days, repo, "", "")
 					cancel()
 					cache.FinishRefresh(cacheKey)
 					if err != nil {
@@ -2483,7 +2528,8 @@ func warmupCaches(ch *CHClient, cache *Cache, cfg Config, todayOnly bool) {
 // in the background with generous timeouts. Results are cached.
 func warmupHeavyDashboard(ch *CHClient, cache *Cache, cfg Config) {
 	heavyRanges := []int{90}
-	repos := []string{"ProxmoxVE"}
+	// Warm the DEFAULT view: all sources ("")
+	repos := []string{""}
 
 	log.Println("[CACHE] Starting deferred heavy dashboard warmup (90d)...")
 	start := time.Now()
@@ -2501,7 +2547,7 @@ func warmupHeavyDashboard(ch *CHClient, cache *Cache, cfg Config) {
 			func() {
 				ctx, cancel := context.WithTimeout(context.Background(), timeout)
 				defer cancel()
-				data, err := ch.FetchDashboardData(ctx, days, repo, "")
+				data, err := ch.FetchDashboardData(ctx, days, repo, "", "")
 				if err != nil {
 					log.Printf("[CACHE] Heavy warmup dashboard:%d failed: %v", days, err)
 					failed++
@@ -2519,7 +2565,7 @@ func warmupHeavyDashboard(ch *CHClient, cache *Cache, cfg Config) {
 			func() {
 				ctx, cancel := context.WithTimeout(context.Background(), timeout)
 				defer cancel()
-				data, err := ch.FetchErrorAnalysisData(ctx, days, repo, "")
+				data, err := ch.FetchErrorAnalysisData(ctx, days, repo, "", "")
 				if err != nil {
 					log.Printf("[CACHE] Heavy warmup errors:%d failed: %v", days, err)
 					failed++

@@ -66,10 +66,19 @@
             <div class="filter-group">
                 <label>Source:</label>
                 <div class="quickfilter">
-                    <button class="source-btn active" data-repo="ProxmoxVE">ProxmoxVE</button>
+                    <button class="source-btn active" data-repo="all">All</button>
+                    <button class="source-btn" data-repo="ProxmoxVE">ProxmoxVE</button>
                     <button class="source-btn" data-repo="ProxmoxVED">ProxmoxVED</button>
                     <button class="source-btn" data-repo="external">External</button>
-                    <button class="source-btn" data-repo="all">All</button>
+                </div>
+            </div>
+            <div class="filter-divider"></div>
+            <div class="filter-group">
+                <label>Platform:</label>
+                <div class="quickfilter">
+                    <button class="platform-btn active" data-platform="">All</button>
+                    <button class="platform-btn" data-platform="pve">Proxmox</button>
+                    <button class="platform-btn" data-platform="incus">Incus</button>
                 </div>
             </div>
             <div class="filter-divider"></div>
@@ -313,6 +322,11 @@
                     <option value="lxc">LXC</option>
                     <option value="vm">VM</option>
                 </select>
+                <select id="filterPlatform" class="custom-select" onchange="filterTable()">
+                    <option value="">All Platforms</option>
+                    <option value="pve">Proxmox</option>
+                    <option value="incus">Incus</option>
+                </select>
             </div>
             <div class="table-wrapper">
                 <table id="installTable">
@@ -321,17 +335,17 @@
                             <th data-sort="status" class="sortable">Status</th>
                             <th data-sort="exit_code" class="sortable">Exit Code</th>
                             <th data-sort="type" class="sortable">Type</th>
+                            <th>Platform</th>
                             <th data-sort="nsapp" class="sortable">Application</th>
                             <th>Repository</th>
                             <th data-sort="os_type" class="sortable">OS</th>
-                            <th>Disk Size</th>
-                            <th>Core Count</th>
-                            <th>RAM Size</th>
+                            <th>Resources</th>
+                            <th>Duration</th>
                             <th data-sort="created" class="sortable sort-desc">Created At</th>
                         </tr>
                     </thead>
                     <tbody id="recordsTable">
-                        <tr><td colspan="9"><div class="loading"><div class="loading-spinner"></div>Loading...</div></td></tr>
+                        <tr><td colspan="10"><div class="loading"><div class="loading-spinner"></div>Loading...</div></td></tr>
                     </tbody>
                 </table>
             </div>

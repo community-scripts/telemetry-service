@@ -249,6 +249,9 @@ func (ch *CHClient) migrate() {
 	alters := []string{
 		`ALTER TABLE telemetry_db.telemetry ADD COLUMN IF NOT EXISTS repo_slug String`,
 		`ALTER TABLE telemetry_db.telemetry ADD COLUMN IF NOT EXISTS has_arm UInt8`,
+		// Virtualization platform: 'pve' (Proxmox VE) or 'incus'. Old rows have ''
+		// and are derived at query time from pve_version (see platformExpr).
+		`ALTER TABLE telemetry_db.telemetry ADD COLUMN IF NOT EXISTS platform LowCardinality(String)`,
 	}
 	for _, s := range alters {
 		if _, err := ch.db.ExecContext(ctx, s); err != nil {
@@ -344,7 +347,7 @@ func (ch *CHClient) InsertTelemetry(ctx context.Context, p TelemetryOut) error {
 		random_id, execution_id, repo_source, repo_slug,
 		cpu_vendor, cpu_model,
 		gpu_vendor, gpu_model, gpu_passthrough,
-		ram_speed, install_duration, has_arm
+		ram_speed, install_duration, has_arm, platform
 	) VALUES (
 		?, ?, ?, ?, ?, now64(3),
 		?, ?, ?, ?,
@@ -353,7 +356,7 @@ func (ch *CHClient) InsertTelemetry(ctx context.Context, p TelemetryOut) error {
 		?, ?, ?, ?,
 		?, ?,
 		?, ?, ?,
-		?, ?, ?
+		?, ?, ?, ?
 	)`
 	_, err := ch.db.ExecContext(ctx, q,
 		generateRecordID(), p.NSAPP, p.Type, p.Status, p.Method,
@@ -363,7 +366,7 @@ func (ch *CHClient) InsertTelemetry(ctx context.Context, p TelemetryOut) error {
 		p.RandomID, p.ExecutionID, p.RepoSource, p.RepoSlug,
 		p.CPUVendor, p.CPUModel,
 		p.GPUVendor, p.GPUModel, p.GPUPassthrough,
-		p.RAMSpeed, uint32(p.InstallDuration), boolToUint8(p.HasArm),
+		p.RAMSpeed, uint32(p.InstallDuration), boolToUint8(p.HasArm), p.Platform,
 	)
 	return err
 }
@@ -430,9 +433,28 @@ func repoSourcePred(repoSource string) (string, []interface{}) {
 	}
 }
 
-// chWhere builds a WHERE clause from days, repoSource, optional repoSlug, and extra predicates.
+// platformExpr derives the virtualization platform for every row, including
+// legacy rows written before the platform column existed:
+//   - explicit platform column wins
+//   - pve_version starting with "incus" (client sends "incus-x.y") → incus
+//   - any other non-empty pve_version → pve
+//   - otherwise unknown ('')
+const platformExpr = `multiIf(platform != '', platform, pve_version LIKE 'incus%', 'incus', pve_version != '', 'pve', '')`
+
+// platformPred returns a SQL predicate for a platform filter ("" = no filter).
+// Values are allowlisted by the HTTP layer, so inlining is safe.
+func platformPred(platform string) string {
+	switch platform {
+	case "pve", "incus":
+		return platformExpr + " = '" + platform + "'"
+	}
+	return ""
+}
+
+// chWhere builds a WHERE clause from days, repoSource, optional repoSlug,
+// optional platform, and extra predicates.
 // Always starts with "1=1" so callers can freely AND-chain.
-func chWhere(days int, repoSource, repoSlug string, extras ...string) (string, []interface{}) {
+func chWhere(days int, repoSource, repoSlug, platform string, extras ...string) (string, []interface{}) {
 	parts := []string{"1=1"}
 	var args []interface{}
 
@@ -447,6 +469,9 @@ func chWhere(days int, repoSource, repoSlug string, extras ...string) (string, [
 	if repoSlug != "" {
 		parts = append(parts, "repo_slug = ?")
 		args = append(args, repoSlug)
+	}
+	if pred := platformPred(platform); pred != "" {
+		parts = append(parts, pred)
 	}
 	for _, e := range extras {
 		parts = append(parts, e)
@@ -494,6 +519,7 @@ func scanRecords(rows *sql.Rows) []TelemetryRecord {
 			&r.CPUVendor, &r.CPUModel,
 			&r.GPUVendor, &r.GPUModel, &r.GPUPassthrough,
 			&r.RAMSpeed, &installDur, &hasArm,
+			&r.Platform,
 			&r.Created,
 		)
 		if err != nil {
@@ -521,6 +547,7 @@ const recordSelectCols = `nsapp, type, status, method,
 	cpu_vendor, cpu_model,
 	gpu_vendor, gpu_model, gpu_passthrough,
 	ram_speed, install_duration, has_arm,
+	` + platformExpr + ` AS platform_resolved,
 	toString(created)`
 
 // ══════════════════════════════════════════════════════════════
@@ -529,7 +556,7 @@ const recordSelectCols = `nsapp, type, status, method,
 
 // FetchRepoSlugs returns distinct owner/repo slugs with install counts for the filter dropdown.
 func (ch *CHClient) FetchRepoSlugs(ctx context.Context, days int, repoSource string) ([]RepoSlugCount, error) {
-	w, a := chWhere(days, repoSource, "", "repo_slug != ''")
+	w, a := chWhere(days, repoSource, "", "", "repo_slug != ''")
 	rows, err := ch.db.QueryContext(ctx, fmt.Sprintf(
 		"SELECT repo_slug, count() c FROM telemetry_db.telemetry WHERE %s GROUP BY repo_slug ORDER BY c DESC LIMIT 50", w), a...)
 	if err != nil {
@@ -548,11 +575,12 @@ func (ch *CHClient) FetchRepoSlugs(ctx context.Context, days int, repoSource str
 	return out, nil
 }
 
-func (ch *CHClient) FetchDashboardData(ctx context.Context, days int, repoSource, repoSlug string) (*DashboardData, error) {
+func (ch *CHClient) FetchDashboardData(ctx context.Context, days int, repoSource, repoSlug, platform string) (*DashboardData, error) {
 	data := &DashboardData{}
 	mw, ma := chMVWhere(days, repoSource)
-	tw, ta := chWhere(days, repoSource, repoSlug, "status IN ('success','failed','aborted','unknown')")
-	rawAgg := repoSlug != ""
+	tw, ta := chWhere(days, repoSource, repoSlug, platform, "status IN ('success','failed','aborted','unknown')")
+	// Materialized views have no platform column — platform filters need raw-table aggregation.
+	rawAgg := repoSlug != "" || platform != ""
 
 	// ── 1. Main counts ──
 	var total, sc, fc, ac uint64
@@ -598,7 +626,7 @@ func (ch *CHClient) FetchDashboardData(ctx context.Context, days int, repoSource
 	data.SampleSize = data.TotalInstalls
 
 	// ── 2. Installing count (raw table — execution_id subquery) ──
-	stuckW, stuckA := chWhere(1, repoSource, repoSlug,
+	stuckW, stuckA := chWhere(1, repoSource, repoSlug, platform,
 		"status IN ('installing','validation','configuring')",
 		`(execution_id = '' OR execution_id NOT IN (
 			SELECT execution_id FROM telemetry_db.telemetry
@@ -638,7 +666,7 @@ func (ch *CHClient) FetchDashboardData(ctx context.Context, days int, repoSource
 
 	// ── 4. OS distribution ──
 	if rawAgg {
-		osW, osA := chWhere(days, repoSource, repoSlug, "os_type != ''", "status IN ('success','failed','aborted','unknown')")
+		osW, osA := chWhere(days, repoSource, repoSlug, platform, "os_type != ''", "status IN ('success','failed','aborted','unknown')")
 		if rows, err := ch.db.QueryContext(ctx, fmt.Sprintf(
 			"SELECT os_type, count() c FROM telemetry_db.telemetry WHERE %s GROUP BY os_type ORDER BY c DESC LIMIT 15", osW), osA...); err == nil {
 			defer rows.Close()
@@ -666,7 +694,7 @@ func (ch *CHClient) FetchDashboardData(ctx context.Context, days int, repoSource
 
 	// ── 5. Method stats ──
 	if rawAgg {
-		methW, methA := chWhere(days, repoSource, repoSlug, "method != ''", "status IN ('success','failed','aborted','unknown')")
+		methW, methA := chWhere(days, repoSource, repoSlug, platform, "method != ''", "status IN ('success','failed','aborted','unknown')")
 		if rows, err := ch.db.QueryContext(ctx, fmt.Sprintf(
 			"SELECT method, count() c FROM telemetry_db.telemetry WHERE %s GROUP BY method ORDER BY c DESC LIMIT 10", methW), methA...); err == nil {
 			defer rows.Close()
@@ -694,7 +722,7 @@ func (ch *CHClient) FetchDashboardData(ctx context.Context, days int, repoSource
 
 	// ── 6. PVE versions ──
 	if rawAgg {
-		pveW, pveA := chWhere(days, repoSource, repoSlug, "pve_version != ''", "status IN ('success','failed','aborted','unknown')")
+		pveW, pveA := chWhere(days, repoSource, repoSlug, platform, "pve_version != ''", "status IN ('success','failed','aborted','unknown')")
 		if rows, err := ch.db.QueryContext(ctx, fmt.Sprintf(
 			"SELECT pve_version, count() c FROM telemetry_db.telemetry WHERE %s GROUP BY pve_version ORDER BY c DESC LIMIT 15", pveW), pveA...); err == nil {
 			defer rows.Close()
@@ -748,7 +776,7 @@ func (ch *CHClient) FetchDashboardData(ctx context.Context, days int, repoSource
 	}
 
 	// ── 8. Error analysis (needs raw table — text pattern matching, excludes user_aborted) ──
-	fwErr, faErr := chWhere(days, repoSource, repoSlug, "status='failed'", "error!=''", "error_category!='user_aborted'")
+	fwErr, faErr := chWhere(days, repoSource, repoSlug, platform, "status='failed'", "error!=''", "error_category!='user_aborted'")
 	if rows, err := ch.db.QueryContext(ctx, fmt.Sprintf(`
 		SELECT
 			multiIf(
@@ -884,7 +912,7 @@ func (ch *CHClient) FetchDashboardData(ctx context.Context, days int, repoSource
 	}
 
 	// ── 11. GPU stats (raw table — not materialized, low volume) ──
-	gpuW, gpuA := chWhere(days, repoSource, repoSlug, "status IN ('success','failed','aborted','unknown')", "gpu_vendor!=''", "gpu_vendor!='unknown'")
+	gpuW, gpuA := chWhere(days, repoSource, repoSlug, platform, "status IN ('success','failed','aborted','unknown')", "gpu_vendor!=''", "gpu_vendor!='unknown'")
 	if rows, err := ch.db.QueryContext(ctx, fmt.Sprintf(
 		"SELECT gpu_vendor, gpu_passthrough, count() c FROM telemetry_db.telemetry WHERE %s GROUP BY gpu_vendor, gpu_passthrough ORDER BY c DESC", gpuW), gpuA...); err == nil {
 		defer rows.Close()
@@ -899,7 +927,7 @@ func (ch *CHClient) FetchDashboardData(ctx context.Context, days int, repoSource
 	}
 
 	// ── 12. Error categories (raw table — excludes user_aborted) ──
-	catW, catA := chWhere(days, repoSource, repoSlug, "status='failed'", "error_category NOT IN ('','user_aborted')")
+	catW, catA := chWhere(days, repoSource, repoSlug, platform, "status='failed'", "error_category NOT IN ('','user_aborted')")
 	if rows, err := ch.db.QueryContext(ctx, fmt.Sprintf(
 		"SELECT error_category, count() c FROM telemetry_db.telemetry WHERE %s GROUP BY error_category ORDER BY c DESC", catW), catA...); err == nil {
 		defer rows.Close()
@@ -972,13 +1000,33 @@ func (ch *CHClient) FetchDashboardData(ctx context.Context, days int, repoSource
 	}
 
 	// ── 15. Recent records (one row per execution_id, with pipeline) ──
-	if recs, _, err := ch.FetchRecordsPaginated(ctx, 1, 20, "", "", "", "", "-created", repoSource, repoSlug, days); err == nil {
+	if recs, _, err := ch.FetchRecordsPaginated(ctx, 1, 20, "", "", "", "", "-created", repoSource, repoSlug, platform, days); err == nil {
 		data.RecentRecords = recs
+	}
+
+	// ── 17. Platform distribution (pve vs incus, derived for legacy rows) ──
+	platW, platA := chWhere(days, repoSource, repoSlug, platform, "status IN ('success','failed','aborted','unknown')")
+	// NOTE: platformExpr contains '%' (SQL LIKE) — must be passed as a %s
+	// argument, never concatenated into the fmt.Sprintf format string.
+	if rows, err := ch.db.QueryContext(ctx, fmt.Sprintf(
+		"SELECT %s AS plat, count() c FROM telemetry_db.telemetry WHERE %s GROUP BY plat ORDER BY c DESC", platformExpr, platW), platA...); err == nil {
+		defer rows.Close()
+		for rows.Next() {
+			var p PlatformCount
+			var c uint64
+			if rows.Scan(&p.Platform, &c) == nil {
+				if p.Platform == "" {
+					p.Platform = "unknown"
+				}
+				p.Count = int(c)
+				data.PlatformStats = append(data.PlatformStats, p)
+			}
+		}
 	}
 
 	// ── 16. Repository slug breakdown (owner/repo forks) ──
 	if repoSlug == "" {
-		slugW, slugA := chWhere(days, repoSource, "", "repo_slug != ''")
+		slugW, slugA := chWhere(days, repoSource, "", "", "repo_slug != ''")
 		if rows, err := ch.db.QueryContext(ctx, fmt.Sprintf(
 			"SELECT repo_slug, count() c FROM telemetry_db.telemetry WHERE %s GROUP BY repo_slug ORDER BY c DESC LIMIT 20", slugW), slugA...); err == nil {
 			defer rows.Close()
@@ -1000,17 +1048,31 @@ func (ch *CHClient) FetchDashboardData(ctx context.Context, days int, repoSource
 //  SCRIPT STATS (serves /api/scripts + frontend /api/stats)
 // ══════════════════════════════════════════════════════════════
 
-func (ch *CHClient) FetchScriptStats(ctx context.Context, days int, repoSource string, knownScripts map[string]ScriptInfo) (*ScriptAnalysisData, error) {
-	mw, ma := chMVWhere(days, repoSource)
-
-	rows, err := ch.db.QueryContext(ctx, fmt.Sprintf(`
-		SELECT nsapp, anyLast(type) as typ,
-			sum(total) as total,
-			sum(success) as sc,
-			sum(failed) as fc,
-			sum(aborted) as ac
-		FROM telemetry_db.mv_daily_stats WHERE %s
-		GROUP BY nsapp ORDER BY total DESC`, mw), ma...)
+func (ch *CHClient) FetchScriptStats(ctx context.Context, days int, repoSource, platform string, knownScripts map[string]ScriptInfo) (*ScriptAnalysisData, error) {
+	var rows *sql.Rows
+	var err error
+	if platform != "" {
+		// Platform filter needs the raw table (MVs have no platform column)
+		rw, ra := chWhere(days, repoSource, "", platform)
+		rows, err = ch.db.QueryContext(ctx, fmt.Sprintf(`
+			SELECT nsapp, anyLast(type) as typ,
+				count() as total,
+				countIf(status='success') as sc,
+				countIf(status='failed') as fc,
+				countIf(status='aborted') as ac
+			FROM telemetry_db.telemetry WHERE %s AND nsapp != ''
+			GROUP BY nsapp ORDER BY total DESC`, rw), ra...)
+	} else {
+		mw, ma := chMVWhere(days, repoSource)
+		rows, err = ch.db.QueryContext(ctx, fmt.Sprintf(`
+			SELECT nsapp, anyLast(type) as typ,
+				sum(total) as total,
+				sum(success) as sc,
+				sum(failed) as fc,
+				sum(aborted) as ac
+			FROM telemetry_db.mv_daily_stats WHERE %s
+			GROUP BY nsapp ORDER BY total DESC`, mw), ma...)
+	}
 	if err != nil {
 		return nil, fmt.Errorf("CH script stats: %w", err)
 	}
@@ -1085,7 +1147,32 @@ func (ch *CHClient) FetchScriptStats(ctx context.Context, days int, repoSource s
 	}
 	data.TotalScripts = len(data.TopScripts)
 
-	log.Printf("[CH] Script stats: %d scripts, %d total installs (days=%d)", data.TotalScripts, data.TotalInstalls, days)
+	// Recent activity: last 50 completed installations (was never populated before —
+	// the "Recent Activity" table on the scripts page rendered empty).
+	recentDays := days
+	if recentDays == 0 || recentDays > 30 {
+		recentDays = 30
+	}
+	recW, recA := chWhere(recentDays, repoSource, "", platform,
+		"status IN ('success','failed','aborted','unknown')", "nsapp != ''")
+	if rrows, rerr := ch.db.QueryContext(ctx, fmt.Sprintf(`
+		SELECT nsapp, type, status, exit_code, os_type, os_version, pve_version,
+			method, %s AS plat, toString(created)
+		FROM telemetry_db.telemetry WHERE %s
+		ORDER BY created DESC LIMIT 50`, platformExpr, recW), recA...); rerr == nil {
+		defer rrows.Close()
+		for rrows.Next() {
+			var rs RecentScript
+			var ec int16
+			if rrows.Scan(&rs.App, &rs.Type, &rs.Status, &ec, &rs.OsType, &rs.OsVersion,
+				&rs.PveVer, &rs.Method, &rs.Platform, &rs.Created) == nil {
+				rs.ExitCode = int(ec)
+				data.RecentScripts = append(data.RecentScripts, rs)
+			}
+		}
+	}
+
+	log.Printf("[CH] Script stats: %d scripts, %d total installs (days=%d, platform=%s)", data.TotalScripts, data.TotalInstalls, days, platform)
 	return data, nil
 }
 
@@ -1093,12 +1180,13 @@ func (ch *CHClient) FetchScriptStats(ctx context.Context, days int, repoSource s
 //  ERROR ANALYSIS
 // ══════════════════════════════════════════════════════════════
 
-func (ch *CHClient) FetchErrorAnalysisData(ctx context.Context, days int, repoSource, repoSlug string) (*ErrorAnalysisData, error) {
+func (ch *CHClient) FetchErrorAnalysisData(ctx context.Context, days int, repoSource, repoSlug, platform string) (*ErrorAnalysisData, error) {
 	data := &ErrorAnalysisData{}
 
 	mw, ma := chMVWhere(days, repoSource)
-	rawAgg := repoSlug != ""
-	rw, ra := chWhere(days, repoSource, repoSlug)
+	// Materialized views have no platform column — platform filters need raw-table aggregation.
+	rawAgg := repoSlug != "" || platform != ""
+	rw, ra := chWhere(days, repoSource, repoSlug, platform)
 
 	// Total installs
 	var ti uint64
@@ -1116,7 +1204,7 @@ func (ch *CHClient) FetchErrorAnalysisData(ctx context.Context, days int, repoSo
 	// Total real errors
 	var te uint64
 	if rawAgg {
-		errW, errA := chWhere(days, repoSource, repoSlug, "status='failed'", "error_category!='user_aborted'", "exit_code!=0")
+		errW, errA := chWhere(days, repoSource, repoSlug, platform, "status='failed'", "error_category!='user_aborted'", "exit_code!=0")
 		_ = ch.db.QueryRowContext(ctx, fmt.Sprintf(
 			"SELECT count() FROM telemetry_db.telemetry WHERE %s", errW), errA...,
 		).Scan(&te)
@@ -1132,7 +1220,7 @@ func (ch *CHClient) FetchErrorAnalysisData(ctx context.Context, days int, repoSo
 	}
 
 	// Stuck installing
-	stuckW, stuckA := chWhere(1, repoSource, repoSlug,
+	stuckW, stuckA := chWhere(1, repoSource, repoSlug, platform,
 		"status IN ('installing','validation','configuring')",
 		`(execution_id = '' OR execution_id NOT IN (
 			SELECT execution_id FROM telemetry_db.telemetry
@@ -1145,7 +1233,7 @@ func (ch *CHClient) FetchErrorAnalysisData(ctx context.Context, days int, repoSo
 
 	// Exit code stats
 	if rawAgg {
-		errW, errA := chWhere(days, repoSource, repoSlug, "status='failed'", "error_category!='user_aborted'", "exit_code!=0")
+		errW, errA := chWhere(days, repoSource, repoSlug, platform, "status='failed'", "error_category!='user_aborted'", "exit_code!=0")
 		if rows, err := ch.db.QueryContext(ctx, fmt.Sprintf(
 			"SELECT exit_code, count() c FROM telemetry_db.telemetry WHERE %s GROUP BY exit_code ORDER BY c DESC LIMIT 30", errW), errA...); err == nil {
 			defer rows.Close()
@@ -1186,7 +1274,7 @@ func (ch *CHClient) FetchErrorAnalysisData(ctx context.Context, days int, repoSo
 	}
 
 	// Category stats (excludes user_aborted)
-	cw, ca := chWhere(days, repoSource, repoSlug, "status='failed'", "error_category NOT IN ('','user_aborted')")
+	cw, ca := chWhere(days, repoSource, repoSlug, platform, "status='failed'", "error_category NOT IN ('','user_aborted')")
 	if rows, err := ch.db.QueryContext(ctx, fmt.Sprintf(`
 		SELECT error_category, count() c,
 			arrayStringConcat(arraySlice(groupUniqArray(nsapp),1,5),', ') apps
@@ -1207,7 +1295,7 @@ func (ch *CHClient) FetchErrorAnalysisData(ctx context.Context, days int, repoSo
 	}
 
 	// App errors (excludes user_aborted)
-	aw, aa := chWhere(days, repoSource, repoSlug, "status IN ('success','failed','aborted','unknown')")
+	aw, aa := chWhere(days, repoSource, repoSlug, platform, "status IN ('success','failed','aborted','unknown')")
 	if rows, err := ch.db.QueryContext(ctx, fmt.Sprintf(`
 		SELECT nsapp, anyLast(type), count() t,
 			countIf(status='failed' AND error_category!='user_aborted') f,
@@ -1239,20 +1327,26 @@ func (ch *CHClient) FetchErrorAnalysisData(ctx context.Context, days int, repoSo
 		}
 	}
 
-	// Error timeline
-	if rawAgg {
-		errW, errA := chWhere(days, repoSource, repoSlug, "status='failed'", "error_category!='user_aborted'", "exit_code!=0")
+	// Error timeline (failed + aborted per day; the Aborted series was never
+	// populated before, leaving the chart's second dataset permanently empty)
+	{
+		tlW, tlA := chWhere(days, repoSource, repoSlug, platform,
+			"status IN ('failed','aborted')")
 		if rows, err := ch.db.QueryContext(ctx, fmt.Sprintf(`
-			SELECT toString(toDate(created)) d, count() f
+			SELECT toString(toDate(created)) d,
+				countIf(status='failed' AND error_category!='user_aborted' AND exit_code!=0) f,
+				countIf(status='aborted' OR (status='failed' AND error_category='user_aborted')) a
 			FROM telemetry_db.telemetry WHERE %s
-			GROUP BY toDate(created) ORDER BY toDate(created)`, errW), errA...); err == nil {
+			GROUP BY toDate(created) ORDER BY toDate(created)`, tlW), tlA...); err == nil {
 			defer rows.Close()
 			dailyF := make(map[string]int)
+			dailyA := make(map[string]int)
 			for rows.Next() {
 				var d string
-				var f uint64
-				if rows.Scan(&d, &f) == nil {
+				var f, a uint64
+				if rows.Scan(&d, &f, &a) == nil {
 					dailyF[d] = int(f)
+					dailyA[d] = int(a)
 				}
 			}
 			actualDays := days
@@ -1262,51 +1356,32 @@ func (ch *CHClient) FetchErrorAnalysisData(ctx context.Context, days int, repoSo
 			for i := actualDays - 1; i >= 0; i-- {
 				date := time.Now().AddDate(0, 0, -i).Format("2006-01-02")
 				data.ErrorTimeline = append(data.ErrorTimeline, ErrorTimelinePoint{
-					Date:   date,
-					Failed: dailyF[date],
+					Date:    date,
+					Failed:  dailyF[date],
+					Aborted: dailyA[date],
 				})
 			}
-		}
-	} else if rows, err := ch.db.QueryContext(ctx, fmt.Sprintf(`
-		SELECT toString(day) d, sum(cnt) f
-		FROM telemetry_db.mv_daily_errors WHERE %s
-		GROUP BY day ORDER BY day`, mw), ma...); err == nil {
-		defer rows.Close()
-		dailyF := make(map[string]int)
-		for rows.Next() {
-			var d string
-			var f uint64
-			if rows.Scan(&d, &f) == nil {
-				dailyF[d] = int(f)
-			}
-		}
-		actualDays := days
-		if actualDays <= 0 {
-			actualDays = 30
-		}
-		for i := actualDays - 1; i >= 0; i-- {
-			date := time.Now().AddDate(0, 0, -i).Format("2006-01-02")
-			data.ErrorTimeline = append(data.ErrorTimeline, ErrorTimelinePoint{
-				Date:   date,
-				Failed: dailyF[date],
-			})
 		}
 	}
 
 	// Recent errors (excludes user_aborted)
-	rwErr, raErr := chWhere(days, repoSource, repoSlug, "status='failed'", "error_category!='user_aborted'")
+	rwErr, raErr := chWhere(days, repoSource, repoSlug, platform, "status='failed'", "error_category!='user_aborted'")
 	if rows, err := ch.db.QueryContext(ctx, fmt.Sprintf(`
 		SELECT nsapp, type, status, exit_code, error, error_category,
-			os_type, os_version, toString(created)
+			os_type, os_version, pve_version, %s AS plat,
+			execution_id, install_duration, toString(created)
 		FROM telemetry_db.telemetry WHERE %s
-		ORDER BY created DESC LIMIT 100`, rwErr), raErr...); err == nil {
+		ORDER BY created DESC LIMIT 100`, platformExpr, rwErr), raErr...); err == nil {
 		defer rows.Close()
 		for rows.Next() {
 			var er ErrorRecord
 			var ec int16
+			var dur uint32
 			if rows.Scan(&er.NSAPP, &er.Type, &er.Status, &ec, &er.Error, &er.ErrorCategory,
-				&er.OsType, &er.OsVersion, &er.Created) == nil {
+				&er.OsType, &er.OsVersion, &er.PveVer, &er.Platform,
+				&er.ExecutionID, &dur, &er.Created) == nil {
 				er.ExitCode = int(ec)
+				er.InstallDuration = int(dur)
 				data.RecentErrors = append(data.RecentErrors, er)
 			}
 		}
@@ -1337,7 +1412,7 @@ type pipelineStep struct {
 
 // recordsBaseWhere builds shared filters for the records API. Status is applied
 // after collapsing to the latest row per execution_id (see latestStatusSQL).
-func recordsBaseWhere(days int, repoSource, repoSlug, app, osType, typeFilter string) (string, []interface{}) {
+func recordsBaseWhere(days int, repoSource, repoSlug, platform, app, osType, typeFilter string) (string, []interface{}) {
 	parts := []string{"1=1"}
 	var args []interface{}
 	if days > 0 {
@@ -1363,6 +1438,9 @@ func recordsBaseWhere(days int, repoSource, repoSlug, app, osType, typeFilter st
 	if repoSlug != "" {
 		parts = append(parts, "repo_slug = ?")
 		args = append(args, repoSlug)
+	}
+	if pred := platformPred(platform); pred != "" {
+		parts = append(parts, pred)
 	}
 	return strings.Join(parts, " AND "), args
 }
@@ -1454,9 +1532,9 @@ func (ch *CHClient) attachPipelines(ctx context.Context, records []TelemetryReco
 }
 
 func (ch *CHClient) FetchRecordsPaginated(ctx context.Context, page, limit int,
-	status, app, osType, typeFilter, sortField, repoSource, repoSlug string, days int,
+	status, app, osType, typeFilter, sortField, repoSource, repoSlug, platform string, days int,
 ) ([]TelemetryRecord, int, error) {
-	baseWhere, baseArgs := recordsBaseWhere(days, repoSource, repoSlug, app, osType, typeFilter)
+	baseWhere, baseArgs := recordsBaseWhere(days, repoSource, repoSlug, platform, app, osType, typeFilter)
 	statusPred, statusArgs := latestStatusSQL(status)
 
 	latestWhere := "rn = 1"

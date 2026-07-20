@@ -28,10 +28,29 @@
 
         <div class="filters-bar" style="background: var(--bg-card); border: 1px solid var(--border-color); border-radius: 12px; margin-bottom: 24px;">
             <div class="filter-group">
+                <label>Source:</label>
+                <div class="quickfilter">
+                    <button class="source-btn active" data-repo="all">All</button>
+                    <button class="source-btn" data-repo="ProxmoxVE">ProxmoxVE</button>
+                    <button class="source-btn" data-repo="ProxmoxVED">ProxmoxVED</button>
+                </div>
+            </div>
+            <div class="filter-divider"></div>
+            <div class="filter-group">
+                <label>Platform:</label>
+                <div class="quickfilter">
+                    <button class="platform-btn active" data-platform="">All</button>
+                    <button class="platform-btn" data-platform="pve">Proxmox</button>
+                    <button class="platform-btn" data-platform="incus">Incus</button>
+                </div>
+            </div>
+            <div class="filter-divider"></div>
+            <div class="filter-group">
                 <label>Period:</label>
                 <div class="quickfilter">
+                    <button class="filter-btn active" data-days="1">Today</button>
                     <button class="filter-btn" data-days="7">7 Days</button>
-                    <button class="filter-btn active" data-days="30">30 Days</button>
+                    <button class="filter-btn" data-days="30">30 Days</button>
                     <button class="filter-btn" data-days="0">All Time</button>
                 </div>
             </div>
@@ -130,10 +149,11 @@
                         <tr>
                             <th>Script</th>
                             <th>Type</th>
+                            <th>Platform</th>
                             <th>Status</th>
                             <th>Exit Code</th>
                             <th>OS</th>
-                            <th>PVE</th>
+                            <th>Version</th>
                             <th>Method</th>
                             <th>Time</th>
                         </tr>

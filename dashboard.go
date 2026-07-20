@@ -39,6 +39,13 @@ type DashboardData struct {
 	TotalTools         int             `json:"total_tools"`
 	TotalAddons        int             `json:"total_addons"`
 	RepoSlugs          []RepoSlugCount `json:"repo_slugs"`
+	PlatformStats      []PlatformCount `json:"platform_stats"` // pve vs incus distribution
+}
+
+// PlatformCount holds per-platform (pve/incus) installation counts.
+type PlatformCount struct {
+	Platform string `json:"platform"`
+	Count    int    `json:"count"`
 }
 
 type AppCount struct {
@@ -159,15 +166,19 @@ type AppErrorDetail struct {
 }
 
 type ErrorRecord struct {
-	NSAPP         string `json:"nsapp"`
-	Type          string `json:"type"`
-	Status        string `json:"status"`
-	ExitCode      int    `json:"exit_code"`
-	Error         string `json:"error"`
-	ErrorCategory string `json:"error_category"`
-	OsType        string `json:"os_type"`
-	OsVersion     string `json:"os_version"`
-	Created       string `json:"created"`
+	NSAPP           string `json:"nsapp"`
+	Type            string `json:"type"`
+	Status          string `json:"status"`
+	ExitCode        int    `json:"exit_code"`
+	Error           string `json:"error"`
+	ErrorCategory   string `json:"error_category"`
+	OsType          string `json:"os_type"`
+	OsVersion       string `json:"os_version"`
+	PveVer          string `json:"pve_version,omitempty"`
+	Platform        string `json:"platform,omitempty"` // "pve" | "incus" | ""
+	ExecutionID     string `json:"execution_id,omitempty"`
+	InstallDuration int    `json:"install_duration,omitempty"`
+	Created         string `json:"created"`
 }
 
 type ErrorTimelinePoint struct {
@@ -215,6 +226,7 @@ type RecentScript struct {
 	OsType    string `json:"os_type"`
 	OsVersion string `json:"os_version"`
 	PveVer    string `json:"pve_version"`
+	Platform  string `json:"platform,omitempty"` // "pve" | "incus" | ""
 	Created   string `json:"created"`
 	Method    string `json:"method"`
 }

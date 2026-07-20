@@ -14,11 +14,21 @@ function formatTimestamp(ts) {
   return new Date(ts).toLocaleDateString('en-US', { month: 'short', day: 'numeric', year: 'numeric', hour: 'numeric', minute: '2-digit', hour12: true });
 }
 
+function platformBadge(p) {
+  if (p === 'incus') return '<span class="platform-badge incus" title="Incus host">INCUS</span>';
+  if (p === 'pve') return '<span class="platform-badge pve" title="Proxmox VE host">PVE</span>';
+  return '<span class="platform-badge unknown">—</span>';
+}
+
 async function fetchData() {
-  const days = document.querySelector('.filter-btn.active')?.dataset.days || '30';
-  const repo = 'ProxmoxVE';
+  // Default: today, ALL sources (repo filter is optional)
+  const days = document.querySelector('.filter-btn.active')?.dataset.days || '1';
+  const repo = document.querySelector('.source-btn.active')?.dataset.repo || 'all';
+  const platform = document.querySelector('.platform-btn.active')?.dataset.platform || '';
   try {
-    const resp = await fetch('/api/scripts?days=' + days + '&repo=' + repo);
+    let url = '/api/scripts?days=' + days + '&repo=' + encodeURIComponent(repo);
+    if (platform) url += '&platform=' + encodeURIComponent(platform);
+    const resp = await fetch(url);
     if (!resp.ok) throw new Error('Fetch failed');
     return await resp.json();
   } catch (e) {
@@ -133,7 +143,7 @@ function renderBottomTable() {
 function renderRecentTable() {
   const tbody = document.getElementById('recentTableBody');
   if (!currentData || !currentData.recent_scripts) {
-    tbody.innerHTML = '<tr><td colspan="8" style="text-align:center;color:var(--text-muted);padding:24px;">No data</td></tr>';
+    tbody.innerHTML = '<tr><td colspan="9" style="text-align:center;color:var(--text-muted);padding:24px;">No data</td></tr>';
     return;
   }
   const search = (document.getElementById('searchRecent').value || '').toLowerCase();
@@ -152,6 +162,7 @@ function renderRecentTable() {
     return '<tr>' +
       '<td><strong>' + escapeHtml(s.app) + '</strong></td>' +
       '<td><span class="type-badge ' + typeClass + '">' + (s.type || '-').toUpperCase() + '</span></td>' +
+      '<td>' + platformBadge(s.platform) + '</td>' +
       '<td><span class="status-badge ' + statusClass + '">' + escapeHtml(s.status) + '</span></td>' +
       '<td><span class="exit-code ' + codeClass + '">' + s.exit_code + '</span></td>' +
       '<td>' + escapeHtml(os) + '</td>' +
@@ -190,6 +201,20 @@ async function refreshData() {
 document.querySelectorAll('.filter-btn').forEach(btn => {
   btn.addEventListener('click', function() {
     document.querySelectorAll('.filter-btn').forEach(b => b.classList.remove('active'));
+    this.classList.add('active');
+    refreshData();
+  });
+});
+document.querySelectorAll('.source-btn').forEach(btn => {
+  btn.addEventListener('click', function() {
+    document.querySelectorAll('.source-btn').forEach(b => b.classList.remove('active'));
+    this.classList.add('active');
+    refreshData();
+  });
+});
+document.querySelectorAll('.platform-btn').forEach(btn => {
+  btn.addEventListener('click', function() {
+    document.querySelectorAll('.platform-btn').forEach(b => b.classList.remove('active'));
     this.classList.add('active');
     refreshData();
   });

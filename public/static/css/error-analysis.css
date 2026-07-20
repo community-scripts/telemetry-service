@@ -270,6 +270,29 @@ body {
   color: #fff;
 }
 
+/* Platform filter buttons (pve / incus) */
+.platform-btn {
+  background: transparent;
+  border: none;
+  color: var(--text-secondary);
+  padding: 6px 14px;
+  border-radius: 6px;
+  font-size: 13px;
+  font-weight: 500;
+  cursor: pointer;
+  transition: all 0.2s;
+}
+
+.platform-btn:hover {
+  background: var(--bg-tertiary);
+  color: var(--text-primary);
+}
+
+.platform-btn.active {
+  background: var(--accent-cyan, #22d3ee);
+  color: #06282e;
+}
+
 .btn {
   display: inline-flex;
   align-items: center;
@@ -734,4 +757,109 @@ textarea.form-input {
   font-size: 13px;
   min-width: 220px;
   max-width: 320px;
+}
+
+/* ── v3: Platform badges (pve / incus) ── */
+.platform-badge {
+  display: inline-flex;
+  align-items: center;
+  padding: 4px 10px;
+  border-radius: 6px;
+  font-size: 11px;
+  font-weight: 700;
+  text-transform: uppercase;
+  letter-spacing: 0.5px;
+}
+.platform-badge.pve {
+  background: rgba(230, 126, 34, 0.15);
+  color: #e67e22;
+  border: 1px solid rgba(230, 126, 34, 0.3);
+}
+.platform-badge.incus {
+  background: rgba(20, 184, 166, 0.15);
+  color: #14b8a6;
+  border: 1px solid rgba(20, 184, 166, 0.3);
+}
+.platform-badge.unknown {
+  color: var(--text-muted);
+  border: 1px solid var(--border-color);
+}
+
+/* ── v3: Error detail modal ── */
+.error-detail-modal {
+  max-width: 900px;
+}
+.detail-chips {
+  display: flex;
+  gap: 8px;
+  align-items: center;
+  flex-wrap: wrap;
+  margin-bottom: 16px;
+}
+.detail-meta-grid {
+  display: grid;
+  grid-template-columns: repeat(auto-fit, minmax(180px, 1fr));
+  gap: 10px 20px;
+  background: var(--bg-secondary);
+  border: 1px solid var(--border-color);
+  border-radius: 10px;
+  padding: 14px 16px;
+  margin-bottom: 16px;
+  font-size: 13px;
+}
+.detail-meta-grid > div {
+  display: flex;
+  flex-direction: column;
+  gap: 2px;
+  min-width: 0;
+}
+.dm-label {
+  font-size: 11px;
+  color: var(--text-muted);
+  text-transform: uppercase;
+  letter-spacing: 0.5px;
+}
+.error-header-line {
+  background: rgba(239, 68, 68, 0.08);
+  border: 1px solid rgba(239, 68, 68, 0.25);
+  border-radius: 8px;
+  padding: 10px 14px;
+  font-size: 13px;
+  font-weight: 600;
+  color: var(--accent-red, #ef4444);
+  margin-bottom: 14px;
+  word-break: break-word;
+}
+.error-trace-header {
+  display: flex;
+  justify-content: space-between;
+  align-items: center;
+  font-size: 12px;
+  font-weight: 700;
+  text-transform: uppercase;
+  letter-spacing: 0.5px;
+  color: var(--text-muted);
+  margin-bottom: 6px;
+}
+.error-trace-box {
+  background: var(--bg-secondary);
+  border: 1px solid var(--border-color);
+  border-radius: 10px;
+  padding: 14px;
+  font-family: 'SFMono-Regular', Consolas, 'Liberation Mono', monospace;
+  font-size: 12px;
+  line-height: 1.55;
+  white-space: pre-wrap;
+  word-break: break-word;
+  max-height: 420px;
+  overflow-y: auto;
+  color: var(--text-secondary);
+  margin: 0;
+}
+.btn-sm {
+  padding: 4px 10px;
+  font-size: 12px;
+}
+.clickable-row:hover {
+  background: var(--bg-secondary);
 }
