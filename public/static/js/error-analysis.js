@@ -137,6 +137,24 @@ function updateExitCodeTable(exitCodes) {
   }).join('');
 }
 
+function updateSignatureTable(signatures) {
+  const tbody = document.getElementById('signatureTable');
+  if (!tbody) return;
+  if (!signatures || signatures.length === 0) {
+    tbody.innerHTML = '<tr><td colspan="5" style="text-align:center;color:var(--text-muted);padding:24px;">No structured failure signatures in this period (older clients don\'t report the failing command)</td></tr>';
+    return;
+  }
+  tbody.innerHTML = signatures.map(s => {
+    return '<tr>' +
+      '<td style="font-family:monospace;font-size:12px;max-width:420px;overflow:hidden;text-overflow:ellipsis;white-space:nowrap;" title="' + escapeAttr(s.command) + '">' + escapeHtml(s.command) + '</td>' +
+      '<td><strong style="color:var(--accent-red);">' + s.count.toLocaleString() + '</strong></td>' +
+      '<td>' + (s.top_exit_code ? '<span class="exit-code err">' + s.top_exit_code + '</span>' : '-') + '</td>' +
+      '<td>' + s.unique_apps + '</td>' +
+      '<td style="font-size:12px;color:var(--text-secondary);max-width:300px;overflow:hidden;text-overflow:ellipsis;white-space:nowrap;" title="' + escapeAttr(s.apps) + '">' + escapeHtml(s.apps) + '</td>' +
+      '</tr>';
+  }).join('');
+}
+
 function updateCategoryTable(categories) {
   const tbody = document.getElementById('categoryTable');
   if (!categories || categories.length === 0) {
@@ -468,6 +486,7 @@ async function refreshData() {
   currentData = data;
   updateStats(data);
   updateExitCodeTable(data.exit_code_stats);
+  updateSignatureTable(data.signatures);
   updateCategoryTable(data.category_stats);
   updateAppErrorTable(data.app_errors);
   updateRecentErrors(data.recent_errors);

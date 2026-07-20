@@ -136,6 +136,17 @@ type ErrorAnalysisData struct {
 	RecentErrors    []ErrorRecord        `json:"recent_errors"`
 	StuckInstalling int                  `json:"stuck_installing"`
 	ErrorTimeline   []ErrorTimelinePoint `json:"error_timeline"`
+	Signatures      []ErrorSignature     `json:"signatures"` // grouped by failing command
+}
+
+// ErrorSignature groups failures by the exact command that failed (extracted
+// from the structured error header "… | at line L: <command>").
+type ErrorSignature struct {
+	Command     string `json:"command"`
+	Count       int    `json:"count"`
+	TopExitCode int    `json:"top_exit_code"`
+	UniqueApps  int    `json:"unique_apps"`
+	Apps        string `json:"apps"`
 }
 
 type ExitCodeStat struct {

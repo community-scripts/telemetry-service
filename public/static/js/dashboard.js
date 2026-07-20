@@ -382,6 +382,16 @@ function updateAppsChart(topApps) {
       responsive: true,
       maintainAspectRatio: false,
       indexAxis: 'x',
+      onClick: function(evt, elements) {
+        // Click a bar → open the per-script daily drill-down on the Scripts page
+        if (elements && elements.length > 0) {
+          const app = displayApps[elements[0].index]?.app;
+          if (app) window.location.href = '/script-analysis?app=' + encodeURIComponent(app);
+        }
+      },
+      onHover: function(evt, elements) {
+        evt.native.target.style.cursor = elements && elements.length ? 'pointer' : 'default';
+      },
       plugins: {
         legend: { display: false },
         tooltip: {
@@ -394,7 +404,7 @@ function updateAppsChart(topApps) {
           displayColors: true,
           callbacks: {
             label: function(ctx) {
-              return ctx.parsed.y.toLocaleString() + ' installations';
+              return ctx.parsed.y.toLocaleString() + ' installations (click for details)';
             }
           }
         }
@@ -501,15 +511,38 @@ function updateCharts(data) {
     }
   });
 
-  // Status pie chart
+  // Status pie chart (now includes Aborted — was silently missing before)
   if (charts.status) charts.status.destroy();
   charts.status = new Chart(document.getElementById('statusChart'), {
     type: 'doughnut',
     data: {
-      labels: ['Success', 'Failed', 'Installing'],
+      labels: ['Success', 'Failed', 'Aborted', 'Installing'],
       datasets: [{
-        data: [data.success_count, data.failed_count, data.installing_count],
-        backgroundColor: ['#22c55e', '#ef4444', '#eab308'],
+        data: [data.success_count, data.failed_count, data.aborted_count || 0, data.installing_count],
+        backgroundColor: ['#22c55e', '#ef4444', '#a855f7', '#eab308'],
+        borderWidth: 0
+      }]
+    },
+    options: {
+      responsive: true,
+      maintainAspectRatio: false,
+      plugins: {
+        legend: { position: 'right', labels: { color: '#8b949e', padding: 12 } }
+      }
+    }
+  });
+
+  // Platform doughnut (pve vs incus)
+  if (charts.platform) charts.platform.destroy();
+  const platStats = (data.platform_stats || []);
+  const platColors = { pve: '#e67e22', incus: '#14b8a6', unknown: '#64748b' };
+  charts.platform = new Chart(document.getElementById('platformChart'), {
+    type: 'doughnut',
+    data: {
+      labels: platStats.map(p => p.platform === 'pve' ? 'Proxmox VE' : p.platform === 'incus' ? 'Incus' : 'Unknown'),
+      datasets: [{
+        data: platStats.map(p => p.count),
+        backgroundColor: platStats.map(p => platColors[p.platform] || '#64748b'),
         borderWidth: 0
       }]
     },

@@ -364,3 +364,11 @@ document.querySelectorAll('.platform-btn').forEach(btn => {
   });
 });
 refreshData();
+
+// Deep link: /script-analysis?app=jellyfin opens the drill-down directly
+// (used by the clickable Top Applications chart on the dashboard)
+(function() {
+  const params = new URLSearchParams(window.location.search);
+  const app = params.get('app');
+  if (app) openScriptDetail(app);
+})();

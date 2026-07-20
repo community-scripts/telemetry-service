@@ -583,20 +583,19 @@ func (ch *CHClient) FetchDashboardData(ctx context.Context, days int, repoSource
 	rawAgg := repoSlug != "" || platform != ""
 
 	// ── 1. Main counts ──
+	// "Total" counts DISTINCT installations (one per execution), not raw event
+	// rows. Every progress ping (validation/configuring) is its own ClickHouse
+	// row, so a plain count() inflated the number ~5x vs success+failed+aborted
+	// (e.g. "10,455 created" while only ~1,900 installs actually finished).
 	var total, sc, fc, ac uint64
 	var err error
 	rw, ra := chWhere(days, repoSource, repoSlug, platform)
-	if rawAgg {
-		err = ch.db.QueryRowContext(ctx, fmt.Sprintf(`
-			SELECT count(), countIf(status='success'), countIf(status='failed'), countIf(status='aborted')
-			FROM telemetry_db.telemetry WHERE %s`, rw), ra...,
-		).Scan(&total, &sc, &fc, &ac)
-	} else {
-		err = ch.db.QueryRowContext(ctx, fmt.Sprintf(`
-			SELECT sum(total), sum(success), sum(failed), sum(aborted)
-			FROM telemetry_db.mv_daily_stats WHERE %s`, mw), ma...,
-		).Scan(&total, &sc, &fc, &ac)
-	}
+	err = ch.db.QueryRowContext(ctx, fmt.Sprintf(`
+		SELECT
+			uniqExact(if(execution_id = '', random_id, execution_id)),
+			countIf(status='success'), countIf(status='failed'), countIf(status='aborted')
+		FROM telemetry_db.telemetry WHERE %s`, rw), ra...,
+	).Scan(&total, &sc, &fc, &ac)
 	if err != nil {
 		return nil, fmt.Errorf("CH dashboard counts: %w", err)
 	}
@@ -617,10 +616,11 @@ func (ch *CHClient) FetchDashboardData(ctx context.Context, days int, repoSource
 	).Scan(&avgDur)
 	data.AvgInstallDuration = avgDur
 
-	// Total all-time (from MV, no filter)
+	// Total all-time: distinct installations across the whole table.
+	// uniq() is approximate (<1% error) but fast enough for a headline number.
 	var tat uint64
 	_ = ch.db.QueryRowContext(ctx,
-		"SELECT sum(total) FROM telemetry_db.mv_daily_stats",
+		"SELECT uniq(if(execution_id = '', random_id, execution_id)) FROM telemetry_db.telemetry",
 	).Scan(&tat)
 	data.TotalAllTime = int(tat)
 	data.SampleSize = data.TotalInstalls
@@ -1502,6 +1502,36 @@ func (ch *CHClient) FetchErrorAnalysisData(ctx context.Context, days int, repoSo
 					Failed:  dailyF[date],
 					Aborted: dailyA[date],
 				})
+			}
+		}
+	}
+
+	// Failure signatures: group by the exact failing command from the v3
+	// structured error header ("… | at line L: <cmd>"). Answers "WHICH command
+	// breaks most often, across which apps" — far more actionable than exit codes.
+	sigW, sigA := chWhere(days, repoSource, repoSlug, platform,
+		"status='failed'", "error_category!='user_aborted'", "error != ''")
+	if rows, err := ch.db.QueryContext(ctx, fmt.Sprintf(`
+		SELECT
+			extract(error, 'at line [0-9]+: ([^\n|]{1,200})') AS cmd,
+			count() c,
+			uniqExact(nsapp) ua,
+			topK(1)(exit_code) tec,
+			arrayStringConcat(arraySlice(groupUniqArray(nsapp),1,5),', ') apps
+		FROM telemetry_db.telemetry WHERE %s AND cmd != ''
+		GROUP BY cmd ORDER BY c DESC LIMIT 20`, sigW), sigA...); err == nil {
+		defer rows.Close()
+		for rows.Next() {
+			var sig ErrorSignature
+			var c, ua uint64
+			var tec []int16
+			if rows.Scan(&sig.Command, &c, &ua, &tec, &sig.Apps) == nil {
+				sig.Count = int(c)
+				sig.UniqueApps = int(ua)
+				if len(tec) > 0 {
+					sig.TopExitCode = int(tec[0])
+				}
+				data.Signatures = append(data.Signatures, sig)
 			}
 		}
 	}
