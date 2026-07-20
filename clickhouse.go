@@ -585,7 +585,7 @@ func (ch *CHClient) FetchDashboardData(ctx context.Context, days int, repoSource
 	// ── 1. Main counts ──
 	var total, sc, fc, ac uint64
 	var err error
-	rw, ra := chWhere(days, repoSource, repoSlug)
+	rw, ra := chWhere(days, repoSource, repoSlug, platform)
 	if rawAgg {
 		err = ch.db.QueryRowContext(ctx, fmt.Sprintf(`
 			SELECT count(), countIf(status='success'), countIf(status='failed'), countIf(status='aborted')
