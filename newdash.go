@@ -49,6 +49,9 @@ const runsCTE = `
 		any(gpu_vendor)                                AS gpu,
 		any(gpu_passthrough)                           AS gpupass,
 		any(has_arm)                                   AS arm,
+		any(arch)                                      AS cpuarch,
+		any(payload_version)                           AS pver,
+		any(failed_command)                            AS failcmd,
 		max(install_duration)                          AS duration
 	FROM telemetry_db.telemetry
 	WHERE %s
@@ -184,6 +187,7 @@ type NewDashData struct {
 	ByGPUPass   []NewCount `json:"by_gpu_passthrough"`
 	ByArm       []NewCount `json:"by_arm"`
 	ByMethod    []NewCount `json:"by_method"`
+	ByClient    []NewCount `json:"by_client"`
 
 	Recent []NewRecentRun `json:"recent"`
 }
@@ -399,7 +403,12 @@ func (ch *CHClient) FetchNewDashboard(
 		{"cpu", &d.ByCPU, "cpu", "cpu != ''", 8},
 		{"gpu", &d.ByGPU, "gpu", "gpu != ''", 8},
 		{"gpu passthrough", &d.ByGPUPass, "gpupass", "gpupass != ''", 6},
-		{"arm", &d.ByArm, "if(arm = 1, 'arm64', 'x86_64')", "", 3},
+		// arch is the real column now. has_arm is the fallback for rows written
+		// before the server stored it, where arm64-or-not is all that survives.
+		{"arch", &d.ByArm,
+			"if(cpuarch != '', cpuarch, if(arm = 1, 'arm64', 'x86_64 (inferred)'))", "", 6},
+		{"client", &d.ByClient,
+			"if(pver = 0, 'pre-versioning', concat('payload v', toString(pver)))", "", 6},
 		{"method", &d.ByMethod, "meth", "meth != ''", 8},
 	}
 	for _, c := range counts {
@@ -430,7 +439,8 @@ func (ch *CHClient) FetchNewDashboard(
 	// Signatures: the same failure text seen across runs. The closest thing to
 	// "why", and the existing pages compute it without ever showing it.
 	rows, e = ch.db.QueryContext(ctx, fmt.Sprintf(`
-		SELECT final_cat, final_exit, substring(final_err, 1, 200) msg,
+		SELECT final_cat, final_exit,
+		       substring(if(failcmd != '', failcmd, final_err), 1, 200) msg,
 		       count() c, uniqExact(app) apps
 		FROM (%s)
 		WHERE final_status = 'failed' AND final_err != ''

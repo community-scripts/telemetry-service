@@ -252,6 +252,27 @@ func (ch *CHClient) migrate() {
 		// Virtualization platform: 'pve' (Proxmox VE) or 'incus'. Old rows have ''
 		// and are derived at query time from pve_version (see platformExpr).
 		`ALTER TABLE telemetry_db.telemetry ADD COLUMN IF NOT EXISTS platform LowCardinality(String)`,
+
+		// Payload schema version. Rows written before the engine started sending
+		// it keep 0, which is how "an old client" is spelled. Previously the only
+		// way to guess a client's age was which fields happened to be present,
+		// and that is guesswork rather than a contract.
+		`ALTER TABLE telemetry_db.telemetry ADD COLUMN IF NOT EXISTS payload_version UInt16`,
+
+		// The engine has always sent arch and it was never stored, so every row
+		// ever written dropped it on the floor. has_arm was the only substitute
+		// and it cannot tell amd64 from riscv64.
+		`ALTER TABLE telemetry_db.telemetry ADD COLUMN IF NOT EXISTS arch LowCardinality(String)`,
+
+		// Structured failure location. The engine already had both as values and
+		// only ever flattened them into the free-text error, where grouping by
+		// the failing command means parsing prose.
+		`ALTER TABLE telemetry_db.telemetry ADD COLUMN IF NOT EXISTS failed_command String`,
+		`ALTER TABLE telemetry_db.telemetry ADD COLUMN IF NOT EXISTS failed_line UInt32`,
+
+		// Collected by the engine, never transmitted until payload version 2.
+		`ALTER TABLE telemetry_db.telemetry ADD COLUMN IF NOT EXISTS kernel_version String`,
+		`ALTER TABLE telemetry_db.telemetry ADD COLUMN IF NOT EXISTS app_version String`,
 	}
 	for _, s := range alters {
 		if _, err := ch.db.ExecContext(ctx, s); err != nil {
@@ -325,6 +346,30 @@ func (ch *CHClient) migrate() {
 	log.Println("[CH-MIGRATE] Schema ready")
 }
 
+// ApplyRetention sets or clears a TTL on the raw telemetry table.
+//
+// ClickHouse enforces this during its normal merges, so there is no job to run
+// and nothing to schedule -- unlike the delete-based cleanup, which walks the
+// table. With days <= 0 nothing is touched and the table keeps growing without
+// bound, which is the current state and is why this exists.
+//
+// Called explicitly rather than folded into migrate(): every other migration is
+// additive and safe to run blind, and this one deletes history.
+func (ch *CHClient) ApplyRetention(ctx context.Context, days int) {
+	if days <= 0 {
+		log.Println("[CH-RETENTION] no retention configured; the telemetry table grows without bound " +
+			"(set TELEMETRY_RETENTION_DAYS to change this)")
+		return
+	}
+	q := fmt.Sprintf(
+		"ALTER TABLE telemetry_db.telemetry MODIFY TTL created + INTERVAL %d DAY", days)
+	if _, err := ch.db.ExecContext(ctx, q); err != nil {
+		log.Printf("[CH-RETENTION] could not set %d-day TTL: %v", days, err)
+		return
+	}
+	log.Printf("[CH-RETENTION] rows older than %d days will be dropped during merges", days)
+}
+
 func (ch *CHClient) Close() error                   { return ch.db.Close() }
 func (ch *CHClient) Ping(ctx context.Context) error { return ch.db.PingContext(ctx) }
 
@@ -347,7 +392,9 @@ func (ch *CHClient) InsertTelemetry(ctx context.Context, p TelemetryOut) error {
 		random_id, execution_id, repo_source, repo_slug,
 		cpu_vendor, cpu_model,
 		gpu_vendor, gpu_model, gpu_passthrough,
-		ram_speed, install_duration, has_arm, platform
+		ram_speed, install_duration, has_arm, platform,
+		payload_version, arch, failed_command, failed_line,
+		kernel_version, app_version
 	) VALUES (
 		?, ?, ?, ?, ?, now64(3),
 		?, ?, ?, ?,
@@ -356,7 +403,9 @@ func (ch *CHClient) InsertTelemetry(ctx context.Context, p TelemetryOut) error {
 		?, ?, ?, ?,
 		?, ?,
 		?, ?, ?,
-		?, ?, ?, ?
+		?, ?, ?, ?,
+		?, ?, ?, ?,
+		?, ?
 	)`
 	_, err := ch.db.ExecContext(ctx, q,
 		generateRecordID(), p.NSAPP, p.Type, p.Status, p.Method,
@@ -367,6 +416,8 @@ func (ch *CHClient) InsertTelemetry(ctx context.Context, p TelemetryOut) error {
 		p.CPUVendor, p.CPUModel,
 		p.GPUVendor, p.GPUModel, p.GPUPassthrough,
 		p.RAMSpeed, uint32(p.InstallDuration), boolToUint8(p.HasArm), p.Platform,
+		uint16(p.PayloadVersion), p.Arch, p.FailedCommand, uint32(p.FailedLine),
+		p.KernelVersion, p.AppVersion,
 	)
 	return err
 }
@@ -438,7 +489,7 @@ func repoSourcePred(repoSource string) (string, []interface{}) {
 //   - explicit platform column wins
 //   - pve_version starting with "incus" (client sends "incus-x.y") → incus
 //   - any other non-empty pve_version → pve
-//   - otherwise unknown ('')
+//   - otherwise unknown (”)
 const platformExpr = `multiIf(platform != '', platform, pve_version LIKE 'incus%', 'incus', pve_version != '', 'pve', '')`
 
 // platformPred returns a SQL predicate for a platform filter ("" = no filter).
@@ -626,6 +677,13 @@ func (ch *CHClient) FetchDashboardData(ctx context.Context, days int, repoSource
 	data.SampleSize = data.TotalInstalls
 
 	// ── 2. Installing count (raw table — execution_id subquery) ──
+	//
+	// Deliberately a fixed 24 hours, not the selected period: "still installing"
+	// is a question about now, and counting everything that never finished over
+	// a year answers a different one. The window is reported alongside the
+	// figure so the page can say so -- it used to sit beside Failed and Aborted,
+	// which do honour the selector, with nothing to mark it as different.
+	data.InstallingWindowDays = 1
 	stuckW, stuckA := chWhere(1, repoSource, repoSlug, platform,
 		"status IN ('installing','validation','configuring')",
 		`(execution_id = '' OR execution_id NOT IN (
@@ -1108,15 +1166,29 @@ func (ch *CHClient) FetchScriptStats(ctx context.Context, days int, repoSource, 
 		if completed > 0 {
 			rate = float64(sc) / float64(completed) * 100
 		}
+		// Installs per day over the selected window.
+		//
+		// This used to divide a windowed total by the script's age since
+		// creation, which is two different periods in one fraction -- and it
+		// never ran anyway, because the whole block was behind knownScripts !=
+		// nil and every caller passes nil. The column read 0.00 for every row on
+		// every page, always.
+		//
+		// The window is the honest denominator: it is the period the numerator
+		// was counted over, and it needs no metadata the server does not have.
 		daysOld := 0
 		installsPerDay := float64(0)
+		if days > 0 {
+			installsPerDay = float64(total) / float64(days)
+		}
+		// Age still needs script creation dates, which live in PocketBase and
+		// never reach this service. Left at 0 rather than guessed.
 		if knownScripts != nil {
 			if info, ok := knownScripts[nsapp]; ok && !info.Created.IsZero() {
 				daysOld = int(now.Sub(info.Created).Hours() / 24)
 				if daysOld < 1 {
 					daysOld = 1
 				}
-				installsPerDay = float64(total) / float64(daysOld)
 			}
 		}
 

@@ -239,9 +239,11 @@
       <div class="card"><h3>CPU vendor</h3><div class="bars" id="by_cpu"></div></div>
       <div class="card"><h3>GPU vendor</h3><div class="bars" id="by_gpu"></div></div>
       <div class="card"><h3>GPU passthrough</h3><div class="bars" id="by_gpu_passthrough"></div></div>
-      <div class="card"><h3>Architecture <span>has_arm; arch is not stored</span></h3>
+      <div class="card"><h3>Architecture <span>arch, or inferred for old rows</span></h3>
         <div class="bars" id="by_arm"></div></div>
       <div class="card"><h3>Method</h3><div class="bars" id="by_method"></div></div>
+      <div class="card"><h3>Client <span>payload version</span></h3>
+        <div class="bars" id="by_client"></div></div>
     </div>
   </section>
 
@@ -458,6 +460,7 @@ function render(d) {
   bars("by_gpu_passthrough", d.by_gpu_passthrough);
   bars("by_arm", d.by_arm);
   bars("by_method", d.by_method);
+  bars("by_client", d.by_client);
 
   const ec = d.exit_codes || [];
   $("exit_codes").innerHTML = ec.length ? `<table>

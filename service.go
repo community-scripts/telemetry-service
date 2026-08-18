@@ -42,6 +42,18 @@ type Config struct {
 	RequestTimeout   time.Duration // upstream timeout
 	EnableReqLogging bool          // default false (GDPR-friendly)
 
+	// RetentionDays sets a TTL on the raw telemetry table: rows older than this
+	// are dropped by ClickHouse during its normal merges, with no job to run and
+	// nothing to schedule.
+	//
+	// Off by default, and deliberately so. Without it the table grows without
+	// bound, which is the real state today -- but switching it on deletes
+	// history irreversibly, and how far back the project wants to see is a
+	// decision, not a default someone should inherit by upgrading. Set
+	// TELEMETRY_RETENTION_DAYS when that decision is made; 400 keeps thirteen
+	// months, which covers the longest window any dashboard offers.
+	RetentionDays int
+
 	// Cache
 	RedisURL     string
 	EnableRedis  bool
@@ -126,6 +138,25 @@ type TelemetryIn struct {
 	// Platform is the virtualization platform: "pve" (Proxmox VE) or "incus".
 	// Derived from pve_version when the client doesn't send it.
 	Platform string `json:"platform,omitempty"`
+
+	// PayloadVersion is the engine's schema version. 0 means a client from
+	// before it existed, which is the only honest way to say "unknown age" --
+	// inferring it from which fields happen to be present is guesswork.
+	PayloadVersion int `json:"payload_version,omitempty"`
+
+	// Arch is the CPU architecture, e.g. amd64 or arm64. The engine has always
+	// sent it; the server dropped it on the floor until payload version 2.
+	Arch string `json:"arch,omitempty"`
+
+	// FailedCommand and FailedLine locate a failure without parsing the
+	// free-text error string it used to be flattened into.
+	FailedCommand string `json:"failed_command,omitempty"`
+	FailedLine    int    `json:"failed_line,omitempty"`
+
+	// KernelVersion and AppVersion were collected by the engine long before
+	// anything transmitted them.
+	KernelVersion string `json:"kernel_version,omitempty"`
+	AppVersion    string `json:"app_version,omitempty"`
 }
 
 // TelemetryOut is the output shape for telemetry records
@@ -170,6 +201,14 @@ type TelemetryOut struct {
 
 	// Installation pipeline: JSON array [{s:"installing",t:"..."}, ...] (server-built for API responses)
 	Pipeline string `json:"pipeline,omitempty"`
+
+	// Payload version 2 additions. See TelemetryIn for why each exists.
+	PayloadVersion int    `json:"payload_version,omitempty"`
+	Arch           string `json:"arch,omitempty"`
+	FailedCommand  string `json:"failed_command,omitempty"`
+	FailedLine     int    `json:"failed_line,omitempty"`
+	KernelVersion  string `json:"kernel_version,omitempty"`
+	AppVersion     string `json:"app_version,omitempty"`
 }
 
 // TelemetryStatusUpdate contains only fields needed for status updates
@@ -1083,6 +1122,10 @@ func rescueBrokenJSON(raw []byte) (TelemetryIn, error) {
 	in.CPUModel = strField("cpu_model")
 	in.RAMSpeed = strField("ram_speed")
 	in.Platform = strField("platform")
+	in.Arch = strField("arch")
+	in.FailedCommand = strField("failed_command")
+	in.KernelVersion = strField("kernel_version")
+	in.AppVersion = strField("app_version")
 
 	in.CTType = intField("ct_type")
 	in.DiskSize = intField("disk_size")
@@ -1090,6 +1133,8 @@ func rescueBrokenJSON(raw []byte) (TelemetryIn, error) {
 	in.RAMSize = intField("ram_size")
 	in.ExitCode = intField("exit_code")
 	in.InstallDuration = intField("install_duration")
+	in.PayloadVersion = intField("payload_version")
+	in.FailedLine = intField("failed_line")
 
 	// Validate that we got the minimum required fields
 	if in.RandomID == "" || in.NSAPP == "" || in.Status == "" {
@@ -1174,6 +1219,23 @@ func validate(in *TelemetryIn) error {
 	// Sanitize repo_source (routing field) and repo_slug ("owner/repo")
 	in.RepoSource = sanitizeShort(in.RepoSource, 64)
 	in.RepoSlug = sanitizeShort(in.RepoSlug, 128)
+
+	// Payload version 2 fields. Bounded like every other client-supplied string:
+	// the endpoint is unauthenticated, so nothing arriving here is trusted for
+	// length any more than for content.
+	in.Arch = strings.ToLower(sanitizeShort(in.Arch, 16))
+	in.KernelVersion = sanitizeShort(in.KernelVersion, 64)
+	in.AppVersion = sanitizeShort(in.AppVersion, 64)
+	// Long enough for a real command, short enough to group on.
+	in.FailedCommand = sanitizeShort(in.FailedCommand, 512)
+	if in.FailedLine < 0 || in.FailedLine > 1_000_000 {
+		in.FailedLine = 0
+	}
+	// A version the server has never heard of is more likely a typo or a probe
+	// than a client from the future.
+	if in.PayloadVersion < 0 || in.PayloadVersion > 1000 {
+		in.PayloadVersion = 0
+	}
 
 	// Platform: allowlist "pve"/"incus"; derive from pve_version when missing
 	// (the client sends pve_version="incus-x.y" on Incus hosts).
@@ -1337,6 +1399,10 @@ func main() {
 		RequestTimeout:   time.Duration(envInt("UPSTREAM_TIMEOUT_MS", 60000)) * time.Millisecond,
 		EnableReqLogging: envBool("ENABLE_REQUEST_LOGGING", false),
 
+		// 0 = no TTL, which is the state this replaces. 400 keeps thirteen
+		// months, past the longest window any dashboard offers.
+		RetentionDays: envInt("TELEMETRY_RETENTION_DAYS", 0),
+
 		// Cache config
 		RedisURL:     env("REDIS_URL", ""),
 		EnableRedis:  envBool("ENABLE_REDIS", false),
@@ -1380,6 +1446,14 @@ func main() {
 	ch, err := NewCHClient(cfg.CHDSN)
 	if err != nil {
 		log.Fatalf("clickhouse: %v", err)
+	}
+
+	// Separate from the schema migration on purpose: those are additive and safe
+	// to run blind, this one deletes history.
+	{
+		rctx, rcancel := context.WithTimeout(context.Background(), 30*time.Second)
+		ch.ApplyRetention(rctx, cfg.RetentionDays)
+		rcancel()
 	}
 
 	// Write-ahead queue: decouples HTTP accept from CH writes
@@ -2308,6 +2382,12 @@ func main() {
 			RepoSlug:        in.RepoSlug,
 			HasArm:          in.HasArm,
 			Platform:        in.Platform,
+			PayloadVersion:  in.PayloadVersion,
+			Arch:            in.Arch,
+			FailedCommand:   in.FailedCommand,
+			FailedLine:      in.FailedLine,
+			KernelVersion:   in.KernelVersion,
+			AppVersion:      in.AppVersion,
 		}
 
 		// Enqueue for async PB write (decoupled from HTTP response)

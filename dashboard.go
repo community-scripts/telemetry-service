@@ -12,23 +12,28 @@ import (
 
 // DashboardData holds aggregated statistics for the dashboard
 type DashboardData struct {
-	TotalInstalls   int               `json:"total_installs"`
-	TotalAllTime    int               `json:"total_all_time"` // Total records in DB (not limited)
-	SampleSize      int               `json:"sample_size"`    // How many records were sampled
-	SuccessCount    int               `json:"success_count"`
-	FailedCount     int               `json:"failed_count"`
-	AbortedCount    int               `json:"aborted_count"`
-	InstallingCount int               `json:"installing_count"`
-	SuccessRate     float64           `json:"success_rate"`
-	TopApps         []AppCount        `json:"top_apps"`
-	OsDistribution  []OsCount         `json:"os_distribution"`
-	MethodStats     []MethodCount     `json:"method_stats"`
-	PveVersions     []PveCount        `json:"pve_versions"`
-	TypeStats       []TypeCount       `json:"type_stats"`
-	ErrorAnalysis   []ErrorGroup      `json:"error_analysis"`
-	FailedApps      []AppFailure      `json:"failed_apps"`
-	RecentRecords   []TelemetryRecord `json:"recent_records"`
-	DailyStats      []DailyStat       `json:"daily_stats"`
+	TotalInstalls   int `json:"total_installs"`
+	TotalAllTime    int `json:"total_all_time"` // Total records in DB (not limited)
+	SampleSize      int `json:"sample_size"`    // How many records were sampled
+	SuccessCount    int `json:"success_count"`
+	FailedCount     int `json:"failed_count"`
+	AbortedCount    int `json:"aborted_count"`
+	InstallingCount int `json:"installing_count"`
+	// Window InstallingCount actually covers, in days. Fixed at 1 rather than
+	// following the selected period, because "still installing" is a question
+	// about now. Reported so a page can label it, instead of showing it beside
+	// figures that do follow the selector as though they matched.
+	InstallingWindowDays int               `json:"installing_window_days"`
+	SuccessRate          float64           `json:"success_rate"`
+	TopApps              []AppCount        `json:"top_apps"`
+	OsDistribution       []OsCount         `json:"os_distribution"`
+	MethodStats          []MethodCount     `json:"method_stats"`
+	PveVersions          []PveCount        `json:"pve_versions"`
+	TypeStats            []TypeCount       `json:"type_stats"`
+	ErrorAnalysis        []ErrorGroup      `json:"error_analysis"`
+	FailedApps           []AppFailure      `json:"failed_apps"`
+	RecentRecords        []TelemetryRecord `json:"recent_records"`
+	DailyStats           []DailyStat       `json:"daily_stats"`
 
 	// Extended metrics
 	GPUStats           []GPUCount      `json:"gpu_stats"`
