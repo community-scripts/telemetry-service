@@ -428,7 +428,13 @@ func (ch *CHClient) FetchNewDashboard(
 		{"disk", &d.ByDisk, "concat(toString(disk), ' GB')", "disk > 0", 12},
 		{"cpu", &d.ByCPU, "cpu", "cpu != ''", 8},
 		{"gpu", &d.ByGPU, "gpu", "gpu != ''", 8},
-		{"gpu passthrough", &d.ByGPUPass, "gpupass", "gpupass != ''", 6},
+		// Two vocabularies live in this column. Until payload version 2 it held
+		// detect_gpu's verdict about the host -- igpu, dgpu, unknown -- and it now
+		// answers whether the container was actually handed the devices. Charting
+		// them together would read as one distribution over one question.
+		{"gpu passthrough", &d.ByGPUPass,
+			"multiIf(gpupass IN ('yes','no'), gpupass, 'host capability (pre-v2)')",
+			"gpupass != ''", 6},
 		// arch is the real column now. has_arm is the fallback for rows written
 		// before the server stored it, where arm64-or-not is all that survives.
 		{"arch", &d.ByArm,
@@ -511,7 +517,7 @@ func (ch *CHClient) FetchNewDashboard(
 	rows, e = ch.db.QueryContext(ctx, fmt.Sprintf(`
 		SELECT run, app, kind, final_status, final_exit, final_cat, plat,
 		       %s, hostver, slug, meth, cores, ram, disk, priv, duration,
-		       formatDateTime(last_seen, '%%Y-%%m-%%d %%H:%%M'),
+		       formatDateTime(last_seen, '%%Y-%%m-%%d %%H:%%i'),
 		       substring(final_err, 1, 400),
 		       substring(failcmd, 1, 400), failline,
 		       if(cpuarch != '', cpuarch, if(arm = 1, 'arm64', '')),
@@ -546,7 +552,7 @@ func (ch *CHClient) FetchNewDashboard(
 	// answers "what is happening".
 	if lr, e := ch.db.QueryContext(ctx, `
 		SELECT app, kind, final_status, plat, os, slug,
-		       formatDateTime(last_seen, '%Y-%m-%d %H:%M'),
+		       formatDateTime(last_seen, '%Y-%m-%d %H:%i'),
 		       toUInt32(dateDiff('second', last_seen, now()))
 		FROM (
 			SELECT if(execution_id = '', random_id, execution_id) AS run,
