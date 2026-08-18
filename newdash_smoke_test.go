@@ -12,8 +12,12 @@ import (
 // reached a browser answering "renderWarnings is not defined" with every panel
 // blank.
 //
-// tools/newdash-smoke.js renders the page against a synthetic payload and
+// testdata/newdash-smoke.js renders the page against a synthetic payload and
 // asserts each section produced something, so that failure surfaces here.
+//
+// In testdata/ rather than tools/, which .gitignore excludes -- the first
+// version of this test was committed without its script and would have failed
+// on any fresh clone.
 //
 // Skipped when node is absent rather than failing: a Go service should still
 // build and test on a machine without a JavaScript runtime.
@@ -22,7 +26,7 @@ func TestNewDashboardPageRenders(t *testing.T) {
 		t.Skip("node not available; skipping the /new render check")
 	}
 
-	out, err := exec.Command("node", "tools/newdash-smoke.js").CombinedOutput()
+	out, err := exec.Command("node", "testdata/newdash-smoke.js").CombinedOutput()
 	if err != nil {
 		t.Fatalf("the /new page failed to render:\n%s", out)
 	}
