@@ -102,6 +102,11 @@
   #err { display:none; background:#3a1618; border:1px solid var(--bad);
          color:#ffb4ae; padding:10px 13px; border-radius:9px; margin-bottom:16px;
          font-size:13px; }
+  #warn { display:none; background:#332708; border:1px solid var(--warn);
+          color:#f2cc7a; padding:10px 13px; border-radius:9px; margin-bottom:16px;
+          font-size:12.5px; }
+  #warn code { color:#f2cc7a; }
+  .accentv { color:var(--accent); }
   input[type=search] { background:var(--panel); border:1px solid var(--line);
                        color:var(--ink); border-radius:8px; padding:5px 9px;
                        font:inherit; font-size:12.5px; min-width:190px; }
@@ -148,6 +153,15 @@
 
 <main>
   <div id="err"></div>
+  <div id="warn"></div>
+
+  <section>
+    <h2>Live <span class="n">— right now, regardless of the period above</span></h2>
+    <div class="grid g6" id="live"></div>
+    <div class="card" style="margin-top:11px"><h3>In flight
+      <span id="liveMeta"></span></h3>
+      <div class="scroll" id="live_now"></div></div>
+  </section>
 
   <section>
     <h2>Outcome <span class="n">— one run, one outcome; a run is a distinct execution, not a status ping</span></h2>
@@ -358,10 +372,51 @@ function renderLog() {
     : `<div class="empty">${q ? "nothing matches that filter" : "no runs in this window"}</div>`;
 }
 
+/* A failed section names itself and shows the database's own message. The page
+   used to answer 500 for the whole request when one breakdown was wrong, which
+   said nothing about which one. */
+function renderWarnings(list) {
+  const box = $("warn");
+  if (!list || !list.length) { box.style.display = "none"; box.innerHTML = ""; return; }
+  box.style.display = "block";
+  box.innerHTML = `<b>${list.length} section(s) could not be loaded.</b> `
+    + `The rest of the page is unaffected.<ul style="margin:6px 0 0;padding-left:18px">`
+    + list.map(w => `<li><code>${esc(w)}</code></li>`).join("") + "</ul>";
+}
+
+function renderLive(d) {
+  $("live").innerHTML = [
+    ["In flight", n(d.live_in_flight), d.live_in_flight ? "accentv" : "idle",
+      "started, no outcome yet (20 min)"],
+    ["Last hour", n(d.live_last_hour), "", "runs that reported anything"],
+    ["Last 24 h", n(d.live_last_24h), "", "runs that reported anything"],
+  ].map(([k, v, c, h]) => `<div class="card kpi">
+      <div class="v ${c}">${v}</div><div class="k">${k}</div><div class="h">${h}</div>
+    </div>`).join("");
+
+  const rows = d.live_now || [];
+  $("liveMeta").textContent = rows.length ? `${rows.length} run(s)` : "";
+  $("live_now").innerHTML = rows.length ? `<table>
+    <tr><th>Started</th><th>Age</th><th>Status</th><th>Application</th>
+        <th>Type</th><th>Platform</th><th>OS</th><th>Repository</th></tr>
+    ${rows.map(r => `<tr>
+      <td>${esc(r.last_seen)}</td>
+      <td class="${r.duration > 900 ? "warn" : "note"}">${dur(r.duration)}</td>
+      <td><span class="pill idle">${esc(r.status)}</span></td>
+      <td>${esc(r.app)}</td><td>${esc(r.type || "—")}</td>
+      <td>${esc(r.platform || "—")}</td><td>${esc(r.os || "—")}</td>
+      <td class="note">${esc(r.repo || "—")}</td></tr>`).join("")}
+    </table>`
+    : '<div class="empty">nothing running right now</div>';
+}
+
 function render(d) {
   DATA = d;
   const min = d.min_runs || 10;
   const sr = rate(d.success, d.success + d.failed, min);
+
+  renderWarnings(d.warnings);
+  renderLive(d);
 
   $("sub").textContent = `${n(d.runs)} runs · ${d.days} day${d.days === 1 ? "" : "s"}`
     + (d.platform ? ` · ${d.platform}` : "") + (d.repo ? ` · ${d.repo}` : "")

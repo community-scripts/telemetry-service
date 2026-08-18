@@ -2,6 +2,7 @@ package main
 
 import (
 	"fmt"
+	"regexp"
 	"strings"
 	"testing"
 )
@@ -116,6 +117,29 @@ func TestWorstAppsRankingAppliesFloorBeforeLimit(t *testing.T) {
 	// Ctrl+C is not the script failing.
 	if strings.Contains(order, "aborted") {
 		t.Error("aborted runs must not be part of the failure-rate denominator")
+	}
+}
+
+// Regression, and the reason the page returned 500 twice: the runs subquery
+// aliased sixteen aggregates back to the name of the column they aggregate --
+// any(nsapp) AS nsapp. ClickHouse rejects that with "Different expressions with
+// the same alias", and it rejects the whole query, so every panel went dark at
+// once. Every alias now has a name of its own.
+func TestNoAliasShadowsItsSourceColumn(t *testing.T) {
+	re := regexp.MustCompile(`any\((\w+)\)\s+AS (\w+)`)
+	for _, m := range re.FindAllStringSubmatch(runsCTE, -1) {
+		if m[1] == m[2] {
+			t.Errorf("any(%s) AS %s shadows its own source column", m[1], m[2])
+		}
+	}
+	// The same shape, spelled differently.
+	for _, agg := range []string{"argMax", "max", "min"} {
+		re := regexp.MustCompile(agg + `\((\w+)[^)]*\)\s+AS (\w+)`)
+		for _, m := range re.FindAllStringSubmatch(runsCTE, -1) {
+			if m[1] == m[2] {
+				t.Errorf("%s(%s ...) AS %s shadows its own source column", agg, m[1], m[2])
+			}
+		}
 	}
 }
 

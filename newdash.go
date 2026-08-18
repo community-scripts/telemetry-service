@@ -32,23 +32,23 @@ const runsCTE = `
 		argMax(error_category, created)                AS final_cat,
 		argMax(error, created)                         AS final_err,
 		max(created)                                   AS last_seen,
-		any(nsapp)                                     AS nsapp,
-		any(type)                                      AS type,
-		any(method)                                    AS method,
-		any(os_type)                                   AS os_type,
-		any(os_version)                                AS os_version,
-		any(pve_version)                               AS pve_version,
+		any(nsapp)                                     AS app,
+		any(type)                                      AS kind,
+		any(method)                                    AS meth,
+		any(os_type)                                   AS ostype,
+		any(os_version)                                AS osver,
+		any(pve_version)                               AS hostver,
 		any(%s)                                        AS plat,
-		any(repo_source)                               AS repo_source,
-		any(repo_slug)                                 AS repo_slug,
-		any(ct_type)                                   AS ct_type,
-		any(core_count)                                AS core_count,
-		any(ram_size)                                  AS ram_size,
-		any(disk_size)                                 AS disk_size,
-		any(cpu_vendor)                                AS cpu_vendor,
-		any(gpu_vendor)                                AS gpu_vendor,
-		any(gpu_passthrough)                           AS gpu_passthrough,
-		any(has_arm)                                   AS has_arm,
+		any(repo_source)                               AS src,
+		any(repo_slug)                                 AS slug,
+		any(ct_type)                                   AS priv,
+		any(core_count)                                AS cores,
+		any(ram_size)                                  AS ram,
+		any(disk_size)                                 AS disk,
+		any(cpu_vendor)                                AS cpu,
+		any(gpu_vendor)                                AS gpu,
+		any(gpu_passthrough)                           AS gpupass,
+		any(has_arm)                                   AS arm,
 		max(install_duration)                          AS duration
 	FROM telemetry_db.telemetry
 	WHERE %s
@@ -144,6 +144,18 @@ type NewDashData struct {
 	// MinRuns is the floor below which a rate is shown but not colour-graded.
 	// Sent so the page can say what it is instead of hiding the rule.
 	MinRuns int `json:"min_runs"`
+
+	// Live: what is happening right now, independent of the selected window.
+	LiveInFlight int            `json:"live_in_flight"`
+	LiveLastHour int            `json:"live_last_hour"`
+	LiveLast24h  int            `json:"live_last_24h"`
+	LiveNow      []NewRecentRun `json:"live_now"`
+
+	// Warnings names any section whose query failed, with the database's own
+	// message. One broken breakdown used to take the entire page down with a
+	// 500 and no clue which one it was; the rest of the page is still worth
+	// showing, and the reason is worth reading.
+	Warnings []string `json:"warnings"`
 
 	Daily []NewDailyPoint `json:"daily"`
 
@@ -248,8 +260,17 @@ func (ch *CHClient) FetchNewDashboard(
 		RepoSlug: repoSlug, Type: ctype, MinRuns: minRunsFor(days),
 	}
 
+	// warn records a section that failed without taking the page with it. A
+	// dashboard that shows nine of ten panels and names the tenth is more use
+	// than a 500, and it says which query to look at.
+	warn := func(section string, err error) {
+		if err != nil {
+			d.Warnings = append(d.Warnings, fmt.Sprintf("%s: %v", section, err))
+		}
+	}
+
 	// Headline.
-	if err := ch.db.QueryRowContext(ctx, fmt.Sprintf(`
+	warn("outcome", ch.db.QueryRowContext(ctx, fmt.Sprintf(`
 		SELECT
 			count(),
 			countIf(final_status = 'success'),
@@ -257,9 +278,24 @@ func (ch *CHClient) FetchNewDashboard(
 			countIf(final_status = 'aborted'),
 			countIf(final_status NOT IN ('success','failed','aborted'))
 		FROM (%s)`, runs), args...,
-	).Scan(&d.Runs, &d.Success, &d.Failed, &d.Aborted, &d.Unfinished); err != nil {
-		return nil, fmt.Errorf("headline: %w", err)
-	}
+	).Scan(&d.Runs, &d.Success, &d.Failed, &d.Aborted, &d.Unfinished))
+
+	// Live, deliberately outside the selected window: "what is happening now"
+	// does not change because someone picked a different period.
+	warn("live", ch.db.QueryRowContext(ctx, `
+		SELECT
+			uniqExactIf(run, last_seen >= now() - INTERVAL 20 MINUTE
+			                 AND final_status NOT IN ('success','failed','aborted')),
+			uniqExactIf(run, last_seen >= now() - INTERVAL 1 HOUR),
+			uniqExactIf(run, last_seen >= now() - INTERVAL 24 HOUR)
+		FROM (
+			SELECT if(execution_id = '', random_id, execution_id) AS run,
+			       argMax(status, created) AS final_status,
+			       max(created)            AS last_seen
+			FROM telemetry_db.telemetry
+			WHERE created >= now() - INTERVAL 24 HOUR
+			GROUP BY run
+		)`).Scan(&d.LiveInFlight, &d.LiveLastHour, &d.LiveLast24h))
 
 	// All time, deliberately unfiltered. uniq rather than uniqExact: it is a
 	// scan of the whole table and approximate is good enough for a figure that
@@ -318,7 +354,7 @@ func (ch *CHClient) FetchNewDashboard(
 		return nil
 	}
 
-	osExpr := "if(os_type = '', 'unknown', concat(os_type, ' ', os_version))"
+	osExpr := "if(ostype = '', 'unknown', concat(ostype, ' ', osver))"
 
 	groups := []struct {
 		name   string
@@ -328,23 +364,21 @@ func (ch *CHClient) FetchNewDashboard(
 		order  string
 		limit  int
 	}{
-		{"top apps", &d.TopApps, "nsapp", "nsapp != ''", "runs DESC", 25},
+		{"top apps", &d.TopApps, "app", "app != ''", "runs DESC", 25},
 		// Worst by rate, with the floor applied in SQL so the ranking is the
 		// ranking -- not a top-25 that the page then has to filter again.
-		{"worst apps", &d.WorstApps, "nsapp", "nsapp != ''",
+		{"worst apps", &d.WorstApps, "app", "app != ''",
 			fmt.Sprintf("if(success + failed >= %d, failed / (success + failed), -1) DESC, failed DESC",
 				d.MinRuns), 25},
 		{"platform", &d.ByPlatform, "if(plat = '', 'unknown', plat)", "", "runs DESC", 6},
-		{"type", &d.ByType, "if(type = '', 'unknown', type)", "", "runs DESC", 10},
-		{"repo", &d.ByRepo, "if(repo_source = '', 'unknown', repo_source)", "", "runs DESC", 10},
-		{"repo slug", &d.ByRepoSlug, "repo_slug", "repo_slug != ''", "runs DESC", 15},
+		{"type", &d.ByType, "if(kind = '', 'unknown', kind)", "", "runs DESC", 10},
+		{"repo", &d.ByRepo, "if(src = '', 'unknown', src)", "", "runs DESC", 10},
+		{"repo slug", &d.ByRepoSlug, "slug", "slug != ''", "runs DESC", 15},
 		{"os", &d.ByOS, osExpr, "", "runs DESC", 15},
-		{"host version", &d.ByHostVer, "pve_version", "pve_version != ''", "runs DESC", 15},
+		{"host version", &d.ByHostVer, "hostver", "hostver != ''", "runs DESC", 15},
 	}
 	for _, g := range groups {
-		if e := group(g.target, g.expr, g.pred, g.order, g.limit); e != nil {
-			return nil, fmt.Errorf("%s: %w", g.name, e)
-		}
+		warn(g.name, group(g.target, g.expr, g.pred, g.order, g.limit))
 	}
 
 	counts := []struct {
@@ -358,62 +392,62 @@ func (ch *CHClient) FetchNewDashboard(
 		// including it makes it the largest bar on the chart.
 		{"categories", &d.Categories, "final_cat",
 			"final_status = 'failed' AND final_cat NOT IN ('', 'user_aborted')", 15},
-		{"privilege", &d.ByPrivilege, "if(ct_type = 1, 'unprivileged', 'privileged')", "", 3},
-		{"cores", &d.ByCores, "toString(core_count)", "core_count > 0", 12},
-		{"ram", &d.ByRAM, "concat(toString(intDiv(ram_size, 1024)), ' GB')", "ram_size > 0", 12},
-		{"disk", &d.ByDisk, "concat(toString(disk_size), ' GB')", "disk_size > 0", 12},
-		{"cpu", &d.ByCPU, "cpu_vendor", "cpu_vendor != ''", 8},
-		{"gpu", &d.ByGPU, "gpu_vendor", "gpu_vendor != ''", 8},
-		{"gpu passthrough", &d.ByGPUPass, "gpu_passthrough", "gpu_passthrough != ''", 6},
-		{"arm", &d.ByArm, "if(has_arm = 1, 'arm64', 'x86_64')", "", 3},
-		{"method", &d.ByMethod, "method", "method != ''", 8},
+		{"privilege", &d.ByPrivilege, "if(priv = 1, 'unprivileged', 'privileged')", "", 3},
+		{"cores", &d.ByCores, "toString(cores)", "cores > 0", 12},
+		{"ram", &d.ByRAM, "concat(toString(intDiv(ram, 1024)), ' GB')", "ram > 0", 12},
+		{"disk", &d.ByDisk, "concat(toString(disk), ' GB')", "disk > 0", 12},
+		{"cpu", &d.ByCPU, "cpu", "cpu != ''", 8},
+		{"gpu", &d.ByGPU, "gpu", "gpu != ''", 8},
+		{"gpu passthrough", &d.ByGPUPass, "gpupass", "gpupass != ''", 6},
+		{"arm", &d.ByArm, "if(arm = 1, 'arm64', 'x86_64')", "", 3},
+		{"method", &d.ByMethod, "meth", "meth != ''", 8},
 	}
 	for _, c := range counts {
-		if e := simple(c.target, c.expr, c.pred, c.limit); e != nil {
-			return nil, fmt.Errorf("%s: %w", c.name, e)
-		}
+		warn(c.name, simple(c.target, c.expr, c.pred, c.limit))
 	}
 
 	// Exit codes, labelled with the engine's own descriptions.
 	rows, e := ch.db.QueryContext(ctx, fmt.Sprintf(`
-		SELECT final_exit, count() c, uniqExact(nsapp) apps
+		SELECT final_exit, count() c, uniqExact(app) apps
 		FROM (%s)
 		WHERE final_status = 'failed' AND final_exit != 0
 		GROUP BY final_exit
 		ORDER BY c DESC
 		LIMIT 20`, runs), args...)
 	if e != nil {
-		return nil, fmt.Errorf("exit codes: %w", e)
-	}
-	for rows.Next() {
-		var x NewExitCode
-		if rows.Scan(&x.Code, &x.Count, &x.Apps) == nil {
-			x.Desc = getExitCodeDescription(x.Code)
-			d.ExitCodes = append(d.ExitCodes, x)
+		warn("exit codes", e)
+	} else {
+		for rows.Next() {
+			var x NewExitCode
+			if rows.Scan(&x.Code, &x.Count, &x.Apps) == nil {
+				x.Desc = getExitCodeDescription(x.Code)
+				d.ExitCodes = append(d.ExitCodes, x)
+			}
 		}
+		rows.Close()
 	}
-	rows.Close()
 
 	// Signatures: the same failure text seen across runs. The closest thing to
 	// "why", and the existing pages compute it without ever showing it.
 	rows, e = ch.db.QueryContext(ctx, fmt.Sprintf(`
 		SELECT final_cat, final_exit, substring(final_err, 1, 200) msg,
-		       count() c, uniqExact(nsapp) apps
+		       count() c, uniqExact(app) apps
 		FROM (%s)
 		WHERE final_status = 'failed' AND final_err != ''
 		GROUP BY final_cat, final_exit, msg
 		ORDER BY c DESC
 		LIMIT 30`, runs), args...)
 	if e != nil {
-		return nil, fmt.Errorf("signatures: %w", e)
-	}
-	for rows.Next() {
-		var s NewErrorSignature
-		if rows.Scan(&s.Category, &s.ExitCode, &s.Message, &s.Count, &s.Apps) == nil {
-			d.Signatures = append(d.Signatures, s)
+		warn("signatures", e)
+	} else {
+		for rows.Next() {
+			var s NewErrorSignature
+			if rows.Scan(&s.Category, &s.ExitCode, &s.Message, &s.Count, &s.Apps) == nil {
+				d.Signatures = append(d.Signatures, s)
+			}
 		}
+		rows.Close()
 	}
-	rows.Close()
 
 	// Daily trend, on the same run basis as everything else.
 	rows, e = ch.db.QueryContext(ctx, fmt.Sprintf(`
@@ -425,38 +459,76 @@ func (ch *CHClient) FetchNewDashboard(
 		FROM (%s)
 		GROUP BY day ORDER BY day`, runs), args...)
 	if e != nil {
-		return nil, fmt.Errorf("daily: %w", e)
-	}
-	for rows.Next() {
-		var p NewDailyPoint
-		if rows.Scan(&p.Day, &p.Runs, &p.Success, &p.Failed,
-			&p.Aborted, &p.Unfinished) == nil {
-			d.Daily = append(d.Daily, p)
+		warn("daily", e)
+	} else {
+		for rows.Next() {
+			var p NewDailyPoint
+			if rows.Scan(&p.Day, &p.Runs, &p.Success, &p.Failed,
+				&p.Aborted, &p.Unfinished) == nil {
+				d.Daily = append(d.Daily, p)
+			}
 		}
+		rows.Close()
 	}
-	rows.Close()
 
 	// The install log.
 	rows, e = ch.db.QueryContext(ctx, fmt.Sprintf(`
-		SELECT nsapp, type, final_status, final_exit, final_cat, plat,
-		       %s, repo_slug, core_count, ram_size, disk_size, duration,
+		SELECT app, kind, final_status, final_exit, final_cat, plat,
+		       %s, slug, cores, ram, disk, duration,
 		       formatDateTime(last_seen, '%%Y-%%m-%%d %%H:%%M'),
 		       substring(final_err, 1, 200)
 		FROM (%s)
 		ORDER BY last_seen DESC
 		LIMIT 200`, osExpr, runs), args...)
 	if e != nil {
-		return nil, fmt.Errorf("recent: %w", e)
-	}
-	for rows.Next() {
-		var r NewRecentRun
-		if rows.Scan(&r.App, &r.Type, &r.Status, &r.ExitCode, &r.Category,
-			&r.Platform, &r.OS, &r.Repo, &r.Cores, &r.RAM, &r.Disk,
-			&r.Duration, &r.LastSeen, &r.Error) == nil {
-			d.Recent = append(d.Recent, r)
+		warn("recent", e)
+	} else {
+		for rows.Next() {
+			var r NewRecentRun
+			if rows.Scan(&r.App, &r.Type, &r.Status, &r.ExitCode, &r.Category,
+				&r.Platform, &r.OS, &r.Repo, &r.Cores, &r.RAM, &r.Disk,
+				&r.Duration, &r.LastSeen, &r.Error) == nil {
+				d.Recent = append(d.Recent, r)
+			}
 		}
+		rows.Close()
 	}
-	rows.Close()
+
+	// What is in flight right now. Also outside the selected window, and kept
+	// separate from Recent: the install log answers "what happened", this
+	// answers "what is happening".
+	if lr, e := ch.db.QueryContext(ctx, `
+		SELECT app, kind, final_status, plat, os, slug,
+		       formatDateTime(last_seen, '%Y-%m-%d %H:%M'),
+		       toUInt32(dateDiff('second', last_seen, now()))
+		FROM (
+			SELECT if(execution_id = '', random_id, execution_id) AS run,
+			       argMax(status, created)  AS final_status,
+			       max(created)             AS last_seen,
+			       any(nsapp)               AS app,
+			       any(type)                AS kind,
+			       any(`+platformExpr+`)    AS plat,
+			       if(any(os_type) = '', 'unknown',
+			          concat(any(os_type), ' ', any(os_version))) AS os,
+			       any(repo_slug)           AS slug
+			FROM telemetry_db.telemetry
+			WHERE created >= now() - INTERVAL 2 HOUR
+			GROUP BY run
+		)
+		WHERE final_status NOT IN ('success','failed','aborted')
+		ORDER BY last_seen DESC
+		LIMIT 40`); e != nil {
+		warn("live runs", e)
+	} else {
+		for lr.Next() {
+			var r NewRecentRun
+			if lr.Scan(&r.App, &r.Type, &r.Status, &r.Platform, &r.OS,
+				&r.Repo, &r.LastSeen, &r.Duration) == nil {
+				d.LiveNow = append(d.LiveNow, r)
+			}
+		}
+		lr.Close()
+	}
 
 	return d, nil
 }
