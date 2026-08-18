@@ -107,6 +107,33 @@
           font-size:12.5px; }
   #warn code { color:#f2cc7a; }
   .accentv { color:var(--accent); }
+  .logbar { display:flex; flex-wrap:wrap; gap:7px; align-items:center;
+            margin-bottom:10px; }
+  .logbar select { max-width:170px; }
+  tr.row { cursor:pointer; }
+  tr.row:hover td { background:var(--panel2); }
+  .modal { display:none; position:fixed; inset:0; z-index:50;
+           background:rgba(0,0,0,.6); padding:28px; overflow:auto; }
+  .modal.on { display:block; }
+  .sheet { max-width:900px; margin:0 auto; background:var(--panel);
+           border:1px solid var(--line); border-radius:13px; }
+  .sheethead { display:flex; justify-content:space-between; align-items:center;
+               gap:10px; padding:13px 16px; border-bottom:1px solid var(--line);
+               position:sticky; top:0; background:var(--panel);
+               border-radius:13px 13px 0 0; }
+  .sheetbody { padding:6px 16px 16px; }
+  .kv { display:grid; grid-template-columns:190px 1fr; gap:2px 14px;
+        font-size:12.5px; padding:8px 0; }
+  .kv dt { color:var(--muted); padding:3px 0; }
+  .kv dd { margin:0; padding:3px 0; word-break:break-word; }
+  .grp { font-size:11px; text-transform:uppercase; letter-spacing:.08em;
+         color:var(--muted); font-weight:650; margin:12px 0 0;
+         padding-top:10px; border-top:1px solid var(--line); }
+  .grp:first-child { border-top:0; padding-top:0; margin-top:0; }
+  pre.err { background:var(--panel2); border:1px solid var(--line);
+            border-radius:8px; padding:9px 11px; margin:6px 0 0;
+            font:11.5px/1.5 ui-monospace,SFMono-Regular,Menlo,monospace;
+            white-space:pre-wrap; word-break:break-word; }
   input[type=search] { background:var(--panel); border:1px solid var(--line);
                        color:var(--ink); border-radius:8px; padding:5px 9px;
                        font:inherit; font-size:12.5px; min-width:190px; }
@@ -248,14 +275,29 @@
   </section>
 
   <section>
-    <h2>Install log <span class="n">— most recent runs, one line each</span></h2>
+    <h2>Install log <span class="n">— click a row for everything the run reported</span></h2>
     <div class="card">
-      <h3>Runs
-        <span><input type="search" id="logq" placeholder="filter by app, OS, error…"></span>
-      </h3>
+      <div class="logbar">
+        <input type="search" id="logq" placeholder="app, OS, error, repository…">
+        <select id="fStatus" data-all="All status"><option value="">All status</option></select>
+        <select id="fType" data-all="All types"><option value="">All types</option></select>
+        <select id="fPlatform" data-all="All platforms"><option value="">All platforms</option></select>
+        <select id="fOs" data-all="All OS"><option value="">All OS</option></select>
+        <select id="fCat" data-all="All categories"><option value="">All categories</option></select>
+        <span class="note" id="logCount"></span>
+        <button class="btn" id="logCsv" style="margin-left:auto">Export CSV</button>
+      </div>
       <div class="scroll" id="recent"></div>
     </div>
   </section>
+
+  <div id="modal" class="modal"><div class="sheet">
+    <div class="sheethead">
+      <b id="mTitle">Run</b>
+      <button class="btn" id="mClose">Close</button>
+    </div>
+    <div class="sheetbody" id="mBody"></div>
+  </div></div>
 </main>
 
 <script>
@@ -347,69 +389,141 @@ function renderChart(days) {
   $("trendMeta").textContent = `${days.length} day(s), peak ${n(max)}`;
 }
 
-function renderLog() {
+/* Options come from the data, not a hardcoded list: a status or category that
+   never appears in this window should not be offered as a filter. */
+function fillFilter(id, values) {
+  const sel = document.getElementById(id);
+  const keep = sel.value;
+  const opts = [...new Set(values.filter(Boolean))].sort();
+  sel.innerHTML = `<option value="">${sel.dataset.all}</option>` +
+    opts.map(v => `<option value="${esc(v)}">${esc(v)}</option>`).join("");
+  if (opts.includes(keep)) sel.value = keep;
+}
+
+function logRows() {
   const q = ($("logq").value || "").toLowerCase().trim();
-  const rows = (DATA.recent || []).filter(r => !q ||
-    [r.app, r.os, r.error, r.category, r.platform, r.type, r.repo]
-      .some(v => String(v || "").toLowerCase().includes(q)));
-  const cls = s => s === "success" ? "ok" : s === "failed" ? "bad"
-    : s === "aborted" ? "warn" : "idle";
+  const f = {
+    status: $("fStatus").value, type: $("fType").value,
+    platform: $("fPlatform").value, os: $("fOs").value, cat: $("fCat").value,
+  };
+  return (DATA.recent || []).filter(r =>
+    (!f.status || r.status === f.status) &&
+    (!f.type || r.type === f.type) &&
+    (!f.platform || r.platform === f.platform) &&
+    (!f.os || r.os === f.os) &&
+    (!f.cat || r.category === f.cat) &&
+    (!q || [r.app, r.os, r.error, r.failed_command, r.category, r.platform,
+            r.type, r.repo, r.host_version]
+      .some(v => String(v || "").toLowerCase().includes(q))));
+}
+
+const statusCls = s => s === "success" ? "ok" : s === "failed" ? "bad"
+  : s === "aborted" ? "warn" : "idle";
+
+function renderLog() {
+  const rows = logRows();
+  $("logCount").textContent =
+    `${rows.length} of ${(DATA.recent || []).length}`;
+
   $("recent").innerHTML = rows.length ? `<table>
     <tr><th>When</th><th>Status</th><th class="num">Exit</th><th>Application</th>
-        <th>Type</th><th>Platform</th><th>OS</th><th>Resources</th>
-        <th class="num">Duration</th><th>Detail</th></tr>
-    ${rows.map(r => `<tr>
+        <th>Type</th><th>Platform</th><th>OS</th><th>Host</th>
+        <th>Resources</th><th class="num">Duration</th><th>Detail</th></tr>
+    ${rows.map((r, i) => `<tr class="row" data-i="${i}">
       <td>${esc(r.last_seen)}</td>
-      <td><span class="pill ${cls(r.status)}">${esc(r.status)}</span></td>
+      <td><span class="pill ${statusCls(r.status)}">${esc(r.status)}</span></td>
       <td class="num">${r.exit_code || ""}</td>
-      <td>${esc(r.app)}</td>
-      <td>${esc(r.type || "—")}</td>
-      <td>${esc(r.platform || "—")}</td>
-      <td>${esc(r.os || "—")}</td>
-      <td class="note">${r.cores ? `${r.cores}C · ${r.ram}M · ${r.disk}G` : "—"}</td>
-      <td class="num">${dur(r.duration)}</td>
-      <td><code>${esc(r.error || "")}</code>${r.category
-        ? ` <span class="pill idle">${esc(r.category)}</span>` : ""}</td>
-    </tr>`).join("")}</table>`
-    : `<div class="empty">${q ? "nothing matches that filter" : "no runs in this window"}</div>`;
-}
-
-/* A failed section names itself and shows the database's own message. The page
-   used to answer 500 for the whole request when one breakdown was wrong, which
-   said nothing about which one. */
-function renderWarnings(list) {
-  const box = $("warn");
-  if (!list || !list.length) { box.style.display = "none"; box.innerHTML = ""; return; }
-  box.style.display = "block";
-  box.innerHTML = `<b>${list.length} section(s) could not be loaded.</b> `
-    + `The rest of the page is unaffected.<ul style="margin:6px 0 0;padding-left:18px">`
-    + list.map(w => `<li><code>${esc(w)}</code></li>`).join("") + "</ul>";
-}
-
-function renderLive(d) {
-  $("live").innerHTML = [
-    ["In flight", n(d.live_in_flight), d.live_in_flight ? "accentv" : "idle",
-      "started, no outcome yet (20 min)"],
-    ["Last hour", n(d.live_last_hour), "", "runs that reported anything"],
-    ["Last 24 h", n(d.live_last_24h), "", "runs that reported anything"],
-  ].map(([k, v, c, h]) => `<div class="card kpi">
-      <div class="v ${c}">${v}</div><div class="k">${k}</div><div class="h">${h}</div>
-    </div>`).join("");
-
-  const rows = d.live_now || [];
-  $("liveMeta").textContent = rows.length ? `${rows.length} run(s)` : "";
-  $("live_now").innerHTML = rows.length ? `<table>
-    <tr><th>Started</th><th>Age</th><th>Status</th><th>Application</th>
-        <th>Type</th><th>Platform</th><th>OS</th><th>Repository</th></tr>
-    ${rows.map(r => `<tr>
-      <td>${esc(r.last_seen)}</td>
-      <td class="${r.duration > 900 ? "warn" : "note"}">${dur(r.duration)}</td>
-      <td><span class="pill idle">${esc(r.status)}</span></td>
       <td>${esc(r.app)}</td><td>${esc(r.type || "—")}</td>
       <td>${esc(r.platform || "—")}</td><td>${esc(r.os || "—")}</td>
-      <td class="note">${esc(r.repo || "—")}</td></tr>`).join("")}
-    </table>`
-    : '<div class="empty">nothing running right now</div>';
+      <td class="note">${esc(r.host_version || "—")}</td>
+      <td class="note">${r.cores ? `${r.cores}C · ${r.ram}M · ${r.disk}G` : "—"}</td>
+      <td class="num">${dur(r.duration)}</td>
+      <td><code>${esc((r.failed_command || r.error || "").slice(0, 90))}</code>${
+        r.category ? ` <span class="pill idle">${esc(r.category)}</span>` : ""}</td>
+    </tr>`).join("")}</table>`
+    : `<div class="empty">nothing matches these filters</div>`;
+
+  for (const tr of $("recent").querySelectorAll("tr.row")) {
+    tr.addEventListener("click", () => openDetail(rows[+tr.dataset.i]));
+  }
+}
+
+/* Everything the run reported, grouped. Rendered from the row already in hand --
+   no second request, which is the whole point of the page being one. */
+function openDetail(r) {
+  if (!r) return;
+  const row = (k, v, mono) => (v === "" || v == null || v === 0 && k !== "Exit code")
+    ? "" : `<dt>${esc(k)}</dt><dd${mono ? ' class="mono"' : ""}>${esc(v)}</dd>`;
+
+  const groups = [
+    ["Outcome", [
+      ["Status", r.status], ["Exit code", r.exit_code],
+      ["Category", r.category], ["Duration", dur(r.duration)],
+      ["Last seen", r.last_seen],
+    ]],
+    ["Script", [
+      ["Application", r.app], ["Type", r.type], ["Method", r.method],
+      ["Repository", r.repo], ["App version", r.app_version],
+    ]],
+    ["Container", [
+      ["OS", r.os], ["Architecture", r.arch], ["Kernel", r.kernel_version],
+      ["Privilege", r.privileged ? "privileged" : "unprivileged"],
+      ["Cores", r.cores], ["RAM", r.ram ? r.ram + " MB" : ""],
+      ["Disk", r.disk ? r.disk + " GB" : ""],
+    ]],
+    ["Host", [
+      ["Platform", r.platform], ["Version", r.host_version],
+      ["CPU", [r.cpu_vendor, r.cpu_model].filter(Boolean).join(" ")],
+      ["GPU", [r.gpu_vendor, r.gpu_model].filter(Boolean).join(" ")],
+      ["GPU passthrough", r.gpu_passthrough],
+      ["RAM speed", r.ram_speed],
+    ]],
+    ["Reporting", [
+      ["Run", r.run],
+      ["Payload version", r.payload_version || "pre-versioning"],
+    ]],
+  ];
+
+  let html = groups.map(([title, items]) => {
+    const body = items.map(([k, v]) => row(k, v)).join("");
+    return body ? `<div class="grp">${esc(title)}</div><dl class="kv">${body}</dl>` : "";
+  }).join("");
+
+  if (r.failed_command) {
+    html += `<div class="grp">Failing command</div><pre class="err">${
+      esc(r.failed_command)}${r.failed_line ? `\n\nat line ${r.failed_line}` : ""}</pre>`;
+  }
+  if (r.error) {
+    html += `<div class="grp">Reported error</div><pre class="err">${esc(r.error)}</pre>`;
+  }
+
+  $("mTitle").innerHTML =
+    `${esc(r.app)} <span class="pill ${statusCls(r.status)}">${esc(r.status)}</span>`;
+  $("mBody").innerHTML = html;
+  $("modal").classList.add("on");
+}
+
+function closeDetail() { $("modal").classList.remove("on"); }
+
+function exportCsv() {
+  const rows = logRows();
+  if (!rows.length) return;
+  const cols = ["last_seen", "status", "exit_code", "category", "app", "type",
+    "platform", "os", "host_version", "arch", "repo", "method", "cores", "ram",
+    "disk", "privileged", "duration", "failed_command", "failed_line",
+    "kernel_version", "app_version", "payload_version", "error"];
+  const cell = v => {
+    const t = String(v ?? "");
+    return /[",\n]/.test(t) ? `"${t.replace(/"/g, '""')}"` : t;
+  };
+  const csv = [cols.join(","), ...rows.map(r => cols.map(c => cell(r[c])).join(","))]
+    .join("\n");
+  const url = URL.createObjectURL(new Blob([csv], { type: "text/csv;charset=utf-8" }));
+  const a = document.createElement("a");
+  a.href = url;
+  a.download = `telemetry-log-${DATA.days}d.csv`;
+  a.click();
+  URL.revokeObjectURL(url);
 }
 
 function render(d) {
@@ -481,6 +595,12 @@ function render(d) {
       <td class="num">${n(x.count)}</td><td class="num">${n(x.apps)}</td></tr>`).join("")}
     </table>` : '<div class="empty">no failure carried a message in this window</div>';
 
+  const rec = d.recent || [];
+  fillFilter("fStatus", rec.map(r => r.status));
+  fillFilter("fType", rec.map(r => r.type));
+  fillFilter("fPlatform", rec.map(r => r.platform));
+  fillFilter("fOs", rec.map(r => r.os));
+  fillFilter("fCat", rec.map(r => r.category));
   renderLog();
 }
 
@@ -511,7 +631,14 @@ for (const id of ["days", "platform", "repo", "ctype"]) {
   });
 }
 $("reload").addEventListener("click", load);
-$("logq").addEventListener("input", () => DATA && renderLog());
+for (const id of ["logq", "fStatus", "fType", "fPlatform", "fOs", "fCat"]) {
+  $(id).addEventListener("input", () => DATA && renderLog());
+  $(id).addEventListener("change", () => DATA && renderLog());
+}
+$("logCsv").addEventListener("click", () => DATA && exportCsv());
+$("mClose").addEventListener("click", closeDetail);
+$("modal").addEventListener("click", e => { if (e.target.id === "modal") closeDetail(); });
+document.addEventListener("keydown", e => { if (e.key === "Escape") closeDetail(); });
 let timer = null;
 $("auto").addEventListener("change", e => {
   clearInterval(timer);

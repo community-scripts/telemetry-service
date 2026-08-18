@@ -52,6 +52,12 @@ const runsCTE = `
 		any(arch)                                      AS cpuarch,
 		any(payload_version)                           AS pver,
 		any(failed_command)                            AS failcmd,
+		any(failed_line)                               AS failline,
+		any(kernel_version)                            AS kernelver,
+		any(app_version)                               AS appver,
+		any(cpu_model)                                 AS cpumodel,
+		any(gpu_model)                                 AS gpumodel,
+		any(ram_speed)                                 AS ramspeed,
 		max(install_duration)                          AS duration
 	FROM telemetry_db.telemetry
 	WHERE %s
@@ -94,20 +100,40 @@ type NewErrorSignature struct {
 
 // NewRecentRun is one line of the install log.
 type NewRecentRun struct {
-	App      string `json:"app"`
-	Type     string `json:"type"`
-	Status   string `json:"status"`
-	ExitCode int    `json:"exit_code"`
-	Category string `json:"category"`
-	Platform string `json:"platform"`
-	OS       string `json:"os"`
-	Repo     string `json:"repo"`
-	Cores    int    `json:"cores"`
-	RAM      int    `json:"ram"`
-	Disk     int    `json:"disk"`
-	Duration int    `json:"duration"`
-	LastSeen string `json:"last_seen"`
-	Error    string `json:"error"`
+	Run        string `json:"run"`
+	App        string `json:"app"`
+	Type       string `json:"type"`
+	Status     string `json:"status"`
+	ExitCode   int    `json:"exit_code"`
+	Category   string `json:"category"`
+	Platform   string `json:"platform"`
+	OS         string `json:"os"`
+	HostVer    string `json:"host_version"`
+	Repo       string `json:"repo"`
+	Method     string `json:"method"`
+	Cores      int    `json:"cores"`
+	RAM        int    `json:"ram"`
+	Disk       int    `json:"disk"`
+	Privileged bool   `json:"privileged"`
+	Duration   int    `json:"duration"`
+	LastSeen   string `json:"last_seen"`
+	Error      string `json:"error"`
+
+	// Detail-view fields, carried on every row rather than fetched per click.
+	// The whole page is one request by design, and a dialog that needs a round
+	// trip is a second page wearing a modal.
+	FailedCommand  string `json:"failed_command"`
+	FailedLine     int    `json:"failed_line"`
+	Arch           string `json:"arch"`
+	KernelVersion  string `json:"kernel_version"`
+	AppVersion     string `json:"app_version"`
+	CPUVendor      string `json:"cpu_vendor"`
+	CPUModel       string `json:"cpu_model"`
+	GPUVendor      string `json:"gpu_vendor"`
+	GPUModel       string `json:"gpu_model"`
+	GPUPassthrough string `json:"gpu_passthrough"`
+	RAMSpeed       string `json:"ram_speed"`
+	PayloadVersion int    `json:"payload_version"`
 }
 
 // NewDailyPoint is one day of the trend, on the same run basis as the rest.
@@ -483,21 +509,32 @@ func (ch *CHClient) FetchNewDashboard(
 
 	// The install log.
 	rows, e = ch.db.QueryContext(ctx, fmt.Sprintf(`
-		SELECT app, kind, final_status, final_exit, final_cat, plat,
-		       %s, slug, cores, ram, disk, duration,
+		SELECT run, app, kind, final_status, final_exit, final_cat, plat,
+		       %s, hostver, slug, meth, cores, ram, disk, priv, duration,
 		       formatDateTime(last_seen, '%%Y-%%m-%%d %%H:%%M'),
-		       substring(final_err, 1, 200)
+		       substring(final_err, 1, 400),
+		       substring(failcmd, 1, 400), failline,
+		       if(cpuarch != '', cpuarch, if(arm = 1, 'arm64', '')),
+		       kernelver, appver, cpu, cpumodel, gpu, gpumodel, gpupass,
+		       ramspeed, pver
 		FROM (%s)
 		ORDER BY last_seen DESC
-		LIMIT 200`, osExpr, runs), args...)
+		LIMIT 300`, osExpr, runs), args...)
 	if e != nil {
 		warn("recent", e)
 	} else {
 		for rows.Next() {
 			var r NewRecentRun
-			if rows.Scan(&r.App, &r.Type, &r.Status, &r.ExitCode, &r.Category,
-				&r.Platform, &r.OS, &r.Repo, &r.Cores, &r.RAM, &r.Disk,
-				&r.Duration, &r.LastSeen, &r.Error) == nil {
+			var priv uint8
+			if rows.Scan(&r.Run, &r.App, &r.Type, &r.Status, &r.ExitCode, &r.Category,
+				&r.Platform, &r.OS, &r.HostVer, &r.Repo, &r.Method,
+				&r.Cores, &r.RAM, &r.Disk, &priv, &r.Duration, &r.LastSeen, &r.Error,
+				&r.FailedCommand, &r.FailedLine, &r.Arch,
+				&r.KernelVersion, &r.AppVersion, &r.CPUVendor, &r.CPUModel,
+				&r.GPUVendor, &r.GPUModel, &r.GPUPassthrough,
+				&r.RAMSpeed, &r.PayloadVersion) == nil {
+				// ct_type 1 is unprivileged, so privileged is the other case.
+				r.Privileged = priv != 1
 				d.Recent = append(d.Recent, r)
 			}
 		}
