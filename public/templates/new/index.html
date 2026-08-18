@@ -6,110 +6,143 @@
 <title>Telemetry — consolidated</title>
 <style>
   :root {
-    --bg: #0f1115; --panel: #171a21; --line: #262b36; --ink: #e6e9ef;
-    --muted: #8b93a7; --ok: #3fb950; --bad: #f85149; --warn: #d29922;
-    --idle: #6e7681; --accent: #58a6ff;
+    --bg:#0d1017; --panel:#151922; --panel2:#1b2029; --line:#252b37;
+    --ink:#e7eaf0; --muted:#8892a6; --ok:#3fb950; --bad:#f85149;
+    --warn:#d29922; --idle:#6e7681; --accent:#58a6ff; --violet:#a371f7;
   }
   @media (prefers-color-scheme: light) {
-    :root { --bg:#f6f7f9; --panel:#fff; --line:#e3e6eb; --ink:#12151b;
-            --muted:#5c6577; --idle:#9aa2b1; }
+    :root { --bg:#f5f6f8; --panel:#fff; --panel2:#f0f2f5; --line:#e2e5ea;
+            --ink:#11141a; --muted:#5b6478; --idle:#98a1b0; }
   }
-  * { box-sizing: border-box; }
+  * { box-sizing:border-box; }
   body { margin:0; background:var(--bg); color:var(--ink);
          font:14px/1.5 ui-sans-serif,system-ui,-apple-system,Segoe UI,Roboto,sans-serif; }
-  header { position:sticky; top:0; z-index:5; background:var(--bg);
-           border-bottom:1px solid var(--line); padding:12px 20px; }
-  h1 { font-size:15px; margin:0 0 10px; font-weight:600; letter-spacing:.2px; }
-  h1 small { color:var(--muted); font-weight:400; margin-left:8px; }
-  .filters { display:flex; flex-wrap:wrap; gap:8px; align-items:center; }
-  select, button { background:var(--panel); color:var(--ink);
-                   border:1px solid var(--line); border-radius:7px;
-                   padding:6px 9px; font:inherit; font-size:13px; }
-  button { cursor:pointer; }
-  button:hover { border-color:var(--accent); }
-  main { padding:18px 20px 60px; max-width:1500px; margin:0 auto; }
-  section { margin-bottom:26px; }
-  h2 { font-size:12px; text-transform:uppercase; letter-spacing:.09em;
-       color:var(--muted); margin:0 0 10px; font-weight:600; }
-  h2 .note { text-transform:none; letter-spacing:0; font-weight:400; }
-  .grid { display:grid; gap:12px; }
-  .g5 { grid-template-columns:repeat(auto-fit,minmax(165px,1fr)); }
-  .g3 { grid-template-columns:repeat(auto-fit,minmax(300px,1fr)); }
-  .g2 { grid-template-columns:repeat(auto-fit,minmax(430px,1fr)); }
+  header { position:sticky; top:0; z-index:10; background:var(--bg);
+           border-bottom:1px solid var(--line); padding:11px 20px 12px; }
+  .titlebar { display:flex; align-items:baseline; gap:10px; flex-wrap:wrap;
+              margin-bottom:9px; }
+  h1 { font-size:15px; margin:0; font-weight:650; letter-spacing:.2px; }
+  .sub { color:var(--muted); font-size:12.5px; }
+  .filters { display:flex; flex-wrap:wrap; gap:14px; align-items:center; }
+  .fg { display:flex; align-items:center; gap:6px; }
+  .fg > label { color:var(--muted); font-size:11px; text-transform:uppercase;
+                letter-spacing:.06em; }
+  .seg { display:flex; background:var(--panel); border:1px solid var(--line);
+         border-radius:8px; overflow:hidden; }
+  .seg button { border:0; background:transparent; color:var(--muted);
+                padding:5px 11px; font:inherit; font-size:12.5px; cursor:pointer; }
+  .seg button.on { background:var(--accent); color:#07101f; font-weight:600; }
+  .seg button:hover:not(.on) { color:var(--ink); }
+  select, .btn { background:var(--panel); color:var(--ink);
+                 border:1px solid var(--line); border-radius:8px;
+                 padding:5px 9px; font:inherit; font-size:12.5px; }
+  .btn { cursor:pointer; }
+  .btn:hover { border-color:var(--accent); }
+  main { padding:18px 20px 70px; max-width:1600px; margin:0 auto; }
+  section { margin-bottom:24px; }
+  h2 { font-size:11.5px; text-transform:uppercase; letter-spacing:.09em;
+       color:var(--muted); margin:0 0 9px; font-weight:650; }
+  h2 .n { text-transform:none; letter-spacing:0; font-weight:400; }
+  .grid { display:grid; gap:11px; }
+  .g6 { grid-template-columns:repeat(auto-fit,minmax(158px,1fr)); }
+  .g3 { grid-template-columns:repeat(auto-fit,minmax(320px,1fr)); }
+  .g2 { grid-template-columns:repeat(auto-fit,minmax(460px,1fr)); }
   .card { background:var(--panel); border:1px solid var(--line);
-          border-radius:11px; padding:13px 15px; }
-  .kpi .n { font-size:27px; font-weight:650; line-height:1.15;
+          border-radius:11px; padding:13px 15px; min-width:0; }
+  .kpi .v { font-size:26px; font-weight:650; line-height:1.15;
             font-variant-numeric:tabular-nums; }
-  .kpi .l { color:var(--muted); font-size:12px; margin-top:2px; }
-  .kpi .s { color:var(--muted); font-size:11px; margin-top:5px; }
+  .kpi .k { color:var(--muted); font-size:12px; margin-top:1px; }
+  .kpi .h { color:var(--muted); font-size:11px; margin-top:5px; }
   .ok{color:var(--ok)} .bad{color:var(--bad)} .warn{color:var(--warn)}
-  .idle{color:var(--idle)}
-  .card h3 { font-size:12.5px; margin:0 0 9px; font-weight:600; }
-  .card h3 span { color:var(--muted); font-weight:400; }
+  .idle{color:var(--idle)} .vio{color:var(--violet)}
+  .card h3 { font-size:12.5px; margin:0 0 10px; font-weight:650;
+             display:flex; justify-content:space-between; gap:8px; }
+  .card h3 span { color:var(--muted); font-weight:400; font-size:11.5px; }
   .bars { display:flex; flex-direction:column; gap:5px; }
-  .bar { display:grid; grid-template-columns:1fr auto; gap:8px;
+  .bar { display:grid; grid-template-columns:1fr auto; gap:9px;
          align-items:center; font-size:12.5px; }
-  .bar .t { position:relative; padding:3px 7px; border-radius:5px;
-            background:var(--line); overflow:hidden; white-space:nowrap;
+  .bar .t { position:relative; padding:3px 8px; border-radius:5px;
+            background:var(--panel2); overflow:hidden; white-space:nowrap;
             text-overflow:ellipsis; }
   .bar .t i { position:absolute; inset:0 auto 0 0; background:var(--accent);
-              opacity:.26; font-style:normal; }
+              opacity:.28; font-style:normal; }
   .bar .t b { position:relative; font-weight:500; }
-  .bar .v { color:var(--muted); font-variant-numeric:tabular-nums;
-            font-size:12px; }
+  .bar .v { color:var(--muted); font-variant-numeric:tabular-nums; font-size:12px; }
+  .stack { display:flex; height:7px; border-radius:4px; overflow:hidden;
+           background:var(--panel2); margin-top:3px; }
+  .stack i { display:block; }
   table { width:100%; border-collapse:collapse; font-size:12.5px; }
-  th { text-align:left; color:var(--muted); font-weight:600; font-size:11px;
-       text-transform:uppercase; letter-spacing:.05em;
-       padding:5px 8px; border-bottom:1px solid var(--line); }
-  td { padding:5px 8px; border-bottom:1px solid var(--line);
-       vertical-align:top; }
+  th { text-align:left; color:var(--muted); font-weight:650; font-size:10.5px;
+       text-transform:uppercase; letter-spacing:.05em; padding:5px 8px;
+       border-bottom:1px solid var(--line); white-space:nowrap; }
+  td { padding:5px 8px; border-bottom:1px solid var(--line); vertical-align:top; }
   tr:last-child td { border-bottom:0; }
   td.num, th.num { text-align:right; font-variant-numeric:tabular-nums; }
-  code { font:12px/1.4 ui-monospace,SFMono-Regular,Menlo,monospace;
+  .scroll { max-height:460px; overflow:auto; }
+  code { font:11.5px/1.45 ui-monospace,SFMono-Regular,Menlo,monospace;
          color:var(--muted); word-break:break-word; }
-  .pill { display:inline-block; padding:1px 6px; border-radius:20px;
-          font-size:11px; border:1px solid var(--line); }
-  .spark { display:flex; align-items:flex-end; gap:2px; height:52px; }
-  .spark div { flex:1; background:var(--accent); opacity:.5;
-               border-radius:2px 2px 0 0; min-height:1px; }
-  .spark div.f { background:var(--bad); opacity:.75; }
+  .pill { display:inline-block; padding:1px 7px; border-radius:20px;
+          font-size:10.5px; border:1px solid var(--line); white-space:nowrap; }
+  .pill.ok{color:var(--ok);border-color:var(--ok)}
+  .pill.bad{color:var(--bad);border-color:var(--bad)}
+  .pill.warn{color:var(--warn);border-color:var(--warn)}
+  .pill.idle{color:var(--idle)}
+  .chart { display:flex; align-items:flex-end; gap:2px; height:132px; }
+  .chart .col { flex:1; display:flex; flex-direction:column-reverse;
+                min-width:2px; border-radius:2px 2px 0 0; overflow:hidden; }
+  .chart .col i { display:block; width:100%; }
+  .axis { display:flex; justify-content:space-between; color:var(--muted);
+          font-size:10.5px; margin-top:5px; }
+  .legend { display:flex; gap:12px; color:var(--muted); font-size:11px;
+            margin-top:7px; flex-wrap:wrap; }
+  .legend b { display:inline-block; width:8px; height:8px; border-radius:2px;
+              margin-right:4px; vertical-align:middle; }
   .note { color:var(--muted); font-size:12px; }
-  .empty { color:var(--muted); font-size:12.5px; padding:6px 0; }
-  #err { display:none; background:#3d1a1a; border:1px solid var(--bad);
-         color:#ffb4ae; padding:10px 13px; border-radius:9px; margin-bottom:16px; }
+  .empty { color:var(--muted); font-size:12.5px; padding:8px 0; }
+  #err { display:none; background:#3a1618; border:1px solid var(--bad);
+         color:#ffb4ae; padding:10px 13px; border-radius:9px; margin-bottom:16px;
+         font-size:13px; }
+  input[type=search] { background:var(--panel); border:1px solid var(--line);
+                       color:var(--ink); border-radius:8px; padding:5px 9px;
+                       font:inherit; font-size:12.5px; min-width:190px; }
 </style>
 </head>
 <body>
 <header>
-  <h1>Telemetry — consolidated <small id="sub">loading…</small></h1>
+  <div class="titlebar">
+    <h1>Telemetry — consolidated</h1>
+    <span class="sub" id="sub">loading…</span>
+    <span class="sub" id="stamp" style="margin-left:auto"></span>
+  </div>
   <div class="filters">
-    <select id="days">
-      <option value="1">Today</option>
-      <option value="7" selected>7 days</option>
-      <option value="30">30 days</option>
-      <option value="90">90 days</option>
-      <option value="365">1 year</option>
-    </select>
-    <select id="platform">
-      <option value="">All platforms</option>
-      <option value="pve">Proxmox VE</option>
-      <option value="incus">Incus</option>
-    </select>
-    <select id="repo">
-      <option value="">All sources</option>
-      <option value="ProxmoxVE">ProxmoxVE</option>
-      <option value="ProxmoxVED">ProxmoxVED</option>
-      <option value="external">external / forks</option>
-    </select>
-    <select id="ctype">
-      <option value="">All types</option>
-      <option value="lxc">LXC</option>
-      <option value="vm">VM</option>
-      <option value="addon">Addon</option>
-      <option value="pve">Host tool</option>
-    </select>
-    <button id="reload">Reload</button>
-    <span class="note" id="stamp"></span>
+    <div class="fg"><label>Period</label>
+      <div class="seg" id="days">
+        <button data-v="1">Today</button><button data-v="7" class="on">7 d</button>
+        <button data-v="30">30 d</button><button data-v="90">90 d</button>
+        <button data-v="365">1 y</button>
+      </div>
+    </div>
+    <div class="fg"><label>Platform</label>
+      <div class="seg" id="platform">
+        <button data-v="" class="on">All</button>
+        <button data-v="pve">Proxmox VE</button><button data-v="incus">Incus</button>
+      </div>
+    </div>
+    <div class="fg"><label>Source</label>
+      <div class="seg" id="repo">
+        <button data-v="" class="on">All</button><button data-v="ProxmoxVE">ProxmoxVE</button>
+        <button data-v="ProxmoxVED">ProxmoxVED</button><button data-v="external">External</button>
+      </div>
+    </div>
+    <div class="fg"><label>Type</label>
+      <div class="seg" id="ctype">
+        <button data-v="" class="on">All</button><button data-v="lxc">LXC</button>
+        <button data-v="vm">VM</button><button data-v="addon">Addon</button>
+        <button data-v="pve">Host tool</button>
+      </div>
+    </div>
+    <button class="btn" id="reload">Reload</button>
+    <label class="note"><input type="checkbox" id="auto"> auto</label>
   </div>
 </header>
 
@@ -117,53 +150,73 @@
   <div id="err"></div>
 
   <section>
-    <h2>Outcome <span class="note">— one run, one outcome; a run is a distinct execution</span></h2>
-    <div class="grid g5" id="kpis"></div>
+    <h2>Outcome <span class="n">— one run, one outcome; a run is a distinct execution, not a status ping</span></h2>
+    <div class="grid g6" id="kpis"></div>
   </section>
 
   <section>
-    <h2>Over time</h2>
+    <h2>Installations over time</h2>
     <div class="card">
-      <h3>Runs per day <span id="dailyLegend"></span></h3>
-      <div class="spark" id="spark"></div>
+      <h3>Runs per day <span id="trendMeta"></span></h3>
+      <div class="chart" id="chart"></div>
+      <div class="axis" id="axis"></div>
+      <div class="legend">
+        <span><b style="background:var(--ok)"></b>success</span>
+        <span><b style="background:var(--bad)"></b>failed</span>
+        <span><b style="background:var(--warn)"></b>aborted</span>
+        <span><b style="background:var(--idle)"></b>unfinished</span>
+      </div>
     </div>
-  </section>
-
-  <section>
-    <h2>Failures <span class="note">— grouped the way the engine categorises them</span></h2>
-    <div class="grid g3">
-      <div class="card"><h3>Category <span>— from categorize_error</span></h3><div class="bars" id="categories"></div></div>
-      <div class="card"><h3>Exit code</h3><div class="bars" id="exit_codes"></div></div>
-      <div class="card"><h3>Scripts that failed</h3><div id="failing"></div></div>
-    </div>
-  </section>
-
-  <section>
-    <h2>Why <span class="note">— failures sharing the same captured message</span></h2>
-    <div class="card"><div id="signatures"></div></div>
   </section>
 
   <section>
     <h2>Platform, type and source</h2>
     <div class="grid g3">
-      <div class="card"><h3>Platform</h3><div class="bars" id="by_platform"></div></div>
-      <div class="card"><h3>Script type</h3><div class="bars" id="by_type"></div></div>
-      <div class="card"><h3>Repository</h3><div class="bars" id="by_repo"></div></div>
+      <div class="card"><h3>Platform <span>PVE vs Incus</span></h3><div id="by_platform"></div></div>
+      <div class="card"><h3>Script type</h3><div id="by_type"></div></div>
+      <div class="card"><h3>Repository</h3><div id="by_repo"></div></div>
     </div>
+  </section>
+
+  <section>
+    <h2>Applications</h2>
+    <div class="grid g2">
+      <div class="card"><h3>Top applications <span>by runs</span></h3>
+        <div class="scroll" id="top_apps"></div></div>
+      <div class="card"><h3>Highest failure rates
+        <span id="worstNote"></span></h3>
+        <div class="scroll" id="worst_apps"></div></div>
+    </div>
+  </section>
+
+  <section>
+    <h2>Common errors <span class="n">— grouped the way the engine categorises them</span></h2>
+    <div class="grid g3">
+      <div class="card"><h3>Category <span>categorize_error</span></h3>
+        <div class="bars" id="categories"></div></div>
+      <div class="card"><h3>Exit code <span>with meaning</span></h3>
+        <div class="scroll" id="exit_codes"></div></div>
+      <div class="card"><h3>Repository slug</h3><div class="scroll" id="by_repo_slug"></div></div>
+    </div>
+  </section>
+
+  <section>
+    <h2>Why <span class="n">— failures sharing the same captured message</span></h2>
+    <div class="card"><div class="scroll" id="signatures"></div></div>
   </section>
 
   <section>
     <h2>Operating system and host</h2>
     <div class="grid g2">
-      <div class="card"><h3>Container OS</h3><div class="bars" id="by_os"></div></div>
-      <div class="card"><h3>Host version</h3><div class="bars" id="by_host_version"></div></div>
-      <div class="card"><h3>Successful runs by OS</h3><div class="bars" id="success_by_os"></div></div>
-      <div class="card"><h3>Failed runs by OS</h3><div class="bars" id="failures_by_os"></div></div>
+      <div class="card"><h3>Container OS <span>with outcome</span></h3>
+        <div class="scroll" id="by_os"></div></div>
+      <div class="card"><h3>Host version <span>with outcome</span></h3>
+        <div class="scroll" id="by_host_version"></div></div>
     </div>
   </section>
 
   <section>
-    <h2>Advanced <span class="note">— what the container was given</span></h2>
+    <h2>Advanced <span class="n">— what the container was actually given</span></h2>
     <div class="grid g3">
       <div class="card"><h3>Privilege</h3><div class="bars" id="by_privilege"></div></div>
       <div class="card"><h3>Cores</h3><div class="bars" id="by_cores"></div></div>
@@ -171,138 +224,217 @@
       <div class="card"><h3>Disk</h3><div class="bars" id="by_disk"></div></div>
       <div class="card"><h3>CPU vendor</h3><div class="bars" id="by_cpu"></div></div>
       <div class="card"><h3>GPU vendor</h3><div class="bars" id="by_gpu"></div></div>
-      <div class="card"><h3>Architecture <span>— from has_arm; arch is sent but not stored</span></h3><div class="bars" id="by_arm"></div></div>
+      <div class="card"><h3>GPU passthrough</h3><div class="bars" id="by_gpu_passthrough"></div></div>
+      <div class="card"><h3>Architecture <span>has_arm; arch is not stored</span></h3>
+        <div class="bars" id="by_arm"></div></div>
+      <div class="card"><h3>Method</h3><div class="bars" id="by_method"></div></div>
     </div>
   </section>
 
   <section>
-    <h2>Recent runs</h2>
-    <div class="card"><div id="recent"></div></div>
+    <h2>Install log <span class="n">— most recent runs, one line each</span></h2>
+    <div class="card">
+      <h3>Runs
+        <span><input type="search" id="logq" placeholder="filter by app, OS, error…"></span>
+      </h3>
+      <div class="scroll" id="recent"></div>
+    </div>
   </section>
 </main>
 
 <script>
 const $ = id => document.getElementById(id);
 const esc = s => String(s ?? "").replace(/[&<>"']/g, c =>
-  ({ "&": "&amp;", "<": "&lt;", ">": "&gt;", '"': "&quot;", "'": "&#39;" }[c]));
+  ({ "&":"&amp;","<":"&lt;",">":"&gt;",'"':"&quot;","'":"&#39;" }[c]));
 const n = v => (v ?? 0).toLocaleString();
+const dur = s => !s ? "—" : s < 60 ? s + "s"
+  : Math.floor(s / 60) + "m " + (s % 60) + "s";
 
-/* A rate over a tiny denominator is noise dressed as a number, and an empty
-   window is not "0.0%" — it is "no data". Both say so instead of pretending. */
-function pct(part, whole, floor = 20) {
-  if (!whole) return { text: "no data", cls: "idle" };
+let DATA = null;
+const state = { days: "7", platform: "", repo: "", ctype: "" };
+
+/* A rate over a handful of runs is noise wearing a number's clothes. It is still
+   shown -- hiding it would be its own kind of lie -- but it is not colour-graded,
+   and the card says what the floor is. An empty window reads "no data", never
+   "0.0%" in red. */
+function rate(part, whole, min) {
+  if (!whole) return { text: "—", cls: "idle", weak: true };
   const p = (part / whole) * 100;
-  if (whole < floor) return { text: p.toFixed(1) + "%", cls: "idle" };
-  return { text: p.toFixed(1) + "%", cls: p >= 90 ? "ok" : p >= 70 ? "warn" : "bad" };
+  const text = (p < 10 ? p.toFixed(1) : Math.round(p)) + "%";
+  if (whole < min) return { text, cls: "idle", weak: true };
+  return { text, cls: p >= 90 ? "ok" : p >= 70 ? "warn" : "bad", weak: false };
+}
+function failRate(g, min) {
+  const done = g.success + g.failed;      // aborted is a user decision, not a defect
+  if (!done) return { text: "—", cls: "idle", weak: true };
+  const p = (g.failed / done) * 100;
+  const text = (p < 10 ? p.toFixed(1) : Math.round(p)) + "%";
+  if (done < min) return { text, cls: "idle", weak: true };
+  return { text, cls: p >= 30 ? "bad" : p >= 10 ? "warn" : "ok", weak: false };
 }
 
-function bars(el, items, cls) {
-  const box = $(el);
+function bars(el, items, colour) {
+  const box = $(el); if (!box) return;
   if (!items || !items.length) { box.innerHTML = '<div class="empty">no data</div>'; return; }
   const max = Math.max(...items.map(i => i.count)) || 1;
   box.innerHTML = items.map(i => `
     <div class="bar">
       <span class="t" title="${esc(i.label)}">
-        <i style="width:${(i.count / max) * 100}%${cls ? ";background:var(--" + cls + ")" : ""}"></i>
-        <b>${esc(i.label)}</b>
-      </span>
+        <i style="width:${(i.count / max) * 100}%${colour ? ";background:var(--" + colour + ")" : ""}"></i>
+        <b>${esc(i.label)}</b></span>
       <span class="v">${n(i.count)}</span>
     </div>`).join("");
 }
 
-function render(d) {
-  const o = d.outcome;
-  const sr = pct(o.success, o.success + o.failed);
+/* One table for every breakdown that carries an outcome, so platform, OS, type
+   and host version are read the same way instead of each inventing a layout. */
+function statTable(el, items, min, opts = {}) {
+  const box = $(el); if (!box) return;
+  if (!items || !items.length) { box.innerHTML = '<div class="empty">no data</div>'; return; }
+  box.innerHTML = `<table>
+    <tr><th>${opts.head || "Name"}</th><th class="num">Runs</th>
+        <th class="num">OK</th><th class="num">Fail</th>
+        <th class="num">${opts.rateHead || "Success"}</th><th style="width:22%"></th></tr>
+    ${items.map(g => {
+      const r = opts.fail ? failRate(g, min) : rate(g.success, g.success + g.failed, min);
+      const t = Math.max(1, g.runs);
+      return `<tr>
+        <td title="${esc(g.label)}">${esc(g.label)}</td>
+        <td class="num">${n(g.runs)}</td>
+        <td class="num ok">${n(g.success)}</td>
+        <td class="num ${g.failed ? "bad" : ""}">${n(g.failed)}</td>
+        <td class="num ${r.cls}"${r.weak ? ' title="below the run floor; shown but not graded"' : ""}>${r.text}</td>
+        <td><span class="stack">
+          <i style="width:${g.success / t * 100}%;background:var(--ok)"></i>
+          <i style="width:${g.failed / t * 100}%;background:var(--bad)"></i>
+          <i style="width:${g.aborted / t * 100}%;background:var(--warn)"></i>
+          <i style="width:${g.unfinished / t * 100}%;background:var(--idle)"></i>
+        </span></td></tr>`;
+    }).join("")}</table>`;
+}
 
-  $("sub").textContent =
-    `${n(o.runs)} runs · ${d.days} day${d.days === 1 ? "" : "s"}` +
-    (d.platform ? ` · ${d.platform}` : "") + (d.repo ? ` · ${d.repo}` : "");
+function renderChart(days) {
+  const box = $("chart");
+  if (!days || !days.length) { box.innerHTML = '<div class="empty">no data</div>'; $("axis").textContent = ""; return; }
+  const max = Math.max(1, ...days.map(d => d.runs));
+  box.innerHTML = days.map(d => {
+    // A day with no runs would make every share NaN, which renders as a bar of
+    // full height rather than none.
+    const t = d.runs || 1;
+    const seg = (v, c) => `<i style="height:${v / t * 100}%;background:var(--${c})"></i>`;
+    return `<div class="col" style="height:${d.runs / max * 100}%"
+      title="${esc(d.day)} — ${n(d.runs)} runs: ${n(d.success)} ok, ${n(d.failed)} failed, ${n(d.aborted)} aborted, ${n(d.unfinished)} unfinished">
+      ${seg(d.success, "ok")}${seg(d.failed, "bad")}${seg(d.aborted, "warn")}${seg(d.unfinished, "idle")}
+    </div>`;
+  }).join("");
+  $("axis").innerHTML = `<span>${esc(days[0].day)}</span><span>${esc(days[days.length - 1].day)}</span>`;
+  $("trendMeta").textContent = `${days.length} day(s), peak ${n(max)}`;
+}
+
+function renderLog() {
+  const q = ($("logq").value || "").toLowerCase().trim();
+  const rows = (DATA.recent || []).filter(r => !q ||
+    [r.app, r.os, r.error, r.category, r.platform, r.type, r.repo]
+      .some(v => String(v || "").toLowerCase().includes(q)));
+  const cls = s => s === "success" ? "ok" : s === "failed" ? "bad"
+    : s === "aborted" ? "warn" : "idle";
+  $("recent").innerHTML = rows.length ? `<table>
+    <tr><th>When</th><th>Status</th><th class="num">Exit</th><th>Application</th>
+        <th>Type</th><th>Platform</th><th>OS</th><th>Resources</th>
+        <th class="num">Duration</th><th>Detail</th></tr>
+    ${rows.map(r => `<tr>
+      <td>${esc(r.last_seen)}</td>
+      <td><span class="pill ${cls(r.status)}">${esc(r.status)}</span></td>
+      <td class="num">${r.exit_code || ""}</td>
+      <td>${esc(r.app)}</td>
+      <td>${esc(r.type || "—")}</td>
+      <td>${esc(r.platform || "—")}</td>
+      <td>${esc(r.os || "—")}</td>
+      <td class="note">${r.cores ? `${r.cores}C · ${r.ram}M · ${r.disk}G` : "—"}</td>
+      <td class="num">${dur(r.duration)}</td>
+      <td><code>${esc(r.error || "")}</code>${r.category
+        ? ` <span class="pill idle">${esc(r.category)}</span>` : ""}</td>
+    </tr>`).join("")}</table>`
+    : `<div class="empty">${q ? "nothing matches that filter" : "no runs in this window"}</div>`;
+}
+
+function render(d) {
+  DATA = d;
+  const min = d.min_runs || 10;
+  const sr = rate(d.success, d.success + d.failed, min);
+
+  $("sub").textContent = `${n(d.runs)} runs · ${d.days} day${d.days === 1 ? "" : "s"}`
+    + (d.platform ? ` · ${d.platform}` : "") + (d.repo ? ` · ${d.repo}` : "")
+    + (d.type ? ` · ${d.type}` : "");
 
   $("kpis").innerHTML = [
-    ["Runs", n(o.runs), "",
-      `distinct executions${o.unfinished ? ` · ${n(o.unfinished)} never finished` : ""}`],
-    ["Success rate", sr.text, sr.cls, `${n(o.success)} of ${n(o.success + o.failed)} that ended`],
-    ["Failed", n(o.failed), o.failed ? "bad" : "", "reported a terminal failure"],
-    ["Aborted", n(o.aborted), o.aborted ? "warn" : "", "stopped by the user"],
-    ["Median install", d.median_duration ? d.median_duration + " s" : "no data",
-      "", "successful runs only"],
-  ].map(([l, v, c, s]) => `
-    <div class="card kpi"><div class="n ${c}">${v}</div>
-    <div class="l">${l}</div><div class="s">${s}</div></div>`).join("");
+    ["Runs", n(d.runs), "", "distinct executions in this window"],
+    ["Success rate", sr.text, sr.cls, `${n(d.success)} of ${n(d.success + d.failed)} that ended`],
+    ["Failed", n(d.failed), d.failed ? "bad" : "", "reported a terminal failure"],
+    ["Aborted", n(d.aborted), d.aborted ? "warn" : "", "stopped by the user"],
+    ["Unfinished", n(d.unfinished), d.unfinished ? "idle" : "", "never reported an ending"],
+    ["Median install", dur(d.median_duration), "", "successful runs only"],
+    ["All time", n(d.all_time), "vio", "every run ever, ignores the filters"],
+  ].map(([k, v, c, h]) => `<div class="card kpi">
+      <div class="v ${c}">${v}</div><div class="k">${k}</div><div class="h">${h}</div>
+    </div>`).join("");
 
-  const days = d.daily || [];
-  const maxd = Math.max(1, ...days.map(x => x.runs));
-  $("spark").innerHTML = days.map(x => `
-    <div title="${esc(x.day)}: ${n(x.runs)} runs, ${n(x.failed)} failed"
-         style="height:${(x.runs / maxd) * 100}%"
-         class="${x.failed && x.failed / Math.max(1, x.runs) > 0.2 ? "f" : ""}"></div>`).join("")
-    || '<div class="empty">no data</div>';
-  $("dailyLegend").textContent = days.length
-    ? `— ${days.length} day(s); red when over 20% failed` : "";
+  renderChart(d.daily);
+
+  statTable("by_platform", d.by_platform, min, { head: "Platform" });
+  statTable("by_type", d.by_type, min, { head: "Type" });
+  statTable("by_repo", d.by_repo, min, { head: "Source" });
+  statTable("top_apps", d.top_apps, min, { head: "Application" });
+  statTable("worst_apps", d.worst_apps, min,
+    { head: "Application", fail: true, rateHead: "Fail rate" });
+  statTable("by_os", d.by_os, min, { head: "OS" });
+  statTable("by_host_version", d.by_host_version, min, { head: "Host" });
+  statTable("by_repo_slug", d.by_repo_slug, min, { head: "Slug" });
+
+  $("worstNote").textContent = `graded from ${min} finished runs up`;
 
   bars("categories", d.categories, "bad");
-  bars("exit_codes", d.exit_codes, "bad");
-  bars("by_platform", d.by_platform);
-  bars("by_type", d.by_type);
-  bars("by_repo", d.by_repo);
-  bars("by_os", d.by_os);
-  bars("by_host_version", d.by_host_version);
-  bars("success_by_os", d.success_by_os, "ok");
-  bars("failures_by_os", d.failures_by_os, "bad");
   bars("by_privilege", d.by_privilege);
   bars("by_cores", d.by_cores);
   bars("by_ram", d.by_ram);
   bars("by_disk", d.by_disk);
   bars("by_cpu", d.by_cpu);
   bars("by_gpu", d.by_gpu);
+  bars("by_gpu_passthrough", d.by_gpu_passthrough);
   bars("by_arm", d.by_arm);
+  bars("by_method", d.by_method);
 
-  const f = d.failing || [];
-  $("failing").innerHTML = f.length ? `<table>
-    <tr><th>Script</th><th class="num">Failed</th><th class="num">Runs</th><th class="num">Rate</th></tr>
-    ${f.map(x => { const r = pct(x.failed, x.runs); return `<tr>
-      <td>${esc(x.app)}</td><td class="num">${n(x.failed)}</td>
-      <td class="num">${n(x.runs)}</td>
-      <td class="num ${r.cls}">${r.text}</td></tr>`; }).join("")}
-    </table>` : '<div class="empty">no failures in this window</div>';
+  const ec = d.exit_codes || [];
+  $("exit_codes").innerHTML = ec.length ? `<table>
+    <tr><th class="num">Code</th><th>Meaning</th><th class="num">Runs</th><th class="num">Apps</th></tr>
+    ${ec.map(x => `<tr><td class="num bad">${x.code}</td>
+      <td>${esc(x.desc || "—")}</td>
+      <td class="num">${n(x.count)}</td><td class="num">${n(x.apps)}</td></tr>`).join("")}
+    </table>` : '<div class="empty">no failures with an exit code here</div>';
 
-  const s = d.signatures || [];
-  $("signatures").innerHTML = s.length ? `<table>
+  const sg = d.signatures || [];
+  $("signatures").innerHTML = sg.length ? `<table>
     <tr><th>Category</th><th class="num">Exit</th><th>Message</th>
-        <th class="num">Runs</th><th class="num">Scripts</th></tr>
-    ${s.map(x => `<tr>
+        <th class="num">Runs</th><th class="num">Apps</th></tr>
+    ${sg.map(x => `<tr>
       <td><span class="pill">${esc(x.category || "uncategorised")}</span></td>
       <td class="num">${x.exit_code}</td>
       <td><code>${esc(x.message)}</code></td>
       <td class="num">${n(x.count)}</td><td class="num">${n(x.apps)}</td></tr>`).join("")}
-    </table>` : '<div class="empty">no failures carried a message in this window</div>';
+    </table>` : '<div class="empty">no failure carried a message in this window</div>';
 
-  const r = d.recent || [];
-  const cls = st => st === "success" ? "ok" : st === "failed" ? "bad"
-    : st === "aborted" ? "warn" : "idle";
-  $("recent").innerHTML = r.length ? `<table>
-    <tr><th>When</th><th>Script</th><th>Type</th><th>Platform</th><th>OS</th>
-        <th>Status</th><th class="num">Exit</th><th>Detail</th></tr>
-    ${r.map(x => `<tr>
-      <td>${esc(x.last_seen)}</td><td>${esc(x.app)}</td>
-      <td>${esc(x.type)}</td><td>${esc(x.platform || "—")}</td>
-      <td>${esc((x.os || "").trim() || "—")}</td>
-      <td class="${cls(x.status)}">${esc(x.status)}</td>
-      <td class="num">${x.exit_code || ""}</td>
-      <td><code>${esc(x.error || "")}</code></td></tr>`).join("")}
-    </table>` : '<div class="empty">no runs in this window</div>';
+  renderLog();
 }
 
 async function load() {
   const q = new URLSearchParams({
-    days: $("days").value, platform: $("platform").value,
-    repo: $("repo").value, ctype: $("ctype").value,
+    days: state.days, platform: state.platform, repo: state.repo, ctype: state.ctype,
   });
   $("err").style.display = "none";
   $("stamp").textContent = "loading…";
   try {
-    const res = await fetch("/api/new?" + q.toString(), { cache: "no-store" });
-    if (!res.ok) throw new Error(`HTTP ${res.status}`);
+    const res = await fetch("/api/new?" + q, { cache: "no-store" });
+    if (!res.ok) throw new Error(`HTTP ${res.status} — ${(await res.text()).slice(0, 200)}`);
     render(await res.json());
     $("stamp").textContent = "updated " + new Date().toLocaleTimeString();
   } catch (e) {
@@ -312,9 +444,21 @@ async function load() {
   }
 }
 
-["days", "platform", "repo", "ctype"].forEach(id =>
-  $(id).addEventListener("change", load));
+for (const id of ["days", "platform", "repo", "ctype"]) {
+  $(id).addEventListener("click", ev => {
+    const b = ev.target.closest("button"); if (!b) return;
+    [...ev.currentTarget.children].forEach(c => c.classList.toggle("on", c === b));
+    state[id] = b.dataset.v;
+    load();
+  });
+}
 $("reload").addEventListener("click", load);
+$("logq").addEventListener("input", () => DATA && renderLog());
+let timer = null;
+$("auto").addEventListener("change", e => {
+  clearInterval(timer);
+  if (e.target.checked) timer = setInterval(load, 60000);
+});
 load();
 </script>
 </body>
