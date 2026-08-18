@@ -1463,6 +1463,58 @@ func main() {
 		serveHTMLFile(w, r, "public/templates/dashboard.html")
 	})
 
+	// Consolidated dashboard, served alongside the existing three pages so it
+	// can be compared against them on live data before anything is replaced.
+	mux.HandleFunc("/new", func(w http.ResponseWriter, r *http.Request) {
+		serveHTMLFile(w, r, "public/templates/new/index.html")
+	})
+
+	mux.HandleFunc("/api/new", func(w http.ResponseWriter, r *http.Request) {
+		days := 7
+		if d := r.URL.Query().Get("days"); d != "" {
+			fmt.Sscanf(d, "%d", &days)
+			if days < 1 {
+				days = 1
+			}
+			if days > 365 {
+				days = 365
+			}
+		}
+
+		repoSource, repoSlug := parseRepoFilters(r)
+		platform := parsePlatform(r)
+
+		// Allowlisted: the value is interpolated into SQL, and the set of script
+		// types the engine reports is small and known.
+		ctype := ""
+		switch strings.ToLower(strings.TrimSpace(r.URL.Query().Get("ctype"))) {
+		case "lxc":
+			ctype = "lxc"
+		case "vm":
+			ctype = "vm"
+		case "addon":
+			ctype = "addon"
+		case "pve":
+			ctype = "pve"
+		}
+
+		ctx, cancel := context.WithTimeout(r.Context(), 120*time.Second)
+		defer cancel()
+
+		data, err := ch.FetchNewDashboard(ctx, days, repoSource, repoSlug, platform, ctype)
+		if err != nil {
+			log.Printf("new dashboard: %v", err)
+			http.Error(w, "Failed to load dashboard data", http.StatusInternalServerError)
+			return
+		}
+
+		w.Header().Set("Content-Type", "application/json")
+		w.Header().Set("Cache-Control", "no-store")
+		if err := json.NewEncoder(w).Encode(data); err != nil {
+			log.Printf("new dashboard encode: %v", err)
+		}
+	})
+
 	// Prometheus-style metrics endpoint
 	mux.HandleFunc("/metrics", func(w http.ResponseWriter, r *http.Request) {
 		ctx, cancel := context.WithTimeout(r.Context(), 5*time.Second)

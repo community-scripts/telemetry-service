@@ -1,0 +1,321 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Telemetry — consolidated</title>
+<style>
+  :root {
+    --bg: #0f1115; --panel: #171a21; --line: #262b36; --ink: #e6e9ef;
+    --muted: #8b93a7; --ok: #3fb950; --bad: #f85149; --warn: #d29922;
+    --idle: #6e7681; --accent: #58a6ff;
+  }
+  @media (prefers-color-scheme: light) {
+    :root { --bg:#f6f7f9; --panel:#fff; --line:#e3e6eb; --ink:#12151b;
+            --muted:#5c6577; --idle:#9aa2b1; }
+  }
+  * { box-sizing: border-box; }
+  body { margin:0; background:var(--bg); color:var(--ink);
+         font:14px/1.5 ui-sans-serif,system-ui,-apple-system,Segoe UI,Roboto,sans-serif; }
+  header { position:sticky; top:0; z-index:5; background:var(--bg);
+           border-bottom:1px solid var(--line); padding:12px 20px; }
+  h1 { font-size:15px; margin:0 0 10px; font-weight:600; letter-spacing:.2px; }
+  h1 small { color:var(--muted); font-weight:400; margin-left:8px; }
+  .filters { display:flex; flex-wrap:wrap; gap:8px; align-items:center; }
+  select, button { background:var(--panel); color:var(--ink);
+                   border:1px solid var(--line); border-radius:7px;
+                   padding:6px 9px; font:inherit; font-size:13px; }
+  button { cursor:pointer; }
+  button:hover { border-color:var(--accent); }
+  main { padding:18px 20px 60px; max-width:1500px; margin:0 auto; }
+  section { margin-bottom:26px; }
+  h2 { font-size:12px; text-transform:uppercase; letter-spacing:.09em;
+       color:var(--muted); margin:0 0 10px; font-weight:600; }
+  h2 .note { text-transform:none; letter-spacing:0; font-weight:400; }
+  .grid { display:grid; gap:12px; }
+  .g5 { grid-template-columns:repeat(auto-fit,minmax(165px,1fr)); }
+  .g3 { grid-template-columns:repeat(auto-fit,minmax(300px,1fr)); }
+  .g2 { grid-template-columns:repeat(auto-fit,minmax(430px,1fr)); }
+  .card { background:var(--panel); border:1px solid var(--line);
+          border-radius:11px; padding:13px 15px; }
+  .kpi .n { font-size:27px; font-weight:650; line-height:1.15;
+            font-variant-numeric:tabular-nums; }
+  .kpi .l { color:var(--muted); font-size:12px; margin-top:2px; }
+  .kpi .s { color:var(--muted); font-size:11px; margin-top:5px; }
+  .ok{color:var(--ok)} .bad{color:var(--bad)} .warn{color:var(--warn)}
+  .idle{color:var(--idle)}
+  .card h3 { font-size:12.5px; margin:0 0 9px; font-weight:600; }
+  .card h3 span { color:var(--muted); font-weight:400; }
+  .bars { display:flex; flex-direction:column; gap:5px; }
+  .bar { display:grid; grid-template-columns:1fr auto; gap:8px;
+         align-items:center; font-size:12.5px; }
+  .bar .t { position:relative; padding:3px 7px; border-radius:5px;
+            background:var(--line); overflow:hidden; white-space:nowrap;
+            text-overflow:ellipsis; }
+  .bar .t i { position:absolute; inset:0 auto 0 0; background:var(--accent);
+              opacity:.26; font-style:normal; }
+  .bar .t b { position:relative; font-weight:500; }
+  .bar .v { color:var(--muted); font-variant-numeric:tabular-nums;
+            font-size:12px; }
+  table { width:100%; border-collapse:collapse; font-size:12.5px; }
+  th { text-align:left; color:var(--muted); font-weight:600; font-size:11px;
+       text-transform:uppercase; letter-spacing:.05em;
+       padding:5px 8px; border-bottom:1px solid var(--line); }
+  td { padding:5px 8px; border-bottom:1px solid var(--line);
+       vertical-align:top; }
+  tr:last-child td { border-bottom:0; }
+  td.num, th.num { text-align:right; font-variant-numeric:tabular-nums; }
+  code { font:12px/1.4 ui-monospace,SFMono-Regular,Menlo,monospace;
+         color:var(--muted); word-break:break-word; }
+  .pill { display:inline-block; padding:1px 6px; border-radius:20px;
+          font-size:11px; border:1px solid var(--line); }
+  .spark { display:flex; align-items:flex-end; gap:2px; height:52px; }
+  .spark div { flex:1; background:var(--accent); opacity:.5;
+               border-radius:2px 2px 0 0; min-height:1px; }
+  .spark div.f { background:var(--bad); opacity:.75; }
+  .note { color:var(--muted); font-size:12px; }
+  .empty { color:var(--muted); font-size:12.5px; padding:6px 0; }
+  #err { display:none; background:#3d1a1a; border:1px solid var(--bad);
+         color:#ffb4ae; padding:10px 13px; border-radius:9px; margin-bottom:16px; }
+</style>
+</head>
+<body>
+<header>
+  <h1>Telemetry — consolidated <small id="sub">loading…</small></h1>
+  <div class="filters">
+    <select id="days">
+      <option value="1">Today</option>
+      <option value="7" selected>7 days</option>
+      <option value="30">30 days</option>
+      <option value="90">90 days</option>
+      <option value="365">1 year</option>
+    </select>
+    <select id="platform">
+      <option value="">All platforms</option>
+      <option value="pve">Proxmox VE</option>
+      <option value="incus">Incus</option>
+    </select>
+    <select id="repo">
+      <option value="">All sources</option>
+      <option value="ProxmoxVE">ProxmoxVE</option>
+      <option value="ProxmoxVED">ProxmoxVED</option>
+      <option value="external">external / forks</option>
+    </select>
+    <select id="ctype">
+      <option value="">All types</option>
+      <option value="lxc">LXC</option>
+      <option value="vm">VM</option>
+      <option value="addon">Addon</option>
+      <option value="pve">Host tool</option>
+    </select>
+    <button id="reload">Reload</button>
+    <span class="note" id="stamp"></span>
+  </div>
+</header>
+
+<main>
+  <div id="err"></div>
+
+  <section>
+    <h2>Outcome <span class="note">— one run, one outcome; a run is a distinct execution</span></h2>
+    <div class="grid g5" id="kpis"></div>
+  </section>
+
+  <section>
+    <h2>Over time</h2>
+    <div class="card">
+      <h3>Runs per day <span id="dailyLegend"></span></h3>
+      <div class="spark" id="spark"></div>
+    </div>
+  </section>
+
+  <section>
+    <h2>Failures <span class="note">— grouped the way the engine categorises them</span></h2>
+    <div class="grid g3">
+      <div class="card"><h3>Category <span>— from categorize_error</span></h3><div class="bars" id="categories"></div></div>
+      <div class="card"><h3>Exit code</h3><div class="bars" id="exit_codes"></div></div>
+      <div class="card"><h3>Scripts that failed</h3><div id="failing"></div></div>
+    </div>
+  </section>
+
+  <section>
+    <h2>Why <span class="note">— failures sharing the same captured message</span></h2>
+    <div class="card"><div id="signatures"></div></div>
+  </section>
+
+  <section>
+    <h2>Platform, type and source</h2>
+    <div class="grid g3">
+      <div class="card"><h3>Platform</h3><div class="bars" id="by_platform"></div></div>
+      <div class="card"><h3>Script type</h3><div class="bars" id="by_type"></div></div>
+      <div class="card"><h3>Repository</h3><div class="bars" id="by_repo"></div></div>
+    </div>
+  </section>
+
+  <section>
+    <h2>Operating system and host</h2>
+    <div class="grid g2">
+      <div class="card"><h3>Container OS</h3><div class="bars" id="by_os"></div></div>
+      <div class="card"><h3>Host version</h3><div class="bars" id="by_host_version"></div></div>
+      <div class="card"><h3>Successful runs by OS</h3><div class="bars" id="success_by_os"></div></div>
+      <div class="card"><h3>Failed runs by OS</h3><div class="bars" id="failures_by_os"></div></div>
+    </div>
+  </section>
+
+  <section>
+    <h2>Advanced <span class="note">— what the container was given</span></h2>
+    <div class="grid g3">
+      <div class="card"><h3>Privilege</h3><div class="bars" id="by_privilege"></div></div>
+      <div class="card"><h3>Cores</h3><div class="bars" id="by_cores"></div></div>
+      <div class="card"><h3>RAM</h3><div class="bars" id="by_ram"></div></div>
+      <div class="card"><h3>Disk</h3><div class="bars" id="by_disk"></div></div>
+      <div class="card"><h3>CPU vendor</h3><div class="bars" id="by_cpu"></div></div>
+      <div class="card"><h3>GPU vendor</h3><div class="bars" id="by_gpu"></div></div>
+      <div class="card"><h3>Architecture <span>— from has_arm; arch is sent but not stored</span></h3><div class="bars" id="by_arm"></div></div>
+    </div>
+  </section>
+
+  <section>
+    <h2>Recent runs</h2>
+    <div class="card"><div id="recent"></div></div>
+  </section>
+</main>
+
+<script>
+const $ = id => document.getElementById(id);
+const esc = s => String(s ?? "").replace(/[&<>"']/g, c =>
+  ({ "&": "&amp;", "<": "&lt;", ">": "&gt;", '"': "&quot;", "'": "&#39;" }[c]));
+const n = v => (v ?? 0).toLocaleString();
+
+/* A rate over a tiny denominator is noise dressed as a number, and an empty
+   window is not "0.0%" — it is "no data". Both say so instead of pretending. */
+function pct(part, whole, floor = 20) {
+  if (!whole) return { text: "no data", cls: "idle" };
+  const p = (part / whole) * 100;
+  if (whole < floor) return { text: p.toFixed(1) + "%", cls: "idle" };
+  return { text: p.toFixed(1) + "%", cls: p >= 90 ? "ok" : p >= 70 ? "warn" : "bad" };
+}
+
+function bars(el, items, cls) {
+  const box = $(el);
+  if (!items || !items.length) { box.innerHTML = '<div class="empty">no data</div>'; return; }
+  const max = Math.max(...items.map(i => i.count)) || 1;
+  box.innerHTML = items.map(i => `
+    <div class="bar">
+      <span class="t" title="${esc(i.label)}">
+        <i style="width:${(i.count / max) * 100}%${cls ? ";background:var(--" + cls + ")" : ""}"></i>
+        <b>${esc(i.label)}</b>
+      </span>
+      <span class="v">${n(i.count)}</span>
+    </div>`).join("");
+}
+
+function render(d) {
+  const o = d.outcome;
+  const sr = pct(o.success, o.success + o.failed);
+
+  $("sub").textContent =
+    `${n(o.runs)} runs · ${d.days} day${d.days === 1 ? "" : "s"}` +
+    (d.platform ? ` · ${d.platform}` : "") + (d.repo ? ` · ${d.repo}` : "");
+
+  $("kpis").innerHTML = [
+    ["Runs", n(o.runs), "",
+      `distinct executions${o.unfinished ? ` · ${n(o.unfinished)} never finished` : ""}`],
+    ["Success rate", sr.text, sr.cls, `${n(o.success)} of ${n(o.success + o.failed)} that ended`],
+    ["Failed", n(o.failed), o.failed ? "bad" : "", "reported a terminal failure"],
+    ["Aborted", n(o.aborted), o.aborted ? "warn" : "", "stopped by the user"],
+    ["Median install", d.median_duration ? d.median_duration + " s" : "no data",
+      "", "successful runs only"],
+  ].map(([l, v, c, s]) => `
+    <div class="card kpi"><div class="n ${c}">${v}</div>
+    <div class="l">${l}</div><div class="s">${s}</div></div>`).join("");
+
+  const days = d.daily || [];
+  const maxd = Math.max(1, ...days.map(x => x.runs));
+  $("spark").innerHTML = days.map(x => `
+    <div title="${esc(x.day)}: ${n(x.runs)} runs, ${n(x.failed)} failed"
+         style="height:${(x.runs / maxd) * 100}%"
+         class="${x.failed && x.failed / Math.max(1, x.runs) > 0.2 ? "f" : ""}"></div>`).join("")
+    || '<div class="empty">no data</div>';
+  $("dailyLegend").textContent = days.length
+    ? `— ${days.length} day(s); red when over 20% failed` : "";
+
+  bars("categories", d.categories, "bad");
+  bars("exit_codes", d.exit_codes, "bad");
+  bars("by_platform", d.by_platform);
+  bars("by_type", d.by_type);
+  bars("by_repo", d.by_repo);
+  bars("by_os", d.by_os);
+  bars("by_host_version", d.by_host_version);
+  bars("success_by_os", d.success_by_os, "ok");
+  bars("failures_by_os", d.failures_by_os, "bad");
+  bars("by_privilege", d.by_privilege);
+  bars("by_cores", d.by_cores);
+  bars("by_ram", d.by_ram);
+  bars("by_disk", d.by_disk);
+  bars("by_cpu", d.by_cpu);
+  bars("by_gpu", d.by_gpu);
+  bars("by_arm", d.by_arm);
+
+  const f = d.failing || [];
+  $("failing").innerHTML = f.length ? `<table>
+    <tr><th>Script</th><th class="num">Failed</th><th class="num">Runs</th><th class="num">Rate</th></tr>
+    ${f.map(x => { const r = pct(x.failed, x.runs); return `<tr>
+      <td>${esc(x.app)}</td><td class="num">${n(x.failed)}</td>
+      <td class="num">${n(x.runs)}</td>
+      <td class="num ${r.cls}">${r.text}</td></tr>`; }).join("")}
+    </table>` : '<div class="empty">no failures in this window</div>';
+
+  const s = d.signatures || [];
+  $("signatures").innerHTML = s.length ? `<table>
+    <tr><th>Category</th><th class="num">Exit</th><th>Message</th>
+        <th class="num">Runs</th><th class="num">Scripts</th></tr>
+    ${s.map(x => `<tr>
+      <td><span class="pill">${esc(x.category || "uncategorised")}</span></td>
+      <td class="num">${x.exit_code}</td>
+      <td><code>${esc(x.message)}</code></td>
+      <td class="num">${n(x.count)}</td><td class="num">${n(x.apps)}</td></tr>`).join("")}
+    </table>` : '<div class="empty">no failures carried a message in this window</div>';
+
+  const r = d.recent || [];
+  const cls = st => st === "success" ? "ok" : st === "failed" ? "bad"
+    : st === "aborted" ? "warn" : "idle";
+  $("recent").innerHTML = r.length ? `<table>
+    <tr><th>When</th><th>Script</th><th>Type</th><th>Platform</th><th>OS</th>
+        <th>Status</th><th class="num">Exit</th><th>Detail</th></tr>
+    ${r.map(x => `<tr>
+      <td>${esc(x.last_seen)}</td><td>${esc(x.app)}</td>
+      <td>${esc(x.type)}</td><td>${esc(x.platform || "—")}</td>
+      <td>${esc((x.os || "").trim() || "—")}</td>
+      <td class="${cls(x.status)}">${esc(x.status)}</td>
+      <td class="num">${x.exit_code || ""}</td>
+      <td><code>${esc(x.error || "")}</code></td></tr>`).join("")}
+    </table>` : '<div class="empty">no runs in this window</div>';
+}
+
+async function load() {
+  const q = new URLSearchParams({
+    days: $("days").value, platform: $("platform").value,
+    repo: $("repo").value, ctype: $("ctype").value,
+  });
+  $("err").style.display = "none";
+  $("stamp").textContent = "loading…";
+  try {
+    const res = await fetch("/api/new?" + q.toString(), { cache: "no-store" });
+    if (!res.ok) throw new Error(`HTTP ${res.status}`);
+    render(await res.json());
+    $("stamp").textContent = "updated " + new Date().toLocaleTimeString();
+  } catch (e) {
+    $("err").style.display = "block";
+    $("err").textContent = "Could not load telemetry: " + e.message;
+    $("stamp").textContent = "";
+  }
+}
+
+["days", "platform", "repo", "ctype"].forEach(id =>
+  $(id).addEventListener("change", load));
+$("reload").addEventListener("click", load);
+load();
+</script>
+</body>
+</html>
