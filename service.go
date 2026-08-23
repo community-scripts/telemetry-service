@@ -715,7 +715,13 @@ var (
 
 		// --- APT / DPKG ---
 		100: {"APT: Package manager error (broken packages)", "apt"},
-		101: {"APT: Configuration error (bad sources)", "apt"},
+		// Not apt. apt reports its problems as 100; 101 is what cargo returns for
+		// any failure at all, and in fourteen days of data every single exit-101
+		// signature was a Rust build -- scanopy 48, vaultwarden 27, oxicloud 25,
+		// a hundred of the hundred and twenty. Calling that "APT: Configuration
+		// error (bad sources)" sent people to look at sources.list for a
+		// compiler error. Left to the evidence below, like exit 1.
+		101: {"Build or configuration error", "unknown"},
 		102: {"APT: Lock held by another process", "apt"},
 
 		// --- Script Validation & Setup (103-123) ---
@@ -936,6 +942,14 @@ func deriveErrorCategory(code int, errText string) string {
 	case containsAny(e, "unable to locate package", "broken packages", "unmet dependencies", "dpkg was interrupted",
 		"held broken packages", "e: package", "apt-get", "dpkg:"):
 		return "apt"
+	// Compiling from source is its own failure mode and its own fix -- more
+	// memory, a toolchain version, a dependency the crate needs -- so it does
+	// not belong in "runtime" with things that failed while running. Checked
+	// after apt on purpose: a build that died because a -dev package was
+	// missing is an apt problem, and that evidence should win.
+	case containsAny(e, "cargo build", "error: could not compile", "rustc", "cargo:",
+		"go build", "cmake error", "make: ***", "ninja: build stopped", "c++: fatal error"):
+		return "build"
 	case containsAny(e, "command not found"):
 		return "command_not_found"
 	case containsAny(e, "timed out", "timeout"):
