@@ -889,6 +889,30 @@ func containsAny(haystack string, needles ...string) bool {
 	return false
 }
 
+// errDiagnosticHeader matches the header the engine puts in front of the real
+// error text. It comes in two shapes, and both have to be handled:
+//
+//	exit_code=1 | General error / Operation not permitted | at line 23: npm …
+//	exit_code=1 | General error / Operation not permitted\n---\nCreating filesyst…
+//
+// The second occurs whenever the ERR trap had no command to record, and it is
+// common: five of eighteen exit-1 samples pulled from the live API. Requiring
+// the third field would have left those still matching on the description.
+var errDiagnosticHeader = regexp.MustCompile(`^exit_code=\d+\s*\|[^|\n]*(\|\s*)?`)
+
+// stripDiagnosticHeader removes that header before any keyword matching below.
+//
+// The middle field is our own description of the exit code, not evidence about
+// what happened, and matching keywords against it was actively wrong. Exit 1 is
+// described as "General error / Operation not permitted", which contains
+// "operation not permitted" -- so every exit-1 failure was filed as a permission
+// problem. Over fourteen days that was 944 of 5165 errors, the largest single
+// category on the dashboard, and none of them had anything to do with
+// permissions; the record that surfaced it was a failing `npm install -g`.
+func stripDiagnosticHeader(s string) string {
+	return errDiagnosticHeader.ReplaceAllString(s, "")
+}
+
 // deriveErrorCategory is the authoritative server-side error categorization.
 // It first trusts the exit code (single source of truth via exitCodeInfo). For
 // generic codes (1/2/exit-from-set-e) where the exit code says "unknown", it
@@ -898,7 +922,7 @@ func deriveErrorCategory(code int, errText string) string {
 	if cat := getExitCodeCategory(code); cat != "unknown" && cat != "" {
 		return cat
 	}
-	e := strings.ToLower(errText)
+	e := strings.ToLower(stripDiagnosticHeader(errText))
 	switch {
 	case containsAny(e, "out of memory", "oom-kill", "cannot allocate memory", "killed process", "memory exhausted"):
 		return "resource"

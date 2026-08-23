@@ -1581,6 +1581,17 @@ func (ch *CHClient) FetchErrorAnalysisData(ctx context.Context, days int, repoSo
 	// Failure signatures: group by the exact failing command from the v3
 	// structured error header ("… | at line L: <cmd>"). Answers "WHICH command
 	// breaks most often, across which apps" — far more actionable than exit codes.
+	//
+	// Two of those values are not commands and are excluded below. The engine
+	// writes "unknown" when the ERR trap had no BASH_COMMAND to record, and a
+	// bare "return N" is what the trap sees when a helper propagates a failure
+	// that happened earlier — by then the frame has been popped and the name of
+	// the function that returned is gone. Both group enormously: over fourteen
+	// days "unknown" was the single largest signature at 216 across 66 apps,
+	// with return 7, return 22 and return 250 adding 330 more between them. That
+	// is more than half the visible list saying nothing, pushing real signatures
+	// off the end of it. These failures still count in the exit-code and
+	// category breakdowns; they just are not signatures.
 	sigW, sigA := chWhere(days, repoSource, repoSlug, platform,
 		"status='failed'", "error_category!='user_aborted'", "error != ''")
 	if rows, err := ch.db.QueryContext(ctx, fmt.Sprintf(`
@@ -1590,7 +1601,8 @@ func (ch *CHClient) FetchErrorAnalysisData(ctx context.Context, days int, repoSo
 			uniqExact(nsapp) ua,
 			topK(1)(exit_code) tec,
 			arrayStringConcat(arraySlice(groupUniqArray(nsapp),1,5),', ') apps
-		FROM telemetry_db.telemetry WHERE %s AND cmd != ''
+		FROM telemetry_db.telemetry
+		WHERE %s AND cmd != '' AND cmd != 'unknown' AND NOT match(cmd, '^return [0-9]+$')
 		GROUP BY cmd ORDER BY c DESC LIMIT 20`, sigW), sigA...); err == nil {
 		defer rows.Close()
 		for rows.Next() {
