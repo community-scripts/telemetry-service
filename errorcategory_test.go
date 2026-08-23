@@ -86,3 +86,55 @@ func TestStripDiagnosticHeaderLeavesRealTextAlone(t *testing.T) {
 		}
 	}
 }
+
+// Exit 101 was described as "APT: Configuration error (bad sources)". apt
+// reports its problems as 100; 101 is what cargo returns for any failure, and
+// over fourteen days every exit-101 signature in the data was a Rust build --
+// scanopy 48, vaultwarden 27, oxicloud 25, a hundred of the hundred and twenty.
+// The code alone cannot tell them apart, so the evidence has to.
+func TestExit101IsDecidedByEvidence(t *testing.T) {
+	cases := []struct {
+		name string
+		text string
+		want string
+	}{
+		{
+			name: "cargo build is a build failure, not an apt one",
+			text: "exit_code=101 | Build or configuration error | at line 32: " +
+				"CARGO_BUILD_JOBS=\"$(get_parallel_jobs)\" cargo build --release --bin server\n---\n" +
+				"error: could not compile `diesel` (lib)",
+			want: "build",
+		},
+		{
+			name: "a genuine apt problem under 101 is still apt",
+			text: "exit_code=101 | Build or configuration error | at line 9: apt-get update\n---\n" +
+				"E: Unable to locate package foo",
+			want: "apt",
+		},
+		{
+			// A build that died for want of a -dev package is an apt problem, and
+			// the apt branch is checked first so that evidence wins.
+			name: "missing dev package during a build stays apt",
+			text: "exit_code=101 | Build or configuration error | at line 9: cargo build --release\n---\n" +
+				"E: Unable to locate package libssl-dev",
+			want: "apt",
+		},
+		{
+			name: "no usable evidence stays unknown rather than guessing",
+			text: "exit_code=101 | Build or configuration error",
+			want: "unknown",
+		},
+	}
+	for _, c := range cases {
+		t.Run(c.name, func(t *testing.T) {
+			if got := deriveErrorCategory(101, c.text); got != c.want {
+				t.Errorf("deriveErrorCategory(101, …) = %q, want %q", got, c.want)
+			}
+		})
+	}
+
+	// Exit 100 really is apt and must stay decided by the code alone.
+	if got := deriveErrorCategory(100, "exit_code=100 | APT: Package manager error | at line 3: apt upgrade"); got != "apt" {
+		t.Errorf("exit 100 = %q, want apt", got)
+	}
+}
