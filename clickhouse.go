@@ -1914,6 +1914,43 @@ func (ch *CHClient) DeleteOldRecords(ctx context.Context, retentionDays int) err
 	return err
 }
 
+// GetOrphanTerminalCount counts terminal events that have no start behind them.
+//
+// The mirror image of GetStuckCount. Until core stopped it, a ct script running
+// inside a container for an update still armed the host's ERR and signal traps,
+// so a Ctrl-C or any error posted a failed/aborted row typed 'lxc' with no
+// installing row for that execution_id. Those inflate the failure rate twice
+// over: they raise the numerator and leave the denominator untouched.
+func (ch *CHClient) GetOrphanTerminalCount(ctx context.Context, sinceDays int) (int, error) {
+	var cnt uint64
+	err := ch.db.QueryRowContext(ctx, `
+		SELECT count() FROM telemetry_db.telemetry
+		WHERE status IN ('failed','aborted','unknown')
+		  AND execution_id != ''
+		  AND created > now() - INTERVAL ? DAY
+		  AND execution_id NOT IN (
+			SELECT execution_id FROM telemetry_db.telemetry
+			WHERE status IN ('installing','validation','configuring') AND execution_id != '')`,
+		sinceDays).Scan(&cnt)
+	return int(cnt), err
+}
+
+// DeleteOrphanTerminals removes those rows. Manual only, never on a timer: "no
+// start recorded" can also mean the start POST never landed, and that is a real
+// install failure worth keeping.
+func (ch *CHClient) DeleteOrphanTerminals(ctx context.Context, sinceDays int) error {
+	_, err := ch.db.ExecContext(ctx, `
+		ALTER TABLE telemetry_db.telemetry DELETE
+		WHERE status IN ('failed','aborted','unknown')
+		  AND execution_id != ''
+		  AND created > now() - INTERVAL ? DAY
+		  AND execution_id NOT IN (
+			SELECT execution_id FROM telemetry_db.telemetry
+			WHERE status IN ('installing','validation','configuring') AND execution_id != '')`,
+		sinceDays)
+	return err
+}
+
 func (ch *CHClient) GetStuckCount(ctx context.Context, stuckHours int) (int, error) {
 	var cnt uint64
 	err := ch.db.QueryRowContext(ctx, `

@@ -17,6 +17,8 @@ import (
 	"context"
 	"database/sql"
 	"fmt"
+	"sort"
+	"sync"
 )
 
 // runsCTE collapses the filtered rows to one row per run.
@@ -273,7 +275,29 @@ func scanGroupStats(rows *sql.Rows, err error) ([]NewGroupStat, error) {
 	return out, rows.Err()
 }
 
+// dashSection is one panel's worth of the page: a name to put on the warning
+// line if it fails, and the query that fills it.
+type dashSection struct {
+	name string
+	run  func(context.Context) error
+}
+
+// dashSectionLimit bounds how many sections are in flight at once. The pool
+// holds twenty connections and this page is not the only thing using them, so
+// the whole set is not let loose at once. Nearly all of the win is in not
+// paying for thirty round trips end to end, and that is already there at eight.
+const dashSectionLimit = 8
+
 // FetchNewDashboard builds the whole consolidated page in one pass.
+//
+// The sections are independent -- each reads the same runs subquery and none
+// reads another's output -- but they used to be issued one after another, so a
+// load cost the sum of about thirty round trips when it only ever needed the
+// slowest. They now run concurrently, bounded by dashSectionLimit.
+//
+// Two things follow from that and are handled below: warnings are appended
+// under a lock, and sorted afterwards so the list does not reorder itself
+// between two loads that failed in exactly the same way.
 func (ch *CHClient) FetchNewDashboard(
 	ctx context.Context, days int, repoSource, repoSlug, platform, ctype string,
 ) (*NewDashData, error) {
@@ -293,14 +317,26 @@ func (ch *CHClient) FetchNewDashboard(
 	// warn records a section that failed without taking the page with it. A
 	// dashboard that shows nine of ten panels and names the tenth is more use
 	// than a 500, and it says which query to look at.
+	var warnMu sync.Mutex
 	warn := func(section string, err error) {
-		if err != nil {
-			d.Warnings = append(d.Warnings, fmt.Sprintf("%s: %v", section, err))
+		if err == nil {
+			return
 		}
+		warnMu.Lock()
+		d.Warnings = append(d.Warnings, fmt.Sprintf("%s: %v", section, err))
+		warnMu.Unlock()
+	}
+
+	// Each section writes to a field of its own, so only Warnings needs the
+	// lock above.
+	var sections []dashSection
+	add := func(name string, run func(context.Context) error) {
+		sections = append(sections, dashSection{name: name, run: run})
 	}
 
 	// Headline.
-	warn("outcome", ch.db.QueryRowContext(ctx, fmt.Sprintf(`
+	add("outcome", func(ctx context.Context) error {
+		return ch.db.QueryRowContext(ctx, fmt.Sprintf(`
 		SELECT
 			count(),
 			countIf(final_status = 'success'),
@@ -308,11 +344,13 @@ func (ch *CHClient) FetchNewDashboard(
 			countIf(final_status = 'aborted'),
 			countIf(final_status NOT IN ('success','failed','aborted'))
 		FROM (%s)`, runs), args...,
-	).Scan(&d.Runs, &d.Success, &d.Failed, &d.Aborted, &d.Unfinished))
+		).Scan(&d.Runs, &d.Success, &d.Failed, &d.Aborted, &d.Unfinished)
+	})
 
 	// Live, deliberately outside the selected window: "what is happening now"
 	// does not change because someone picked a different period.
-	warn("live", ch.db.QueryRowContext(ctx, `
+	add("live", func(ctx context.Context) error {
+		return ch.db.QueryRowContext(ctx, `
 		SELECT
 			uniqExactIf(run, last_seen >= now() - INTERVAL 20 MINUTE
 			                 AND final_status NOT IN ('success','failed','aborted')),
@@ -325,20 +363,28 @@ func (ch *CHClient) FetchNewDashboard(
 			FROM telemetry_db.telemetry
 			WHERE created >= now() - INTERVAL 24 HOUR
 			GROUP BY run
-		)`).Scan(&d.LiveInFlight, &d.LiveLastHour, &d.LiveLast24h))
+		)`).Scan(&d.LiveInFlight, &d.LiveLastHour, &d.LiveLast24h)
+	})
 
 	// All time, deliberately unfiltered. uniq rather than uniqExact: it is a
 	// scan of the whole table and approximate is good enough for a figure that
 	// is explicitly labelled as an all-time total.
-	_ = ch.db.QueryRowContext(ctx,
-		`SELECT uniq(if(execution_id = '', random_id, execution_id)) FROM telemetry_db.telemetry`,
-	).Scan(&d.AllTime)
+	//
+	// Reported like every other section now. Its error used to go on the floor,
+	// which rendered a broken all-time query as a confident zero.
+	add("all time", func(ctx context.Context) error {
+		return ch.db.QueryRowContext(ctx,
+			`SELECT uniq(if(execution_id = '', random_id, execution_id)) FROM telemetry_db.telemetry`,
+		).Scan(&d.AllTime)
+	})
 
-	// Median over runs that actually finished.
-	_ = ch.db.QueryRowContext(ctx, fmt.Sprintf(`
+	// Median over runs that actually finished. Reported for the same reason.
+	add("median duration", func(ctx context.Context) error {
+		return ch.db.QueryRowContext(ctx, fmt.Sprintf(`
 		SELECT toUInt32(median(duration)) FROM (%s)
 		WHERE final_status = 'success' AND duration > 0`, runs), args...,
-	).Scan(&d.MedianDuration)
+		).Scan(&d.MedianDuration)
+	})
 
 	// group runs a breakdown that carries its own denominators.
 	//

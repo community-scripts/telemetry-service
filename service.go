@@ -26,6 +26,11 @@ import (
 //go:embed public
 var publicFS embed.FS
 
+// How far back the orphan-terminal count and cleanup look. Bounded because the
+// query is a NOT IN over the same table, and because rows older than this are
+// past the point where the distinction still matters.
+const orphanWindowDays = 90
+
 type Config struct {
 	ListenAddr         string
 	TrustedProxiesCIDR []string
@@ -2126,12 +2131,52 @@ func main() {
 			return
 		}
 
+		// Reported next to the stuck count because they are the two halves of the
+		// same problem: a start with no finish, and a finish with no start.
+		orphans, orphanErr := cleaner.ch.GetOrphanTerminalCount(ctx, orphanWindowDays)
+		if orphanErr != nil {
+			log.Printf("WARN: cleanup/status - orphan count failed: %v", orphanErr)
+			orphans = -1
+		}
+
 		w.Header().Set("Content-Type", "application/json")
 		json.NewEncoder(w).Encode(map[string]interface{}{
-			"stuck_count":       count,
-			"stuck_after_hours": cleaner.cfg.StuckAfterHours,
-			"check_interval":    cleaner.cfg.CheckInterval.String(),
-			"enabled":           cleaner.cfg.Enabled,
+			"stuck_count":        count,
+			"stuck_after_hours":  cleaner.cfg.StuckAfterHours,
+			"check_interval":     cleaner.cfg.CheckInterval.String(),
+			"enabled":            cleaner.cfg.Enabled,
+			"orphan_terminals":   orphans,
+			"orphan_window_days": orphanWindowDays,
+		})
+	})
+
+	// Deliberately manual. A terminal event with no start is usually an update
+	// run from an older client, but it can also be an install whose first POST
+	// never landed -- so nothing deletes these on a timer.
+	mux.HandleFunc("/api/cleanup/orphans", func(w http.ResponseWriter, r *http.Request) {
+		if r.Method != http.MethodPost {
+			http.Error(w, "method not allowed", http.StatusMethodNotAllowed)
+			return
+		}
+		ctx, cancel := context.WithTimeout(r.Context(), 5*time.Minute)
+		defer cancel()
+
+		before, err := cleaner.ch.GetOrphanTerminalCount(ctx, orphanWindowDays)
+		if err != nil {
+			http.Error(w, "failed to count orphan terminals", http.StatusInternalServerError)
+			return
+		}
+		if err := cleaner.ch.DeleteOrphanTerminals(ctx, orphanWindowDays); err != nil {
+			http.Error(w, "failed to delete orphan terminals", http.StatusInternalServerError)
+			return
+		}
+		log.Printf("INFO: cleanup - DELETE mutation submitted for %d orphan terminal rows", before)
+
+		w.Header().Set("Content-Type", "application/json")
+		json.NewEncoder(w).Encode(map[string]interface{}{
+			"submitted":          before,
+			"orphan_window_days": orphanWindowDays,
+			"note":               "ClickHouse mutations are asynchronous; the count settles shortly after",
 		})
 	})
 
