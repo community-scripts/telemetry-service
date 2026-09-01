@@ -9,10 +9,13 @@
     --bg:#0d1017; --panel:#151922; --panel2:#1b2029; --line:#252b37;
     --ink:#e7eaf0; --muted:#8892a6; --ok:#3fb950; --bad:#f85149;
     --warn:#d29922; --idle:#6e7681; --accent:#58a6ff; --violet:#a371f7;
+    /* blocked: deliberately not a shade of red. The host refused the install;
+       the script never ran and did not fail. */
+    --block:#39c5cf;
   }
   @media (prefers-color-scheme: light) {
     :root { --bg:#f5f6f8; --panel:#fff; --panel2:#f0f2f5; --line:#e2e5ea;
-            --ink:#11141a; --muted:#5b6478; --idle:#98a1b0; }
+            --ink:#11141a; --muted:#5b6478; --idle:#98a1b0; --block:#127b83; }
   }
   * { box-sizing:border-box; }
   body { margin:0; background:var(--bg); color:var(--ink);
@@ -54,7 +57,7 @@
   .kpi .k { color:var(--muted); font-size:12px; margin-top:1px; }
   .kpi .h { color:var(--muted); font-size:11px; margin-top:5px; }
   .ok{color:var(--ok)} .bad{color:var(--bad)} .warn{color:var(--warn)}
-  .idle{color:var(--idle)} .vio{color:var(--violet)}
+  .idle{color:var(--idle)} .vio{color:var(--violet)} .block{color:var(--block)}
   .card h3 { font-size:12.5px; margin:0 0 10px; font-weight:650;
              display:flex; justify-content:space-between; gap:8px; }
   .card h3 span { color:var(--muted); font-weight:400; font-size:11.5px; }
@@ -204,6 +207,7 @@
       <div class="legend">
         <span><b style="background:var(--ok)"></b>success</span>
         <span><b style="background:var(--bad)"></b>failed</span>
+        <span><b style="background:var(--block)"></b>blocked</span>
         <span><b style="background:var(--warn)"></b>aborted</span>
         <span><b style="background:var(--idle)"></b>unfinished</span>
       </div>
@@ -365,6 +369,7 @@ function statTable(el, items, min, opts = {}) {
         <td><span class="stack">
           <i style="width:${g.success / t * 100}%;background:var(--ok)"></i>
           <i style="width:${g.failed / t * 100}%;background:var(--bad)"></i>
+          <i style="width:${(g.blocked || 0) / t * 100}%;background:var(--block)"></i>
           <i style="width:${g.aborted / t * 100}%;background:var(--warn)"></i>
           <i style="width:${g.unfinished / t * 100}%;background:var(--idle)"></i>
         </span></td></tr>`;
@@ -381,8 +386,8 @@ function renderChart(days) {
     const t = d.runs || 1;
     const seg = (v, c) => `<i style="height:${v / t * 100}%;background:var(--${c})"></i>`;
     return `<div class="col" style="height:${d.runs / max * 100}%"
-      title="${esc(d.day)} — ${n(d.runs)} runs: ${n(d.success)} ok, ${n(d.failed)} failed, ${n(d.aborted)} aborted, ${n(d.unfinished)} unfinished">
-      ${seg(d.success, "ok")}${seg(d.failed, "bad")}${seg(d.aborted, "warn")}${seg(d.unfinished, "idle")}
+      title="${esc(d.day)} — ${n(d.runs)} runs: ${n(d.success)} ok, ${n(d.failed)} failed, ${n(d.blocked || 0)} blocked, ${n(d.aborted)} aborted, ${n(d.unfinished)} unfinished">
+      ${seg(d.success, "ok")}${seg(d.failed, "bad")}${seg(d.blocked || 0, "block")}${seg(d.aborted, "warn")}${seg(d.unfinished, "idle")}
     </div>`;
   }).join("");
   $("axis").innerHTML = `<span>${esc(days[0].day)}</span><span>${esc(days[days.length - 1].day)}</span>`;
@@ -580,8 +585,9 @@ function render(d) {
 
   $("kpis").innerHTML = [
     ["Runs", n(d.runs), "", "distinct executions in this window"],
-    ["Success rate", sr.text, sr.cls, `${n(d.success)} of ${n(d.success + d.failed)} that ended`],
-    ["Failed", n(d.failed), d.failed ? "bad" : "", "reported a terminal failure"],
+    ["Success rate", sr.text, sr.cls, `${n(d.success)} of ${n(d.success + d.failed)}; blocked and aborted excluded`],
+    ["Failed", n(d.failed), d.failed ? "bad" : "", "the install ran and failed"],
+    ["Blocked", n(d.blocked || 0), d.blocked ? "block" : "", "the host never let the install start"],
     ["Aborted", n(d.aborted), d.aborted ? "warn" : "", "stopped by the user"],
     ["Unfinished", n(d.unfinished), d.unfinished ? "idle" : "", "never reported an ending"],
     ["Median install", dur(d.median_duration), "", "successful runs only"],

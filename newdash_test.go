@@ -5,6 +5,7 @@ import (
 	"errors"
 	"fmt"
 	"regexp"
+	"strconv"
 	"strings"
 	"sync"
 	"testing"
@@ -21,10 +22,11 @@ func buildGroup(expr, pred, order string, limit int, runs string) string {
 	}
 	return fmt.Sprintf(`
 		SELECT %s AS label, count() runs,
-		       countIf(final_status = 'success')  success,
-		       countIf(final_status = 'failed')   failed,
-		       countIf(final_status = 'aborted')  aborted,
-		       countIf(final_status NOT IN ('success','failed','aborted')) unfinished
+		       countIf(outcome = 'success')    success,
+		       countIf(outcome = 'failed')     failed,
+		       countIf(outcome = 'blocked')    blocked,
+		       countIf(outcome = 'aborted')    aborted,
+		       countIf(outcome = 'unfinished') unfinished
 		FROM (%s)%s
 		GROUP BY label
 		ORDER BY %s
@@ -262,6 +264,91 @@ func TestRunSectionsReportsFailuresByName(t *testing.T) {
 
 	if len(got) != 1 || got[0] != "broken: boom" {
 		t.Errorf(`got %v, want exactly ["broken: boom"]`, got)
+	}
+}
+
+// Regression: unknown is a terminal status. isTerminalStatus says so, and the
+// orphan cleanup agrees, but the dashboard classified anything outside
+// success/failed/aborted as still running. Finished runs therefore sat in the
+// live panel until they aged out of its two-hour window, and every breakdown
+// counted them as unfinished.
+func TestOutcomeTreatsUnknownAsTerminal(t *testing.T) {
+	expr := outcomeExpr()
+
+	if !strings.Contains(expr, "'success','failed','aborted','unknown'") {
+		t.Error("the unfinished branch must exclude unknown; it is a terminal status")
+	}
+	// Belt and braces: whatever the branch looks like, unknown must not be able
+	// to reach the unfinished label through it.
+	unfinished := strings.Index(expr, "'unfinished'")
+	if unfinished < 0 {
+		t.Fatal("no unfinished branch in the outcome expression")
+	}
+	if !strings.Contains(expr[:unfinished], "'unknown'") {
+		t.Error("unknown is not excluded before the unfinished branch is taken")
+	}
+}
+
+// The two code lists are what reclassify rows already in the table, so the
+// codes have to actually reach the expression. Spot-checked against the ones
+// that prompted this: 113 was the largest user-abort signature, and 209/213/
+// 214/215/223/225/231 were the Proxmox failures counted against the scripts.
+func TestOutcomeCarriesTheCodeLists(t *testing.T) {
+	expr := outcomeExpr()
+
+	for _, code := range []int{113, 114, 122, 129, 130, 143, 253, 254} {
+		if !strings.Contains(expr, strconv.Itoa(code)) {
+			t.Errorf("user-abort code %d is missing from the outcome expression", code)
+		}
+	}
+	for _, code := range []int{209, 213, 214, 215, 223, 225, 231} {
+		if !strings.Contains(expr, strconv.Itoa(code)) {
+			t.Errorf("blocked code %d is missing from the outcome expression", code)
+		}
+	}
+
+	// Order is meaning: a user abort must be decided before the blocked list is
+	// consulted, or a code appearing in both would silently become blocked.
+	aborted := strings.LastIndex(expr, "'aborted'")
+	blocked := strings.Index(expr, "'blocked'")
+	if aborted < 0 || blocked < 0 || aborted > blocked {
+		t.Errorf("the aborted branch must precede the blocked one (aborted at %d, blocked at %d)",
+			aborted, blocked)
+	}
+}
+
+// A code in both lists would be decided by branch order rather than by
+// intent, which is the kind of thing that is obvious now and baffling later.
+func TestUserAbortAndBlockedCodesAreDisjoint(t *testing.T) {
+	abort := map[int]bool{}
+	for _, c := range userAbortCodes {
+		abort[c] = true
+	}
+	for _, c := range blockedExitCodes {
+		if abort[c] {
+			t.Errorf("code %d is both a user abort and a blocked code", c)
+		}
+	}
+}
+
+// 1 is bash's exit status for any ordinary command failure, so it has to stay
+// a plain failure. If it ever reached either list, most real script failures
+// would quietly stop counting against the success rate.
+func TestOrdinaryFailureCodesStayFailures(t *testing.T) {
+	for _, c := range append(append([]int{}, userAbortCodes...), blockedExitCodes...) {
+		switch c {
+		case 0, 1, 2, 100, 255:
+			t.Errorf("code %d must stay a plain failure, not be reclassified", c)
+		}
+	}
+}
+
+func TestSQLIntListRendersForAnInClause(t *testing.T) {
+	if got := sqlIntList([]int{1, 22, 333}); got != "1,22,333" {
+		t.Errorf("sqlIntList = %q, want %q", got, "1,22,333")
+	}
+	if got := sqlIntList(nil); got != "" {
+		t.Errorf("sqlIntList(nil) = %q, want empty", got)
 	}
 }
 

@@ -18,6 +18,7 @@ import (
 	"database/sql"
 	"fmt"
 	"sort"
+	"strconv"
 	"strings"
 	"sync"
 )
@@ -66,6 +67,76 @@ const runsCTE = `
 	WHERE %s
 	GROUP BY run`
 
+// ========================================================
+// Outcome: what actually happened to a run
+// ========================================================
+//
+// Derived from the exit code at read time rather than stored as a status.
+//
+// The engine already writes the code on every terminal row, so deriving here
+// needs no client rollout across thousands of hosts, and -- the reason it is
+// worth doing this way -- it reclassifies the rows already in the table. A new
+// status would only describe runs recorded after the day it shipped, and would
+// put a seam through every comparison spanning that day.
+
+// userAbortCodes are the codes the engine raises when the person at the
+// keyboard said no. The signals are obvious; the rest are the engine asking a
+// question and being told no.
+//
+// Listed here as well as in the engine because the engine only decides this
+// going forward. Rows already written filed 113 as "failed", and that is what
+// the table holds.
+var userAbortCodes = []int{113, 114, 122, 129, 130, 143, 253, 254}
+
+// blockedExitCodes are the codes raised before the application's install script
+// ever ran: the host would not, or could not, provide a working container.
+//
+// They are not script failures and counting them as such measured the storage
+// and network configuration of other people's servers. "Not enough storage
+// space" and "APT broken packages" sat in the same column as though they were
+// the same kind of event.
+var blockedExitCodes = []int{
+	// Validation: the environment was rejected before anything was created.
+	103, 104, 105, 106, 107, 108,
+	// Proxmox setup: no ID, no defaults, no menu selection to act on.
+	109, 110, 111,
+	// Bring-up: bridge, running state, IP, storage for the container.
+	116, 117, 118, 119, 120, 121, 123,
+	// The Proxmox block: locks, creation, storage, templates, the LXC stack.
+	200, 203, 204, 205, 206, 207, 208, 209, 210, 211, 212, 213, 214, 215,
+	216, 217, 218, 219, 220, 221, 222, 223, 224, 225, 226, 227, 231,
+}
+
+// sqlIntList renders codes for an IN clause. The values are ints from the two
+// lists above, so there is nothing here for a caller to inject.
+func sqlIntList(codes []int) string {
+	parts := make([]string, len(codes))
+	for i, c := range codes {
+		parts[i] = strconv.Itoa(c)
+	}
+	return strings.Join(parts, ",")
+}
+
+// outcomeExpr classifies one run. The order of the branches is the meaning:
+//
+//   - success is success.
+//   - A status that is not terminal means the run is still going. unknown IS
+//     terminal -- the ingest layer says so in isTerminalStatus -- and treating
+//     it as unfinished left finished runs sitting in the live panel forever.
+//   - An aborted status is taken at its word.
+//   - Then the codes, which is what reclassifies the rows written before the
+//     engine learned to report a user abort as one.
+func outcomeExpr() string {
+	return fmt.Sprintf(`multiIf(
+		final_status = 'success', 'success',
+		final_status NOT IN ('success','failed','aborted','unknown'), 'unfinished',
+		final_status = 'aborted', 'aborted',
+		final_exit IN (%s), 'aborted',
+		final_exit IN (%s), 'blocked',
+		'failed')`,
+		sqlIntList(userAbortCodes), sqlIntList(blockedExitCodes))
+}
+
 // NewCount is a plain label/count, for breakdowns where a rate makes no sense.
 type NewCount struct {
 	Label string `json:"label"`
@@ -80,6 +151,7 @@ type NewGroupStat struct {
 	Runs       int    `json:"runs"`
 	Success    int    `json:"success"`
 	Failed     int    `json:"failed"`
+	Blocked    int    `json:"blocked"`
 	Aborted    int    `json:"aborted"`
 	Unfinished int    `json:"unfinished"`
 }
@@ -145,6 +217,7 @@ type NewDailyPoint struct {
 	Runs       int    `json:"runs"`
 	Success    int    `json:"success"`
 	Failed     int    `json:"failed"`
+	Blocked    int    `json:"blocked"`
 	Aborted    int    `json:"aborted"`
 	Unfinished int    `json:"unfinished"`
 }
@@ -162,6 +235,7 @@ type NewDashData struct {
 	Runs       int `json:"runs"`
 	Success    int `json:"success"`
 	Failed     int `json:"failed"`
+	Blocked    int `json:"blocked"`
 	Aborted    int `json:"aborted"`
 	Unfinished int `json:"unfinished"`
 
@@ -265,7 +339,7 @@ func scanGroupStats(rows *sql.Rows, err error) ([]NewGroupStat, error) {
 	for rows.Next() {
 		var g NewGroupStat
 		if err := rows.Scan(&g.Label, &g.Runs, &g.Success, &g.Failed,
-			&g.Aborted, &g.Unfinished); err != nil {
+			&g.Blocked, &g.Aborted, &g.Unfinished); err != nil {
 			return nil, err
 		}
 		if g.Label == "" {
@@ -308,7 +382,11 @@ func (ch *CHClient) FetchNewDashboard(
 		extras = append(extras, fmt.Sprintf("type = '%s'", ctype))
 	}
 	where, args := chWhere(days, repoSource, repoSlug, platform, extras...)
-	runs := fmt.Sprintf(runsCTE, platformExpr, where)
+
+	// Every section reads outcome rather than final_status, so it is computed
+	// once here and carried on the subquery they all select from.
+	runs := fmt.Sprintf("SELECT *, %s AS outcome FROM (%s)",
+		outcomeExpr(), fmt.Sprintf(runsCTE, platformExpr, where))
 
 	d := &NewDashData{
 		Days: days, Platform: platform, Repo: repoSource,
@@ -340,12 +418,13 @@ func (ch *CHClient) FetchNewDashboard(
 		return ch.db.QueryRowContext(ctx, fmt.Sprintf(`
 		SELECT
 			count(),
-			countIf(final_status = 'success'),
-			countIf(final_status = 'failed'),
-			countIf(final_status = 'aborted'),
-			countIf(final_status NOT IN ('success','failed','aborted'))
+			countIf(outcome = 'success'),
+			countIf(outcome = 'failed'),
+			countIf(outcome = 'blocked'),
+			countIf(outcome = 'aborted'),
+			countIf(outcome = 'unfinished')
 		FROM (%s)`, runs), args...,
-		).Scan(&d.Runs, &d.Success, &d.Failed, &d.Aborted, &d.Unfinished)
+		).Scan(&d.Runs, &d.Success, &d.Failed, &d.Blocked, &d.Aborted, &d.Unfinished)
 	})
 
 	// Live, deliberately outside the selected window: "what is happening now"
@@ -372,7 +451,7 @@ func (ch *CHClient) FetchNewDashboard(
 	add("median duration", func(ctx context.Context) error {
 		return ch.db.QueryRowContext(ctx, fmt.Sprintf(`
 		SELECT toUInt32(median(duration)) FROM (%s)
-		WHERE final_status = 'success' AND duration > 0`, runs), args...,
+		WHERE outcome = 'success' AND duration > 0`, runs), args...,
 		).Scan(&d.MedianDuration)
 	})
 
@@ -389,10 +468,11 @@ func (ch *CHClient) FetchNewDashboard(
 		}
 		q := fmt.Sprintf(`
 			SELECT %s AS label, count() runs,
-			       countIf(final_status = 'success')  success,
-			       countIf(final_status = 'failed')   failed,
-			       countIf(final_status = 'aborted')  aborted,
-			       countIf(final_status NOT IN ('success','failed','aborted')) unfinished
+			       countIf(outcome = 'success')    success,
+			       countIf(outcome = 'failed')     failed,
+			       countIf(outcome = 'blocked')    blocked,
+			       countIf(outcome = 'aborted')    aborted,
+			       countIf(outcome = 'unfinished') unfinished
 			FROM (%s)%s
 			GROUP BY label
 			ORDER BY %s
@@ -460,8 +540,11 @@ func (ch *CHClient) FetchNewDashboard(
 	}{
 		// user_aborted is excluded: someone answering "no" is not a defect, and
 		// including it makes it the largest bar on the chart.
+		// blocked is included here on purpose. It is kept out of the failure
+		// rate because it is not the script's fault, but it is exactly the list
+		// worth working through, so it stays visible in the error panels.
 		{"categories", &d.Categories, "final_cat",
-			"final_status = 'failed' AND final_cat NOT IN ('', 'user_aborted')", 15},
+			"outcome IN ('failed','blocked') AND final_cat NOT IN ('', 'user_aborted')", 15},
 		{"privilege", &d.ByPrivilege, "if(priv = 1, 'unprivileged', 'privileged')", "", 3},
 		{"cores", &d.ByCores, "toString(cores)", "cores > 0", 12},
 		{"ram", &d.ByRAM, "concat(toString(intDiv(ram, 1024)), ' GB')", "ram > 0", 12},
@@ -494,7 +577,7 @@ func (ch *CHClient) FetchNewDashboard(
 		rows, err := ch.db.QueryContext(ctx, fmt.Sprintf(`
 		SELECT final_exit, count() c, uniqExact(app) apps
 		FROM (%s)
-		WHERE final_status = 'failed' AND final_exit != 0
+		WHERE outcome IN ('failed','blocked') AND final_exit != 0
 		GROUP BY final_exit
 		ORDER BY c DESC
 		LIMIT 20`, runs), args...)
@@ -520,7 +603,7 @@ func (ch *CHClient) FetchNewDashboard(
 		       substring(if(failcmd != '', failcmd, final_err), 1, 200) msg,
 		       count() c, uniqExact(app) apps
 		FROM (%s)
-		WHERE final_status = 'failed' AND final_err != ''
+		WHERE outcome IN ('failed','blocked') AND final_err != ''
 		GROUP BY final_cat, final_exit, msg
 		ORDER BY c DESC
 		LIMIT 30`, runs), args...)
@@ -541,10 +624,11 @@ func (ch *CHClient) FetchNewDashboard(
 	add("daily", func(ctx context.Context) error {
 		rows, err := ch.db.QueryContext(ctx, fmt.Sprintf(`
 		SELECT toString(toDate(last_seen)) day, count(),
-		       countIf(final_status = 'success'),
-		       countIf(final_status = 'failed'),
-		       countIf(final_status = 'aborted'),
-		       countIf(final_status NOT IN ('success','failed','aborted'))
+		       countIf(outcome = 'success'),
+		       countIf(outcome = 'failed'),
+		       countIf(outcome = 'blocked'),
+		       countIf(outcome = 'aborted'),
+		       countIf(outcome = 'unfinished')
 		FROM (%s)
 		GROUP BY day ORDER BY day`, runs), args...)
 		if err != nil {
@@ -554,7 +638,7 @@ func (ch *CHClient) FetchNewDashboard(
 		for rows.Next() {
 			var p NewDailyPoint
 			if rows.Scan(&p.Day, &p.Runs, &p.Success, &p.Failed,
-				&p.Aborted, &p.Unfinished) == nil {
+				&p.Blocked, &p.Aborted, &p.Unfinished) == nil {
 				d.Daily = append(d.Daily, p)
 			}
 		}
@@ -650,7 +734,7 @@ func (ch *CHClient) liveSections(d *NewDashData) []dashSection {
 			return ch.db.QueryRowContext(ctx, `
 		SELECT
 			uniqExactIf(run, last_seen >= now() - INTERVAL 20 MINUTE
-			                 AND final_status NOT IN ('success','failed','aborted')),
+			                 AND final_status NOT IN ('success','failed','aborted','unknown')),
 			uniqExactIf(run, last_seen >= now() - INTERVAL 1 HOUR),
 			uniqExactIf(run, last_seen >= now() - INTERVAL 24 HOUR)
 		FROM (
@@ -684,7 +768,7 @@ func (ch *CHClient) liveSections(d *NewDashData) []dashSection {
 			WHERE created >= now() - INTERVAL 2 HOUR
 			GROUP BY run
 		)
-		WHERE final_status NOT IN ('success','failed','aborted')
+		WHERE final_status NOT IN ('success','failed','aborted','unknown')
 		ORDER BY last_seen DESC
 		LIMIT 40`)
 			if err != nil {

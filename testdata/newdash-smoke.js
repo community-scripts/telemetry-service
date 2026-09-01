@@ -50,7 +50,7 @@ eval(js);
 // too. Every value is invented; nothing here talks to a database.
 const sample = {
   days: 7, platform: "", repo: "", type: "", min_runs: 10,
-  runs: 1200, success: 1100, failed: 70, aborted: 20, unfinished: 10,
+  runs: 1200, success: 1100, failed: 70, blocked: 45, aborted: 20, unfinished: 10,
   all_time: 2195915, median_duration: 125,
   live_in_flight: 3, live_last_hour: 40, live_last_24h: 900,
   live_now: [{
@@ -60,14 +60,14 @@ const sample = {
   }],
   warnings: ["daily: some database error"],
   daily: [
-    { day: "2026-08-17", runs: 600, success: 550, failed: 30, aborted: 10, unfinished: 10 },
-    { day: "2026-08-18", runs: 600, success: 550, failed: 40, aborted: 10, unfinished: 0 },
+    { day: "2026-08-17", runs: 600, success: 550, failed: 30, blocked: 20, aborted: 10, unfinished: 10 },
+    { day: "2026-08-18", runs: 600, success: 550, failed: 40, blocked: 25, aborted: 10, unfinished: 0 },
   ],
-  top_apps: [{ label: "docker", runs: 300, success: 290, failed: 8, aborted: 2, unfinished: 0 }],
-  worst_apps: [{ label: "foo", runs: 40, success: 10, failed: 28, aborted: 2, unfinished: 0 }],
+  top_apps: [{ label: "docker", runs: 300, success: 290, failed: 8, blocked: 5, aborted: 2, unfinished: 0 }],
+  worst_apps: [{ label: "foo", runs: 40, success: 10, failed: 28, blocked: 3, aborted: 2, unfinished: 0 }],
   by_platform: [
-    { label: "pve", runs: 1000, success: 950, failed: 40, aborted: 10, unfinished: 0 },
-    { label: "incus", runs: 200, success: 150, failed: 30, aborted: 10, unfinished: 10 },
+    { label: "pve", runs: 1000, success: 950, failed: 40, blocked: 30, aborted: 10, unfinished: 0 },
+    { label: "incus", runs: 200, success: 150, failed: 30, blocked: 15, aborted: 10, unfinished: 10 },
   ],
   by_type: [], by_repo: [], by_os: [], by_host_version: [], by_repo_slug: [],
   categories: [{ label: "network", count: 30 }],
@@ -96,6 +96,10 @@ render(sample);
 // payload -- an empty panel is the failure this exists to catch.
 const checks = [
   ["kpis", "Runs"],
+  // The tile and its count, so that adding the bucket to the payload without
+  // rendering it still fails here.
+  ["kpis", "Blocked"],
+  ["kpis", "the host never let the install start"],
   ["live", "In flight"],
   ["warn", "could not be loaded"],
   ["chart", "title="],
