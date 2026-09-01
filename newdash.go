@@ -391,7 +391,8 @@ func (ch *CHClient) FetchNewDashboard(
 	// The predicate goes in WHERE, not HAVING: these are per-run columns, not
 	// aggregates, and ClickHouse rejects HAVING on an ungrouped column. That
 	// mistake is why the first version of this page returned 500 for everything.
-	group := func(target *[]NewGroupStat, expr, pred, order string, limit int) error {
+	group := func(ctx context.Context, target *[]NewGroupStat,
+		expr, pred, order string, limit int) error {
 		w := ""
 		if pred != "" {
 			w = " WHERE " + pred
@@ -414,7 +415,8 @@ func (ch *CHClient) FetchNewDashboard(
 		return nil
 	}
 
-	simple := func(target *[]NewCount, expr, pred string, limit int) error {
+	simple := func(ctx context.Context, target *[]NewCount,
+		expr, pred string, limit int) error {
 		w := ""
 		if pred != "" {
 			w = " WHERE " + pred
@@ -454,7 +456,9 @@ func (ch *CHClient) FetchNewDashboard(
 		{"host version", &d.ByHostVer, "hostver", "hostver != ''", "runs DESC", 15},
 	}
 	for _, g := range groups {
-		warn(g.name, group(g.target, g.expr, g.pred, g.order, g.limit))
+		add(g.name, func(ctx context.Context) error {
+			return group(ctx, g.target, g.expr, g.pred, g.order, g.limit)
+		})
 	}
 
 	counts := []struct {
@@ -490,20 +494,24 @@ func (ch *CHClient) FetchNewDashboard(
 		{"method", &d.ByMethod, "meth", "meth != ''", 8},
 	}
 	for _, c := range counts {
-		warn(c.name, simple(c.target, c.expr, c.pred, c.limit))
+		add(c.name, func(ctx context.Context) error {
+			return simple(ctx, c.target, c.expr, c.pred, c.limit)
+		})
 	}
 
 	// Exit codes, labelled with the engine's own descriptions.
-	rows, e := ch.db.QueryContext(ctx, fmt.Sprintf(`
+	add("exit codes", func(ctx context.Context) error {
+		rows, err := ch.db.QueryContext(ctx, fmt.Sprintf(`
 		SELECT final_exit, count() c, uniqExact(app) apps
 		FROM (%s)
 		WHERE final_status = 'failed' AND final_exit != 0
 		GROUP BY final_exit
 		ORDER BY c DESC
 		LIMIT 20`, runs), args...)
-	if e != nil {
-		warn("exit codes", e)
-	} else {
+		if err != nil {
+			return err
+		}
+		defer rows.Close()
 		for rows.Next() {
 			var x NewExitCode
 			if rows.Scan(&x.Code, &x.Count, &x.Apps) == nil {
@@ -511,12 +519,13 @@ func (ch *CHClient) FetchNewDashboard(
 				d.ExitCodes = append(d.ExitCodes, x)
 			}
 		}
-		rows.Close()
-	}
+		return rows.Err()
+	})
 
 	// Signatures: the same failure text seen across runs. The closest thing to
 	// "why", and the existing pages compute it without ever showing it.
-	rows, e = ch.db.QueryContext(ctx, fmt.Sprintf(`
+	add("signatures", func(ctx context.Context) error {
+		rows, err := ch.db.QueryContext(ctx, fmt.Sprintf(`
 		SELECT final_cat, final_exit,
 		       substring(if(failcmd != '', failcmd, final_err), 1, 200) msg,
 		       count() c, uniqExact(app) apps
@@ -525,20 +534,22 @@ func (ch *CHClient) FetchNewDashboard(
 		GROUP BY final_cat, final_exit, msg
 		ORDER BY c DESC
 		LIMIT 30`, runs), args...)
-	if e != nil {
-		warn("signatures", e)
-	} else {
+		if err != nil {
+			return err
+		}
+		defer rows.Close()
 		for rows.Next() {
 			var s NewErrorSignature
 			if rows.Scan(&s.Category, &s.ExitCode, &s.Message, &s.Count, &s.Apps) == nil {
 				d.Signatures = append(d.Signatures, s)
 			}
 		}
-		rows.Close()
-	}
+		return rows.Err()
+	})
 
 	// Daily trend, on the same run basis as everything else.
-	rows, e = ch.db.QueryContext(ctx, fmt.Sprintf(`
+	add("daily", func(ctx context.Context) error {
+		rows, err := ch.db.QueryContext(ctx, fmt.Sprintf(`
 		SELECT toString(toDate(last_seen)) day, count(),
 		       countIf(final_status = 'success'),
 		       countIf(final_status = 'failed'),
@@ -546,9 +557,10 @@ func (ch *CHClient) FetchNewDashboard(
 		       countIf(final_status NOT IN ('success','failed','aborted'))
 		FROM (%s)
 		GROUP BY day ORDER BY day`, runs), args...)
-	if e != nil {
-		warn("daily", e)
-	} else {
+		if err != nil {
+			return err
+		}
+		defer rows.Close()
 		for rows.Next() {
 			var p NewDailyPoint
 			if rows.Scan(&p.Day, &p.Runs, &p.Success, &p.Failed,
@@ -556,11 +568,12 @@ func (ch *CHClient) FetchNewDashboard(
 				d.Daily = append(d.Daily, p)
 			}
 		}
-		rows.Close()
-	}
+		return rows.Err()
+	})
 
 	// The install log.
-	rows, e = ch.db.QueryContext(ctx, fmt.Sprintf(`
+	add("recent", func(ctx context.Context) error {
+		rows, err := ch.db.QueryContext(ctx, fmt.Sprintf(`
 		SELECT run, app, kind, final_status, final_exit, final_cat, plat,
 		       %s, hostver, slug, meth, cores, ram, disk, priv, duration,
 		       formatDateTime(last_seen, '%%Y-%%m-%%d %%H:%%i'),
@@ -572,9 +585,10 @@ func (ch *CHClient) FetchNewDashboard(
 		FROM (%s)
 		ORDER BY last_seen DESC
 		LIMIT 300`, osExpr, runs), args...)
-	if e != nil {
-		warn("recent", e)
-	} else {
+		if err != nil {
+			return err
+		}
+		defer rows.Close()
 		for rows.Next() {
 			var r NewRecentRun
 			var priv uint8
@@ -590,13 +604,14 @@ func (ch *CHClient) FetchNewDashboard(
 				d.Recent = append(d.Recent, r)
 			}
 		}
-		rows.Close()
-	}
+		return rows.Err()
+	})
 
 	// What is in flight right now. Also outside the selected window, and kept
 	// separate from Recent: the install log answers "what happened", this
 	// answers "what is happening".
-	if lr, e := ch.db.QueryContext(ctx, `
+	add("live runs", func(ctx context.Context) error {
+		lr, err := ch.db.QueryContext(ctx, `
 		SELECT app, kind, final_status, plat, os, slug,
 		       formatDateTime(last_seen, '%Y-%m-%d %H:%i'),
 		       toUInt32(dateDiff('second', last_seen, now()))
@@ -616,9 +631,11 @@ func (ch *CHClient) FetchNewDashboard(
 		)
 		WHERE final_status NOT IN ('success','failed','aborted')
 		ORDER BY last_seen DESC
-		LIMIT 40`); e != nil {
-		warn("live runs", e)
-	} else {
+		LIMIT 40`)
+		if err != nil {
+			return err
+		}
+		defer lr.Close()
 		for lr.Next() {
 			var r NewRecentRun
 			if lr.Scan(&r.App, &r.Type, &r.Status, &r.Platform, &r.OS,
@@ -626,8 +643,46 @@ func (ch *CHClient) FetchNewDashboard(
 				d.LiveNow = append(d.LiveNow, r)
 			}
 		}
-		lr.Close()
-	}
+		return lr.Err()
+	})
+
+	runSections(ctx, dashSectionLimit, sections, warn)
+
+	// Arrival order is arbitrary once the sections race; sorting keeps two
+	// loads that failed the same way from disagreeing about the order.
+	sort.Strings(d.Warnings)
 
 	return d, nil
+}
+
+// runSections executes every section, at most limit of them at a time, and
+// reports the ones that failed through warn. Errors are collected rather than
+// propagated: the page degrades per section by design, so one dead breakdown
+// must not blank the other twenty-nine.
+//
+// A free function rather than a closure so it can be tested without a
+// database. It is worth the seam: the first concurrent version of this page
+// registered all thirty sections and then never ran them, and nothing caught
+// it, because every other test of this file needs a live ClickHouse.
+func runSections(ctx context.Context, limit int, sections []dashSection,
+	warn func(string, error)) {
+	sem := make(chan struct{}, limit)
+	var wg sync.WaitGroup
+	for _, s := range sections {
+		wg.Add(1)
+		go func() {
+			defer wg.Done()
+			// Take a slot, unless the request is already over -- otherwise a
+			// cancelled page load still queues every remaining section.
+			select {
+			case sem <- struct{}{}:
+				defer func() { <-sem }()
+			case <-ctx.Done():
+				warn(s.name, ctx.Err())
+				return
+			}
+			warn(s.name, s.run(ctx))
+		}()
+	}
+	wg.Wait()
 }

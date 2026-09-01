@@ -1,10 +1,14 @@
 package main
 
 import (
+	"context"
+	"errors"
 	"fmt"
 	"regexp"
 	"strings"
+	"sync"
 	"testing"
+	"time"
 )
 
 // buildGroup mirrors the query the group closure in FetchNewDashboard builds.
@@ -150,5 +154,147 @@ func TestMinRunsScalesWithWindow(t *testing.T) {
 		if got := minRunsFor(c.days); got != c.want {
 			t.Errorf("minRunsFor(%d) = %d, want %d", c.days, got, c.want)
 		}
+	}
+}
+
+// Regression, and the one that actually reached main: the concurrent version of
+// this page registered all thirty sections and then never ran them. It did not
+// fail loudly -- the headline, live, all-time and median panels simply rendered
+// as a confident zero. Every other test of this file needs a live ClickHouse,
+// so nothing noticed. runSections is a free function precisely so these four do
+// not.
+func TestRunSectionsRunsEveryRegisteredSection(t *testing.T) {
+	const n = 30
+
+	var mu sync.Mutex
+	seen := map[string]bool{}
+
+	sections := make([]dashSection, 0, n)
+	for i := range n {
+		name := fmt.Sprintf("section-%02d", i)
+		sections = append(sections, dashSection{
+			name: name,
+			run: func(context.Context) error {
+				mu.Lock()
+				seen[name] = true
+				mu.Unlock()
+				return nil
+			},
+		})
+	}
+
+	runSections(context.Background(), dashSectionLimit, sections,
+		func(name string, err error) {
+			if err != nil {
+				t.Errorf("section %q reported %v", name, err)
+			}
+		})
+
+	if len(seen) != n {
+		t.Errorf("%d of %d sections ran; the rest would render as zeroes", len(seen), n)
+	}
+}
+
+// The point of the change is that the sections overlap, and the point of the
+// bound is that thirty of them do not hit a twenty-connection pool at once.
+// Both halves are worth pinning: peak == 1 would mean the page quietly went
+// back to paying for thirty round trips end to end.
+func TestRunSectionsRespectsTheConcurrencyLimit(t *testing.T) {
+	const limit = 4
+
+	var mu sync.Mutex
+	inFlight, peak := 0, 0
+
+	sections := make([]dashSection, 0, 20)
+	for range 20 {
+		sections = append(sections, dashSection{
+			name: "s",
+			run: func(context.Context) error {
+				mu.Lock()
+				inFlight++
+				if inFlight > peak {
+					peak = inFlight
+				}
+				mu.Unlock()
+
+				time.Sleep(2 * time.Millisecond)
+
+				mu.Lock()
+				inFlight--
+				mu.Unlock()
+				return nil
+			},
+		})
+	}
+
+	runSections(context.Background(), limit, sections, func(string, error) {})
+
+	mu.Lock()
+	defer mu.Unlock()
+	if peak > limit {
+		t.Errorf("peak concurrency was %d, above the limit of %d", peak, limit)
+	}
+	if peak < 2 {
+		t.Errorf("peak concurrency was %d; the sections ran one at a time", peak)
+	}
+}
+
+// A failing section is named, and a succeeding one is not. That pairing is what
+// lets the page show nine panels and say which tenth is missing.
+func TestRunSectionsReportsFailuresByName(t *testing.T) {
+	var mu sync.Mutex
+	var got []string
+
+	sections := []dashSection{
+		{name: "ok", run: func(context.Context) error { return nil }},
+		{name: "broken", run: func(context.Context) error { return errors.New("boom") }},
+	}
+
+	runSections(context.Background(), dashSectionLimit, sections,
+		func(name string, err error) {
+			if err == nil {
+				return
+			}
+			mu.Lock()
+			got = append(got, fmt.Sprintf("%s: %v", name, err))
+			mu.Unlock()
+		})
+
+	if len(got) != 1 || got[0] != "broken: boom" {
+		t.Errorf(`got %v, want exactly ["broken: boom"]`, got)
+	}
+}
+
+// A cancelled request must not render as a page that is merely empty. Whether a
+// section was dropped before it took a slot or failed once it had one, it says
+// so.
+func TestRunSectionsReportsEverySectionWhenCancelled(t *testing.T) {
+	ctx, cancel := context.WithCancel(context.Background())
+	cancel()
+
+	const n = 12
+	sections := make([]dashSection, 0, n)
+	for i := range n {
+		sections = append(sections, dashSection{
+			name: fmt.Sprintf("s%02d", i),
+			run:  func(ctx context.Context) error { return ctx.Err() },
+		})
+	}
+
+	var mu sync.Mutex
+	failed := map[string]bool{}
+
+	runSections(ctx, dashSectionLimit, sections, func(name string, err error) {
+		if err == nil {
+			return
+		}
+		mu.Lock()
+		failed[name] = true
+		mu.Unlock()
+	})
+
+	if len(failed) != n {
+		t.Errorf("%d of %d sections reported; a cancelled load must name them all",
+			len(failed), n)
 	}
 }
