@@ -1016,6 +1016,20 @@ func telemetryCacheKeyP(prefix string, days int, repoSource, repoSlug, platform 
 	return key
 }
 
+// newDashCacheKey keys the consolidated page on every filter that changes it.
+//
+// ctype is appended here rather than passed through the shared helper, which
+// predates this page and knows nothing about it. Leaving it out of the key
+// would serve an lxc-filtered page to a vm request, so the omission would look
+// like wrong data rather than a stale cache.
+func newDashCacheKey(days int, repoSource, repoSlug, platform, ctype string) string {
+	key := telemetryCacheKeyP("new", days, repoSource, repoSlug, platform)
+	if ctype != "" {
+		key += ":t=" + ctype
+	}
+	return key
+}
+
 func sanitizeShort(s string, max int) string {
 	s = strings.TrimSpace(s)
 	if s == "" {
@@ -1586,6 +1600,27 @@ func main() {
 		serveHTMLFile(w, r, "public/templates/new/index.html")
 	})
 
+	// newDashTTL scales the cache lifetime with the window, on the same
+	// reasoning and the same ladder as the older dashboard endpoint: a one-day
+	// view moves quickly, a year barely moves at all.
+	//
+	// It governs the windowed sections only. The live panels are re-run on
+	// every hit no matter what this returns.
+	newDashTTL := func(days int) time.Duration {
+		switch {
+		case days <= 1:
+			return 30 * time.Second
+		case days <= 7:
+			return 2 * time.Minute
+		case days <= 30:
+			return 5 * time.Minute
+		case days <= 90:
+			return 15 * time.Minute
+		default:
+			return 30 * time.Minute
+		}
+	}
+
 	mux.HandleFunc("/api/new", func(w http.ResponseWriter, r *http.Request) {
 		days := 7
 		if d := r.URL.Query().Get("days"); d != "" {
@@ -1618,6 +1653,53 @@ func main() {
 		ctx, cancel := context.WithTimeout(r.Context(), 120*time.Second)
 		defer cancel()
 
+		// This was the only dashboard endpoint serving every request from
+		// scratch, and the most expensive one: thirty aggregations over as much
+		// as a year. The other three have cached for as long as they have
+		// existed, on the same stale-while-revalidate pattern used here.
+		cacheKey := newDashCacheKey(days, repoSource, repoSlug, platform, ctype)
+
+		// no-store stays on every path below. It refers to the browser, which
+		// must keep asking so the live panels stay live; the server-side cache
+		// is what stops that question being expensive.
+		w.Header().Set("Content-Type", "application/json")
+		w.Header().Set("Cache-Control", "no-store")
+
+		// data != nil guards RefreshLive below: Get unmarshals into a pointer,
+		// so a stored "null" would hand it one to dereference. Falling through
+		// to a fresh build is the right answer for that anyway.
+		var data *NewDashData
+		if cfg.CacheEnabled && cache.Get(ctx, cacheKey, &data) && data != nil {
+			// The stored page is the windowed sections. The live panels are
+			// re-run over the top, because they answer "what is happening now"
+			// and must not come out of a cache keyed on a period they ignore.
+			ch.RefreshLive(ctx, data)
+			w.Header().Set("X-Cache", "HIT")
+
+			if cache.IsStale(ctx, cacheKey) {
+				w.Header().Set("X-Cache", "STALE")
+				if cache.TryStartRefresh(cacheKey) {
+					go func() {
+						defer cache.FinishRefresh(cacheKey)
+						refreshCtx, cancel := context.WithTimeout(context.Background(), 120*time.Second)
+						defer cancel()
+						fresh, err := ch.FetchNewDashboard(refreshCtx, days, repoSource, repoSlug, platform, ctype)
+						if err != nil {
+							log.Printf("[CACHE] background refresh failed for %s: %v", cacheKey, err)
+							return
+						}
+						_ = cache.Set(context.Background(), cacheKey, fresh, newDashTTL(days))
+						log.Printf("[CACHE] background refresh completed for %s", cacheKey)
+					}()
+				}
+			}
+
+			if err := json.NewEncoder(w).Encode(data); err != nil {
+				log.Printf("new dashboard encode: %v", err)
+			}
+			return
+		}
+
 		data, err := ch.FetchNewDashboard(ctx, days, repoSource, repoSlug, platform, ctype)
 		if err != nil {
 			log.Printf("new dashboard: %v", err)
@@ -1625,8 +1707,11 @@ func main() {
 			return
 		}
 
-		w.Header().Set("Content-Type", "application/json")
-		w.Header().Set("Cache-Control", "no-store")
+		if cfg.CacheEnabled {
+			_ = cache.Set(ctx, cacheKey, data, newDashTTL(days))
+		}
+
+		w.Header().Set("X-Cache", "MISS")
 		if err := json.NewEncoder(w).Encode(data); err != nil {
 			log.Printf("new dashboard encode: %v", err)
 		}

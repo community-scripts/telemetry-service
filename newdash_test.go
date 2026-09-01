@@ -265,6 +265,66 @@ func TestRunSectionsReportsFailuresByName(t *testing.T) {
 	}
 }
 
+// A refresh replaces a panel, so it must replace that panel's warning too --
+// and leave every other panel's alone.
+func TestDropWarningsRemovesOnlyTheNamedSections(t *testing.T) {
+	got := dropWarnings([]string{
+		"daily: connection refused",
+		"live: timeout",
+		"top apps: syntax error",
+		"live runs: timeout",
+	}, "live", "live runs")
+
+	want := []string{"daily: connection refused", "top apps: syntax error"}
+	if len(got) != len(want) {
+		t.Fatalf("got %v, want %v", got, want)
+	}
+	for i := range want {
+		if got[i] != want[i] {
+			t.Errorf("got %v, want %v", got, want)
+			break
+		}
+	}
+}
+
+// "live" must not take "live runs" with it by prefix, and must not match a
+// section that merely starts with the same letters.
+func TestDropWarningsMatchesWholeSectionNames(t *testing.T) {
+	got := dropWarnings([]string{"live runs: boom", "liveliness: boom"}, "live")
+	if len(got) != 2 {
+		t.Errorf("got %v, want both entries kept: %q is not the %q section",
+			got, "live runs", "live")
+	}
+}
+
+// Every filter this page accepts has to reach the key. If one does not, the
+// cache serves a page built for different filters -- which reads as wrong data,
+// not as a stale cache.
+func TestNewDashCacheKeyDistinguishesEveryFilter(t *testing.T) {
+	base := newDashCacheKey(7, "ProxmoxVE", "", "", "")
+
+	for _, c := range []struct {
+		what string
+		key  string
+	}{
+		{"days", newDashCacheKey(30, "ProxmoxVE", "", "", "")},
+		{"repo source", newDashCacheKey(7, "ProxmoxVED", "", "", "")},
+		{"repo slug", newDashCacheKey(7, "ProxmoxVE", "some/repo", "", "")},
+		{"platform", newDashCacheKey(7, "ProxmoxVE", "", "incus", "")},
+		{"ctype", newDashCacheKey(7, "ProxmoxVE", "", "", "lxc")},
+	} {
+		if c.key == base {
+			t.Errorf("%s does not change the cache key (%q)", c.what, c.key)
+		}
+	}
+
+	// The two filters this page added on top of the shared helper must not
+	// collide with each other either.
+	if a, b := newDashCacheKey(7, "", "", "lxc", ""), newDashCacheKey(7, "", "", "", "lxc"); a == b {
+		t.Errorf("platform=lxc and ctype=lxc share the key %q", a)
+	}
+}
+
 // A cancelled request must not render as a page that is merely empty. Whether a
 // section was dropped before it took a slot or failed once it had one, it says
 // so.

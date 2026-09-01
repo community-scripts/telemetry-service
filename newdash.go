@@ -18,6 +18,7 @@ import (
 	"database/sql"
 	"fmt"
 	"sort"
+	"strings"
 	"sync"
 )
 
@@ -348,23 +349,12 @@ func (ch *CHClient) FetchNewDashboard(
 	})
 
 	// Live, deliberately outside the selected window: "what is happening now"
-	// does not change because someone picked a different period.
-	add("live", func(ctx context.Context) error {
-		return ch.db.QueryRowContext(ctx, `
-		SELECT
-			uniqExactIf(run, last_seen >= now() - INTERVAL 20 MINUTE
-			                 AND final_status NOT IN ('success','failed','aborted')),
-			uniqExactIf(run, last_seen >= now() - INTERVAL 1 HOUR),
-			uniqExactIf(run, last_seen >= now() - INTERVAL 24 HOUR)
-		FROM (
-			SELECT if(execution_id = '', random_id, execution_id) AS run,
-			       argMax(status, created) AS final_status,
-			       max(created)            AS last_seen
-			FROM telemetry_db.telemetry
-			WHERE created >= now() - INTERVAL 24 HOUR
-			GROUP BY run
-		)`).Scan(&d.LiveInFlight, &d.LiveLastHour, &d.LiveLast24h)
-	})
+	// does not change because someone picked a different period. Defined apart
+	// from the rest because that same property is what stops the page being
+	// cached whole -- see RefreshLive.
+	for _, s := range ch.liveSections(d) {
+		add(s.name, s.run)
+	}
 
 	// All time, deliberately unfiltered. uniq rather than uniqExact: it is a
 	// scan of the whole table and approximate is good enough for a figure that
@@ -607,45 +597,6 @@ func (ch *CHClient) FetchNewDashboard(
 		return rows.Err()
 	})
 
-	// What is in flight right now. Also outside the selected window, and kept
-	// separate from Recent: the install log answers "what happened", this
-	// answers "what is happening".
-	add("live runs", func(ctx context.Context) error {
-		lr, err := ch.db.QueryContext(ctx, `
-		SELECT app, kind, final_status, plat, os, slug,
-		       formatDateTime(last_seen, '%Y-%m-%d %H:%i'),
-		       toUInt32(dateDiff('second', last_seen, now()))
-		FROM (
-			SELECT if(execution_id = '', random_id, execution_id) AS run,
-			       argMax(status, created)  AS final_status,
-			       max(created)             AS last_seen,
-			       any(nsapp)               AS app,
-			       any(type)                AS kind,
-			       any(`+platformExpr+`)    AS plat,
-			       if(any(os_type) = '', 'unknown',
-			          concat(any(os_type), ' ', any(os_version))) AS os,
-			       any(repo_slug)           AS slug
-			FROM telemetry_db.telemetry
-			WHERE created >= now() - INTERVAL 2 HOUR
-			GROUP BY run
-		)
-		WHERE final_status NOT IN ('success','failed','aborted')
-		ORDER BY last_seen DESC
-		LIMIT 40`)
-		if err != nil {
-			return err
-		}
-		defer lr.Close()
-		for lr.Next() {
-			var r NewRecentRun
-			if lr.Scan(&r.App, &r.Type, &r.Status, &r.Platform, &r.OS,
-				&r.Repo, &r.LastSeen, &r.Duration) == nil {
-				d.LiveNow = append(d.LiveNow, r)
-			}
-		}
-		return lr.Err()
-	})
-
 	runSections(ctx, dashSectionLimit, sections, warn)
 
 	// Arrival order is arbitrary once the sections race; sorting keeps two
@@ -685,4 +636,124 @@ func runSections(ctx context.Context, limit int, sections []dashSection,
 		}()
 	}
 	wg.Wait()
+}
+
+// liveSections are the two panels that ignore the period selector on purpose:
+// how much is in flight right now, and which runs those are.
+//
+// Both are bounded to the last day or two by their own WHERE clause, so they
+// cost a fraction of the windowed sections, which aggregate over as much as a
+// year. That difference is the whole reason they are separated out.
+func (ch *CHClient) liveSections(d *NewDashData) []dashSection {
+	return []dashSection{
+		{name: "live", run: func(ctx context.Context) error {
+			return ch.db.QueryRowContext(ctx, `
+		SELECT
+			uniqExactIf(run, last_seen >= now() - INTERVAL 20 MINUTE
+			                 AND final_status NOT IN ('success','failed','aborted')),
+			uniqExactIf(run, last_seen >= now() - INTERVAL 1 HOUR),
+			uniqExactIf(run, last_seen >= now() - INTERVAL 24 HOUR)
+		FROM (
+			SELECT if(execution_id = '', random_id, execution_id) AS run,
+			       argMax(status, created) AS final_status,
+			       max(created)            AS last_seen
+			FROM telemetry_db.telemetry
+			WHERE created >= now() - INTERVAL 24 HOUR
+			GROUP BY run
+		)`).Scan(&d.LiveInFlight, &d.LiveLastHour, &d.LiveLast24h)
+		}},
+
+		// Kept separate from Recent: the install log answers "what happened",
+		// this answers "what is happening".
+		{name: "live runs", run: func(ctx context.Context) error {
+			lr, err := ch.db.QueryContext(ctx, `
+		SELECT app, kind, final_status, plat, os, slug,
+		       formatDateTime(last_seen, '%Y-%m-%d %H:%i'),
+		       toUInt32(dateDiff('second', last_seen, now()))
+		FROM (
+			SELECT if(execution_id = '', random_id, execution_id) AS run,
+			       argMax(status, created)  AS final_status,
+			       max(created)             AS last_seen,
+			       any(nsapp)               AS app,
+			       any(type)                AS kind,
+			       any(`+platformExpr+`)    AS plat,
+			       if(any(os_type) = '', 'unknown',
+			          concat(any(os_type), ' ', any(os_version))) AS os,
+			       any(repo_slug)           AS slug
+			FROM telemetry_db.telemetry
+			WHERE created >= now() - INTERVAL 2 HOUR
+			GROUP BY run
+		)
+		WHERE final_status NOT IN ('success','failed','aborted')
+		ORDER BY last_seen DESC
+		LIMIT 40`)
+			if err != nil {
+				return err
+			}
+			defer lr.Close()
+			for lr.Next() {
+				var r NewRecentRun
+				if lr.Scan(&r.App, &r.Type, &r.Status, &r.Platform, &r.OS,
+					&r.Repo, &r.LastSeen, &r.Duration) == nil {
+					d.LiveNow = append(d.LiveNow, r)
+				}
+			}
+			return lr.Err()
+		}},
+	}
+}
+
+// RefreshLive re-runs only the live panels over an already-built page.
+//
+// The response is worth caching because of its windowed sections: thirty
+// aggregations over up to a year of rows, which is what made this page slow.
+// The live panels are the opposite -- two bounded queries answering "what is
+// happening now", a question that must not be answered out of a cache keyed on
+// a period selector it deliberately ignores.
+//
+// So a cache hit serves the stored page and runs these two over the top of it.
+// The expensive part is paid once per TTL; the live part is never stale.
+func (ch *CHClient) RefreshLive(ctx context.Context, d *NewDashData) {
+	// Cleared before the queries rather than after them. If one fails, the
+	// panel must come back empty next to a warning saying so -- serving the
+	// stored page's rows would present the previous load as the current state,
+	// which is the one thing this panel exists not to do.
+	d.LiveNow = nil
+	d.LiveInFlight, d.LiveLastHour, d.LiveLast24h = 0, 0, 0
+
+	// The stored page also carries that load's warnings. Dropping the live ones
+	// stops a complaint outliving the failure that caused it.
+	d.Warnings = dropWarnings(d.Warnings, "live", "live runs")
+
+	var mu sync.Mutex
+	warn := func(section string, err error) {
+		if err == nil {
+			return
+		}
+		mu.Lock()
+		d.Warnings = append(d.Warnings, fmt.Sprintf("%s: %v", section, err))
+		mu.Unlock()
+	}
+
+	runSections(ctx, dashSectionLimit, ch.liveSections(d), warn)
+	sort.Strings(d.Warnings)
+}
+
+// dropWarnings removes the entries belonging to the named sections, matching
+// the "section: message" shape that warn writes.
+func dropWarnings(warnings []string, sections ...string) []string {
+	out := warnings[:0:0]
+	for _, w := range warnings {
+		keep := true
+		for _, s := range sections {
+			if strings.HasPrefix(w, s+": ") {
+				keep = false
+				break
+			}
+		}
+		if keep {
+			out = append(out, w)
+		}
+	}
+	return out
 }
